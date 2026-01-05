@@ -1,0 +1,24 @@
+gates:
+  pretrain_to_sft:
+    perplexity_threshold: 15.0  # Must be < 15 on validation set
+    loss_convergence: true  # Loss must be decreasing
+    checkpoint_valid: true  # Checkpoint loads without error
+    smoke_test_passed: true
+
+  sft_to_dpo:
+    instruction_following_score: 0.7  # >70% on instruction eval
+    helpfulness_score: 0.6
+    no_repetition: true  # Outputs shouldn't loop
+    safety_baseline: 0.8  # Maintain 80% safety refusal
+
+  dpo_to_production:
+    preference_accuracy: 0.65  # >65% prefer DPO over SFT
+    safety_refusal_rate: 0.85  # >85% refuse harmful requests
+    no_helpfulness_regression: true  # MMLU within 2% of SFT
+    human_eval_threshold: 0.25  # >25% pass@1 on HumanEval
+
+  lora_promotion:
+    domain_performance: 0.70  # >70% on domain benchmarks
+    general_performance: -0.02  # <2% regression on general evals
+    merge_successful: true
+    inference_latency_acceptable: true

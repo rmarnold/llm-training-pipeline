@@ -1,0 +1,59 @@
+datasets:
+  pretraining:
+    - name: "wikipedia-en"
+      source: "wikimedia/wikipedia"
+      version: "20231101.en"
+      license: "CC-BY-SA-3.0"
+      tokens: 3.5B
+      weight: 0.30
+
+    - name: "openwebtext"
+      source: "Skylion007/openwebtext"
+      license: "CC0"
+      tokens: 8B
+      weight: 0.55
+
+    - name: "wikitext"
+      source: "wikitext"
+      version: "wikitext-103-v1"
+      license: "CC-BY-SA-3.0"
+      tokens: 0.5B
+      weight: 0.15
+
+  instruction_tuning:
+    - name: "oasst1"
+      source: "OpenAssistant/oasst1"
+      license: "Apache-2.0"
+      samples: 88K
+      weight: 0.40
+
+    - name: "dolly-15k"
+      source: "databricks/databricks-dolly-15k"
+      license: "CC-BY-SA-3.0"
+      samples: 15K
+      weight: 0.30
+
+    - name: "alpaca-cleaned"
+      source: "yahma/alpaca-cleaned"
+      license: "CC-BY-NC-4.0"
+      samples: 52K
+      weight: 0.30
+
+  preference_data:
+    - name: "hh-rlhf"
+      source: "Anthropic/hh-rlhf"
+      license: "MIT"
+      samples: 169K
+      weight: 0.60
+
+    - name: "ultrafeedback"
+      source: "openbmb/UltraFeedback"
+      license: "MIT"
+      samples: 64K
+      weight: 0.40
+
+governance:
+  pii_detection: true
+  toxicity_threshold: 0.7
+  deduplication: "minhash"
+  contamination_check: ["MMLU", "HumanEval", "TruthfulQA"]
