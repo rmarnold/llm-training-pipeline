@@ -39,6 +39,21 @@ bash scripts/run_full_pipeline.sh
 bash START_PRODUCTION_TRAINING.sh
 ```
 
+### Interactive Notebook
+
+For an interactive experience, use the companion Colab notebook:
+
+```
+notebooks/training_pipeline.ipynb
+```
+
+The notebook provides:
+- Step-by-step execution of all training stages
+- Configurable parameters (FP8, batch size, steps)
+- Pre-flight validation before each stage
+- GPU monitoring and checkpoint management
+- Model inference and generation testing
+
 ### Run Individual Stages
 
 ```bash
