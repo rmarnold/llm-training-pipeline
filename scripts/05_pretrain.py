@@ -24,36 +24,158 @@ from transformers import TrainerCallback
 class CurriculumCallback(TrainerCallback):
     """Callback for curriculum learning - gradually increases sequence length.
 
-    This callback monitors training steps and logs when curriculum stages change.
-    The actual sequence length changes are handled by the data loading pipeline,
-    which should load different datasets for each curriculum stage.
+    This callback monitors training steps and triggers checkpoint saves at
+    curriculum stage boundaries. When a stage boundary is reached, training
+    stops so data can be reloaded with the new sequence length.
 
-    For true curriculum learning, ensure your data is prepared with different
-    sequence lengths in separate directories (e.g., data/packed/train_512,
-    data/packed/train_1024, data/packed/train_2048).
+    For curriculum learning to work:
+    1. Prepare data at different sequence lengths:
+       - data/packed/train_512/
+       - data/packed/train_1024/
+       - data/packed/train_2048/
+    2. Set curriculum.data_pattern in config to use placeholders:
+       - data_pattern: "data/packed/train_{seq_length}"
+    3. Use --curriculum-stage to resume at specific stages
+
+    The callback saves curriculum state to allow seamless resumption.
     """
 
-    def __init__(self, curriculum_config):
+    def __init__(self, curriculum_config, output_dir="checkpoints/pretrain"):
         self.schedule = curriculum_config.get('schedule', [])
+        self.data_pattern = curriculum_config.get('data_pattern', "data/packed/train_{seq_length}")
+        self.auto_stop = curriculum_config.get('auto_stop_at_boundary', True)
+        self.output_dir = output_dir
         self.current_idx = 0
-        self.current_seq_length = self.schedule[0]['seq_length'] if self.schedule else 2048
+        self.stage_changed = False
+
+        # Determine current stage based on schedule
+        if self.schedule:
+            self.current_seq_length = self.schedule[0]['seq_length']
+        else:
+            self.current_seq_length = 2048
+
+    def get_current_stage(self, global_step):
+        """Get the curriculum stage for a given step."""
+        for i, stage in enumerate(self.schedule):
+            if global_step < stage['steps']:
+                return i, stage['seq_length']
+        # Past all stages, use the last one
+        if self.schedule:
+            return len(self.schedule) - 1, self.schedule[-1]['seq_length']
+        return 0, 2048
+
+    def get_data_path(self, seq_length):
+        """Get data path for a given sequence length."""
+        return self.data_pattern.format(seq_length=seq_length)
 
     def on_step_begin(self, args, state, control, **kwargs):
-        if self.current_idx < len(self.schedule):
-            stage = self.schedule[self.current_idx]
-            if state.global_step >= stage['steps']:
-                self.current_seq_length = stage['seq_length']
-                print(f"\n📚 Curriculum: Stage {self.current_idx + 1}/{len(self.schedule)}")
-                print(f"   Context length increased to {stage['seq_length']} tokens")
-                print(f"   (Note: Requires data reload for actual sequence length change)")
-                self.current_idx += 1
+        if not self.schedule:
+            return
+
+        new_idx, new_seq_length = self.get_current_stage(state.global_step)
+
+        if new_idx > self.current_idx:
+            self.current_idx = new_idx
+            self.current_seq_length = new_seq_length
+            self.stage_changed = True
+
+            print(f"\n{'='*60}")
+            print(f"CURRICULUM STAGE BOUNDARY REACHED")
+            print(f"{'='*60}")
+            print(f"Stage {self.current_idx + 1}/{len(self.schedule)}")
+            print(f"New sequence length: {new_seq_length} tokens")
+            print(f"Step: {state.global_step}")
+
+            if self.auto_stop:
+                # Save curriculum state
+                self._save_curriculum_state(state.global_step)
+                print(f"\nSaving checkpoint and stopping for data reload...")
+                print(f"Resume with: python scripts/05_pretrain.py --resume_from_checkpoint {args.output_dir}")
+                control.should_save = True
+                control.should_training_stop = True
 
     def on_train_begin(self, args, state, control, **kwargs):
         if self.schedule:
-            print(f"\n📚 Curriculum Learning Enabled:")
-            print(f"   Stages: {len(self.schedule)}")
+            # Determine starting stage based on resumed step
+            start_idx, start_seq = self.get_current_stage(state.global_step)
+            self.current_idx = start_idx
+            self.current_seq_length = start_seq
+
+            print(f"\n{'='*60}")
+            print(f"CURRICULUM LEARNING")
+            print(f"{'='*60}")
+            print(f"Current stage: {self.current_idx + 1}/{len(self.schedule)}")
+            print(f"Current sequence length: {self.current_seq_length}")
+            print(f"Data pattern: {self.data_pattern}")
+            print(f"\nSchedule:")
             for i, stage in enumerate(self.schedule):
-                print(f"   - Stage {i+1}: {stage['seq_length']} tokens @ step {stage['steps']}")
+                marker = ">>>" if i == self.current_idx else "   "
+                print(f"{marker} Stage {i+1}: {stage['seq_length']} tokens @ step {stage['steps']}")
+
+    def _save_curriculum_state(self, global_step):
+        """Save curriculum state for resumption."""
+        import json
+        state_path = os.path.join(self.output_dir, "curriculum_state.json")
+        os.makedirs(self.output_dir, exist_ok=True)
+        with open(state_path, "w") as f:
+            json.dump({
+                "current_stage": self.current_idx,
+                "current_seq_length": self.current_seq_length,
+                "global_step": global_step,
+                "schedule": self.schedule
+            }, f, indent=2)
+
+
+def get_curriculum_data_path(config, global_step=0, cli_overrides=None):
+    """Get the appropriate data path based on curriculum stage.
+
+    Args:
+        config: Training config dict
+        global_step: Current training step (for resumption)
+        cli_overrides: Optional CLI overrides dict
+
+    Returns:
+        Tuple of (train_path, val_path)
+    """
+    cli_overrides = cli_overrides or {}
+
+    # CLI overrides take precedence
+    if cli_overrides.get('train_data_path') and cli_overrides.get('eval_data_path'):
+        return cli_overrides['train_data_path'], cli_overrides['eval_data_path']
+
+    curriculum = config.get('curriculum', {})
+    if not curriculum.get('enabled', False):
+        # No curriculum - use default paths (with CLI override support)
+        train_path = cli_overrides.get('train_data_path') or config['data'].get('train_path', "data/packed/train")
+        val_path = cli_overrides.get('eval_data_path') or config['data'].get('val_path', "data/packed/val")
+        return train_path, val_path
+
+    schedule = curriculum.get('schedule', [])
+    data_pattern = curriculum.get('data_pattern', "data/packed/train_{seq_length}")
+    val_pattern = curriculum.get('val_pattern', "data/packed/val_{seq_length}")
+
+    # Find current stage
+    seq_length = 2048  # default
+    for stage in schedule:
+        if global_step < stage['steps']:
+            seq_length = stage['seq_length']
+            break
+    else:
+        # Past all stages
+        if schedule:
+            seq_length = schedule[-1]['seq_length']
+
+    train_path = data_pattern.format(seq_length=seq_length)
+    val_path = val_pattern.format(seq_length=seq_length)
+
+    # Fallback to default if curriculum paths don't exist
+    if not os.path.exists(train_path):
+        print(f"Warning: Curriculum data not found at {train_path}")
+        print(f"Falling back to default data path")
+        train_path = config['data'].get('train_path', "data/packed/train")
+        val_path = config['data'].get('val_path', "data/packed/val")
+
+    return train_path, val_path
 
 def setup_training(use_fp8=None, config_path="configs/pretrain.yaml", cli_overrides=None):
     """Setup training with automatic GPU optimization.
@@ -165,9 +287,18 @@ def setup_training(use_fp8=None, config_path="configs/pretrain.yaml", cli_overri
         dataloader_persistent_workers=config['data'].get('persistent_workers', True),
     )
 
-    # Load dataset (use config paths with fallback to defaults)
-    train_data_path = config['data'].get('train_path', "data/packed/train")
-    eval_data_path = config['data'].get('val_path', "data/packed/val")
+    # Load dataset (curriculum-aware paths)
+    # Get starting step for curriculum stage detection
+    resume_step = 0
+    resume_checkpoint = cli_overrides.get('resume_from_checkpoint')
+    if resume_checkpoint:
+        # Try to get step from checkpoint path (e.g., checkpoint-5000)
+        import re
+        match = re.search(r'checkpoint-(\d+)', str(resume_checkpoint))
+        if match:
+            resume_step = int(match.group(1))
+
+    train_data_path, eval_data_path = get_curriculum_data_path(config, resume_step, cli_overrides)
 
     if not os.path.exists(train_data_path):
         print(f"Error: Training data not found at {train_data_path}")
@@ -176,12 +307,18 @@ def setup_training(use_fp8=None, config_path="configs/pretrain.yaml", cli_overri
         print("  python scripts/02_clean_deduplicate_optimized.py")
         print("  python scripts/03_tokenize_and_pack.py")
         print("\nOr for demo: python scripts/setup_demo.py")
+        if config.get('curriculum', {}).get('enabled'):
+            print(f"\nFor curriculum learning, prepare data at different sequence lengths:")
+            print(f"  data/packed/train_512/")
+            print(f"  data/packed/train_1024/")
+            print(f"  data/packed/train_2048/")
         sys.exit(1)
 
     if not os.path.exists(eval_data_path):
         print(f"Error: Validation data not found at {eval_data_path}")
         sys.exit(1)
 
+    print(f"\nLoading data from: {train_data_path}")
     train_dataset = load_from_disk(train_data_path)
     eval_dataset = load_from_disk(eval_data_path)
 
@@ -201,8 +338,9 @@ def setup_training(use_fp8=None, config_path="configs/pretrain.yaml", cli_overri
     )
 
     # Add curriculum callback
-    if config['curriculum']['enabled']:
-        trainer.add_callback(CurriculumCallback(config['curriculum']))
+    if config.get('curriculum', {}).get('enabled', False):
+        output_dir = cli_overrides.get('output_dir', config['checkpointing']['output_dir'])
+        trainer.add_callback(CurriculumCallback(config['curriculum'], output_dir=output_dir))
 
     return trainer, gpu_info
 
@@ -342,6 +480,8 @@ def main():
     parser.add_argument("--output_dir", type=str, help="Override output directory")
     parser.add_argument("--resume_from_checkpoint", type=str, help="Path to checkpoint to resume from")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--train_data_path", type=str, help="Override training data path")
+    parser.add_argument("--eval_data_path", type=str, help="Override evaluation data path")
     args = parser.parse_args()
 
     # Set random seed
@@ -378,6 +518,10 @@ def main():
         cli_overrides['output_dir'] = args.output_dir
     if args.resume_from_checkpoint is not None:
         cli_overrides['resume_from_checkpoint'] = args.resume_from_checkpoint
+    if args.train_data_path is not None:
+        cli_overrides['train_data_path'] = args.train_data_path
+    if args.eval_data_path is not None:
+        cli_overrides['eval_data_path'] = args.eval_data_path
 
     # Setup and detect GPU
     gpu_info = detect_gpu_type()

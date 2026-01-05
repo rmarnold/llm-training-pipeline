@@ -4,13 +4,90 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 import json
 import os
+import signal
+import functools
+from contextlib import contextmanager
 
 # Create evals directory if it doesn't exist
 os.makedirs("evals", exist_ok=True)
 
 
+class TimeoutError(Exception):
+    """Custom timeout error."""
+    pass
+
+
+@contextmanager
+def timeout(seconds, error_message="Operation timed out"):
+    """Context manager for timing out operations.
+
+    Args:
+        seconds: Maximum seconds to allow
+        error_message: Error message if timeout occurs
+
+    Usage:
+        with timeout(60, "Evaluation timed out"):
+            # long running operation
+    """
+    def timeout_handler(signum, frame):
+        raise TimeoutError(error_message)
+
+    # Only use signal-based timeout on Unix systems
+    if hasattr(signal, 'SIGALRM'):
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
+        # Windows fallback - no timeout (would need threading)
+        yield
+
+
+def with_timeout(seconds, default=None):
+    """Decorator to add timeout to a function.
+
+    Args:
+        seconds: Maximum seconds to allow
+        default: Value to return on timeout
+
+    Usage:
+        @with_timeout(300, default=None)
+        def long_running_eval():
+            ...
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                with timeout(seconds, f"{func.__name__} timed out after {seconds}s"):
+                    return func(*args, **kwargs)
+            except TimeoutError as e:
+                print(f"  Warning: {e}")
+                return default
+        return wrapper
+    return decorator
+
+
 class EvaluationSuite:
-    def __init__(self, model_path, tokenizer_path):
+    # Default timeouts for each evaluation (in seconds)
+    DEFAULT_TIMEOUTS = {
+        "perplexity": 600,      # 10 minutes
+        "humaneval": 3600,      # 60 minutes (many problems)
+        "mmlu": 1800,           # 30 minutes
+        "safety": 300,          # 5 minutes
+    }
+
+    def __init__(self, model_path, tokenizer_path, timeouts=None):
+        """Initialize evaluation suite.
+
+        Args:
+            model_path: Path to model checkpoint
+            tokenizer_path: Path to tokenizer
+            timeouts: Optional dict of timeouts per evaluation type
+        """
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
@@ -18,6 +95,7 @@ class EvaluationSuite:
         )
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         self.model.eval()
+        self.timeouts = {**self.DEFAULT_TIMEOUTS, **(timeouts or {})}
 
     def eval_perplexity(self, dataset_name="wikitext", split="test"):
         """Evaluate perplexity on held-out data"""
@@ -160,45 +238,80 @@ class EvaluationSuite:
         refusal_rate = refusal_count / total
         return refusal_rate
 
-    def run_full_suite(self):
-        """Run all evaluations."""
+    def _run_with_timeout(self, name, func, *args, **kwargs):
+        """Run an evaluation function with timeout.
+
+        Args:
+            name: Name of evaluation (for timeout lookup)
+            func: Function to run
+            *args, **kwargs: Arguments to pass to function
+
+        Returns:
+            Result of function or None if timed out/errored
+        """
+        timeout_secs = self.timeouts.get(name, 600)
+        try:
+            with timeout(timeout_secs, f"{name} timed out after {timeout_secs}s"):
+                return func(*args, **kwargs)
+        except TimeoutError as e:
+            print(f"  Warning: {e}")
+            return None
+        except Exception as e:
+            print(f"  Error: {e}")
+            return None
+
+    def run_full_suite(self, skip_humaneval=False, skip_mmlu=False):
+        """Run all evaluations.
+
+        Args:
+            skip_humaneval: Skip HumanEval benchmark (slow)
+            skip_mmlu: Skip MMLU benchmark (slow)
+        """
         print("=" * 60)
         print("RUNNING EVALUATION SUITE")
         print("=" * 60)
+        print(f"\nTimeouts: {self.timeouts}")
 
         results = {}
 
         print("\n[1/4] Perplexity...")
-        try:
-            results["perplexity"] = self.eval_perplexity()
-            print(f"  Perplexity: {results['perplexity']:.2f}")
-        except Exception as e:
-            print(f"  Error: {e}")
+        result = self._run_with_timeout("perplexity", self.eval_perplexity)
+        if result is not None:
+            results["perplexity"] = result
+            print(f"  Perplexity: {result:.2f}")
+        else:
             results["perplexity"] = None
 
         print("\n[2/4] HumanEval...")
-        humaneval_result = self.eval_humaneval()
-        if humaneval_result is not None:
-            results["humaneval_pass@1"] = humaneval_result
-            print(f"  Pass@1: {results['humaneval_pass@1']:.1%}")
-        else:
+        if skip_humaneval:
+            print("  Skipped (--skip-humaneval)")
             results["humaneval_pass@1"] = None
-            print("  Skipped (human_eval not installed)")
+        else:
+            result = self._run_with_timeout("humaneval", self.eval_humaneval)
+            if result is not None:
+                results["humaneval_pass@1"] = result
+                print(f"  Pass@1: {result:.1%}")
+            else:
+                results["humaneval_pass@1"] = None
 
         print("\n[3/4] MMLU...")
-        try:
-            results["mmlu_accuracy"] = self.eval_mmlu()
-            print(f"  Accuracy: {results['mmlu_accuracy']:.1%}")
-        except Exception as e:
-            print(f"  Error: {e}")
+        if skip_mmlu:
+            print("  Skipped (--skip-mmlu)")
             results["mmlu_accuracy"] = None
+        else:
+            result = self._run_with_timeout("mmlu", self.eval_mmlu)
+            if result is not None:
+                results["mmlu_accuracy"] = result
+                print(f"  Accuracy: {result:.1%}")
+            else:
+                results["mmlu_accuracy"] = None
 
         print("\n[4/4] Safety...")
-        try:
-            results["safety_refusal_rate"] = self.eval_safety()
-            print(f"  Refusal rate: {results['safety_refusal_rate']:.1%}")
-        except Exception as e:
-            print(f"  Error: {e}")
+        result = self._run_with_timeout("safety", self.eval_safety)
+        if result is not None:
+            results["safety_refusal_rate"] = result
+            print(f"  Refusal rate: {result:.1%}")
+        else:
             results["safety_refusal_rate"] = None
 
         # Filter out None values for JSON serialization
@@ -210,13 +323,44 @@ class EvaluationSuite:
 
         print("\n" + "=" * 60)
         print("Evaluation complete! Results saved to evals/results.json")
+        if len(results_clean) < 4:
+            skipped = [k for k, v in results.items() if v is None]
+            print(f"Note: Some evaluations were skipped or timed out: {skipped}")
         print("=" * 60)
 
         return results
 
 if __name__ == "__main__":
-    import sys
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "checkpoints/dpo_final"
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate trained LLM model")
+    parser.add_argument("model_path", nargs="?", default="checkpoints/dpo_final",
+                        help="Path to model checkpoint")
+    parser.add_argument("--tokenizer", type=str, default="configs/tokenizer",
+                        help="Path to tokenizer")
+    parser.add_argument("--skip-humaneval", action="store_true",
+                        help="Skip HumanEval benchmark")
+    parser.add_argument("--skip-mmlu", action="store_true",
+                        help="Skip MMLU benchmark")
+    parser.add_argument("--timeout-perplexity", type=int, default=600,
+                        help="Timeout for perplexity eval (seconds)")
+    parser.add_argument("--timeout-humaneval", type=int, default=3600,
+                        help="Timeout for HumanEval eval (seconds)")
+    parser.add_argument("--timeout-mmlu", type=int, default=1800,
+                        help="Timeout for MMLU eval (seconds)")
+    parser.add_argument("--timeout-safety", type=int, default=300,
+                        help="Timeout for safety eval (seconds)")
+    args = parser.parse_args()
 
-    evaluator = EvaluationSuite(model_path, "configs/tokenizer")
-    evaluator.run_full_suite()
+    # Build timeouts dict
+    timeouts = {
+        "perplexity": args.timeout_perplexity,
+        "humaneval": args.timeout_humaneval,
+        "mmlu": args.timeout_mmlu,
+        "safety": args.timeout_safety,
+    }
+
+    evaluator = EvaluationSuite(args.model_path, args.tokenizer, timeouts=timeouts)
+    evaluator.run_full_suite(
+        skip_humaneval=args.skip_humaneval,
+        skip_mmlu=args.skip_mmlu
+    )

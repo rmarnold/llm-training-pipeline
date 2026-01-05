@@ -61,11 +61,28 @@ python scripts/11_evaluate.py checkpoints/dpo_final
 python scripts/12_check_gates.py dpo
 ```
 
+## Script Guide
+
+| Task | Script | Notes |
+|------|--------|-------|
+| **Production Pretraining** | `scripts/05_pretrain.py` | Full featured, CLI args, curriculum |
+| **Demo Pretraining** | `scripts/demo_pretrain.py` | CPU-compatible, tiny model |
+| **SFT Training** | `scripts/07_sft.py` | Instruction fine-tuning |
+| **DPO Training** | `scripts/09_dpo.py` | Preference optimization |
+| **LoRA Fine-tuning** | `scripts/10_lora_finetune.py` | Domain adaptation |
+| **Evaluation** | `scripts/11_evaluate.py` | Full eval suite with timeouts |
+| **Pre-flight Check** | `scripts/preflight_check.py` | Validate prerequisites |
+
+**Deprecated scripts** (kept for backwards compatibility):
+- `production_pretrain.py` → use `05_pretrain.py --fp8`
+- `full_model_pretrain.py` → use `05_pretrain.py` or `demo_pretrain.py`
+
 ## Training Stages
 
 ### 1. Pretraining
 - Trains on large text corpora
 - Uses curriculum learning (512 → 1024 → 2048 tokens)
+- Auto-stops at curriculum boundaries for data reload
 - Supports FSDP for multi-GPU
 
 ### 2. Supervised Fine-Tuning (SFT)

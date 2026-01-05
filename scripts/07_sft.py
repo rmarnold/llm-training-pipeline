@@ -60,9 +60,9 @@ def train_sft(use_fp8=None, config_path="configs/sft.yaml", cli_overrides=None):
     print(f"Compiling model with torch.compile (mode={compile_mode})...")
     model = torch.compile(model, mode=compile_mode)
 
-    # Validate data paths
-    train_data_path = config['data']['train_data']
-    eval_data_path = config['data']['val_data']
+    # Validate data paths (CLI overrides take precedence)
+    train_data_path = cli_overrides.get('train_data_path') or config['data']['train_data']
+    eval_data_path = cli_overrides.get('eval_data_path') or config['data']['val_data']
 
     if not os.path.exists(train_data_path):
         print(f"Error: SFT training data not found at {train_data_path}")
@@ -148,6 +148,8 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, help="Override output directory")
     parser.add_argument("--resume_from_checkpoint", type=str, help="Path to checkpoint to resume from")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--train_data_path", type=str, help="Override training data path")
+    parser.add_argument("--eval_data_path", type=str, help="Override evaluation data path")
     args = parser.parse_args()
 
     # Set random seed
@@ -183,5 +185,9 @@ if __name__ == "__main__":
         cli_overrides['output_dir'] = args.output_dir
     if args.resume_from_checkpoint is not None:
         cli_overrides['resume_from_checkpoint'] = args.resume_from_checkpoint
+    if args.train_data_path is not None:
+        cli_overrides['train_data_path'] = args.train_data_path
+    if args.eval_data_path is not None:
+        cli_overrides['eval_data_path'] = args.eval_data_path
 
     train_sft(use_fp8=use_fp8, config_path=args.config, cli_overrides=cli_overrides)

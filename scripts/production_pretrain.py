@@ -1,4 +1,16 @@
-"""Production 7B model training - Optimized for A100/H100 with FP8 support"""
+"""Production 7B model training - Optimized for A100/H100 with FP8 support
+
+DEPRECATED: This script is kept for backwards compatibility.
+Please use scripts/05_pretrain.py instead, which has:
+- Full CLI argument support
+- Curriculum learning
+- Better validation and error handling
+- Configurable data paths
+
+Usage (recommended):
+    python scripts/05_pretrain.py --fp8
+    python scripts/05_pretrain.py --config configs/pretrain.yaml
+"""
 import torch
 import os
 from transformers import (
@@ -364,7 +376,18 @@ def production_training(max_steps=100000, use_fp8=None):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Production 7B model training")
+    import warnings
+    warnings.warn(
+        "production_pretrain.py is deprecated. Use 05_pretrain.py instead:\n"
+        "  python scripts/05_pretrain.py --fp8",
+        DeprecationWarning
+    )
+    print("\n" + "="*60)
+    print("WARNING: This script is deprecated.")
+    print("Please use: python scripts/05_pretrain.py --fp8")
+    print("="*60 + "\n")
+
+    parser = argparse.ArgumentParser(description="Production 7B model training (DEPRECATED)")
     parser.add_argument("--max-steps", type=int, default=100000, help="Maximum training steps")
     parser.add_argument("--fp8", action="store_true", help="Force FP8 precision (H100 only)")
     parser.add_argument("--no-fp8", action="store_true", help="Disable FP8, use BF16")

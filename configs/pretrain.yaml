@@ -68,8 +68,15 @@ checkpointing:
   load_best_model_at_end: false
 
 # Context length curriculum
+# When enabled, training will automatically stop at curriculum boundaries
+# to reload data with the appropriate sequence length.
 curriculum:
   enabled: true
+  # Data paths with {seq_length} placeholder
+  data_pattern: "data/packed/train_{seq_length}"
+  val_pattern: "data/packed/val_{seq_length}"
+  # Auto-stop at stage boundaries for data reload (recommended)
+  auto_stop_at_boundary: true
   schedule:
     - {steps: 40000, seq_length: 512}
     - {steps: 70000, seq_length: 1024}

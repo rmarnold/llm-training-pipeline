@@ -1,4 +1,9 @@
-"""7B model pretraining with demo data - to verify GPU utilization"""
+"""7B model pretraining with demo data - to verify GPU utilization
+
+DEPRECATED: This script is kept for backwards compatibility.
+For demo training, use: python scripts/demo_pretrain.py
+For production training, use: python scripts/05_pretrain.py
+"""
 import torch
 from transformers import (
     Trainer,
@@ -143,4 +148,15 @@ def full_model_pretrain(max_steps=100):
     return trainer
 
 if __name__ == "__main__":
+    import warnings
+    warnings.warn(
+        "full_model_pretrain.py is deprecated. Use 05_pretrain.py or demo_pretrain.py instead.",
+        DeprecationWarning
+    )
+    print("\n" + "="*60)
+    print("WARNING: This script is deprecated.")
+    print("For demo: python scripts/demo_pretrain.py")
+    print("For production: python scripts/05_pretrain.py")
+    print("="*60 + "\n")
+
     full_model_pretrain(max_steps=100)
