@@ -48,19 +48,18 @@ def parallel_clean_texts(texts: list[str], n_workers: int = None) -> list[str]:
         # Fall back to sequential for small datasets
         return [_clean_text_worker(t) for t in tqdm(texts, desc="    Cleaning text")]
 
-    # Optimal chunk size: balance IPC overhead vs worker utilization
-    # Larger chunks = fewer IPC calls = less overhead
-    # Target: ~100 chunks total for good progress bar granularity
-    chunk_size = max(1000, n_texts // (n_workers * 8))
+    # Chunk size: small enough for progress updates, large enough to reduce IPC
+    # 1000-5000 is sweet spot for text processing
+    chunk_size = 2000
 
     print(f"    Using {n_workers} CPU workers (chunk_size={chunk_size:,})...")
 
-    # Use imap_unordered for better throughput (order doesn't matter for cleaning)
-    # Pre-allocate results list and fill by index to maintain order
+    # Pre-allocate results list
     results = [''] * n_texts
 
     with Pool(processes=n_workers) as pool:
-        indexed_texts = list(enumerate(texts))
+        # Use generator instead of list to avoid memory spike
+        indexed_texts = ((i, texts[i]) for i in range(n_texts))
 
         for idx, cleaned in tqdm(
             pool.imap_unordered(_indexed_clean_worker, indexed_texts, chunksize=chunk_size),
