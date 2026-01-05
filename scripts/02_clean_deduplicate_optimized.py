@@ -5,9 +5,15 @@ from ftfy import fix_text
 from detoxify import Detoxify
 import re
 import torch
-from multiprocessing import Pool, cpu_count
+import multiprocessing as mp
+from multiprocessing import cpu_count
 from tqdm import tqdm
 import numpy as np
+
+# IMPORTANT: Set spawn method for CUDA compatibility
+# Must be called before any CUDA operations
+if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
 
 class DataCleaner:
     def __init__(self, toxicity_threshold=0.7, use_gpu=True, batch_size=32):
@@ -174,12 +180,15 @@ def process_all_files_parallel(input_dir="data/raw", output_dir="data/processed"
     args_list = [(f, input_dir, output_dir) for f in files_to_process]
 
     # Process files in parallel
+    # Note: When using GPU, we use spawn method which is slower to start
+    # but necessary for CUDA compatibility
     if max_workers == 1:
         # Sequential processing (for debugging)
         results = [process_single_file(args) for args in args_list]
     else:
-        # Parallel processing
-        with Pool(processes=max_workers) as pool:
+        # Parallel processing with spawn (CUDA-safe)
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(processes=max_workers) as pool:
             results = pool.map(process_single_file, args_list)
 
     # Summary
@@ -194,26 +203,41 @@ def process_all_files_parallel(input_dir="data/raw", output_dir="data/processed"
     print(f"\nTotal: {total_kept}/{total_original} ({total_kept/total_original*100:.1f}% kept)")
     print(f"{'='*60}\n")
 
-if __name__ == "__main__":
+def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Clean and deduplicate data with GPU acceleration')
     parser.add_argument('--workers', type=int, default=None,
-                       help='Number of parallel workers (default: all CPU cores)')
+                       help='Number of parallel workers (default: 1 for GPU, all cores for CPU)')
     parser.add_argument('--pattern', type=str, default='pretraining_',
                        help='File pattern to match (default: pretraining_)')
+    parser.add_argument('--no-gpu', action='store_true',
+                       help='Disable GPU acceleration')
 
     args = parser.parse_args()
 
-    # Note: For GPU, we process files in parallel but each file uses GPU sequentially
-    # This is optimal since GPU can only handle one toxicity model at a time efficiently
-    workers = args.workers if args.workers else min(3, cpu_count())  # Limit to 3 for GPU memory
+    use_gpu = torch.cuda.is_available() and not args.no_gpu
+
+    # For GPU processing, use sequential by default (multiple GPU workers compete for memory)
+    # For CPU processing, use all cores
+    if args.workers is not None:
+        workers = args.workers
+    elif use_gpu:
+        workers = 1  # Sequential for GPU - avoids memory competition
+    else:
+        workers = cpu_count()
 
     print(f"Starting optimized data cleaning with:")
-    print(f"  - GPU acceleration: {torch.cuda.is_available()}")
+    print(f"  - GPU acceleration: {use_gpu}")
     print(f"  - Parallel workers: {workers}")
     print(f"  - Batch processing: Enabled")
     print(f"  - File pattern: {args.pattern}")
+    if use_gpu and workers > 1:
+        print(f"  - Warning: Multiple GPU workers may cause memory issues")
     print()
 
     process_all_files_parallel(max_workers=workers, file_pattern=args.pattern)
+
+
+if __name__ == "__main__":
+    main()
