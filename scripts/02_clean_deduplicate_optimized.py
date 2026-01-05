@@ -14,6 +14,43 @@ from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 from typing import Optional
+from multiprocessing import Pool, cpu_count
+from functools import partial
+
+
+def _clean_text_worker(text: str) -> str:
+    """Worker function for parallel text cleaning."""
+    if pd.isna(text) or text is None:
+        return ""
+    text = fix_text(str(text))
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'\b[\w\.-]+@[\w\.-]+\.\w+\b', '[EMAIL]', text)
+    text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[SSN]', text)
+    text = re.sub(r'\b\d{3}-\d{3}-\d{4}\b', '[PHONE]', text)
+    return text.strip()
+
+
+def parallel_clean_texts(texts: list[str], n_workers: int = None, chunk_size: int = 10000) -> list[str]:
+    """Clean texts in parallel using multiprocessing."""
+    if n_workers is None:
+        n_workers = cpu_count()
+
+    n_workers = min(n_workers, cpu_count())
+
+    if n_workers <= 1 or len(texts) < chunk_size:
+        # Fall back to sequential for small datasets
+        return [_clean_text_worker(t) for t in tqdm(texts, desc="    Cleaning text")]
+
+    print(f"    Using {n_workers} CPU workers for text cleaning...")
+
+    with Pool(processes=n_workers) as pool:
+        results = list(tqdm(
+            pool.imap(_clean_text_worker, texts, chunksize=chunk_size),
+            total=len(texts),
+            desc="    Cleaning text"
+        ))
+
+    return results
 
 
 class DataCleaner:
@@ -170,6 +207,7 @@ def process_single_file(
     use_gpu: bool = True,
     use_cache: bool = True,
     batch_size: int = 128,
+    n_workers: int = None,
 ) -> tuple[str, int, int]:
     """Process a single file with checkpointing support."""
 
@@ -196,7 +234,7 @@ def process_single_file(
         completed_steps = state.get('completed', []) if state else []
         original_count = state.get('original_count', 0) if state else 0
 
-        # Step 1: Load and clean text
+        # Step 1: Load and clean text (PARALLEL - uses all CPU cores)
         if 'clean' in completed_steps and checkpoint:
             print(f"  Loading cached clean data...")
             df = checkpoint.load_checkpoint(filename, 'clean', file_hash)
@@ -205,12 +243,8 @@ def process_single_file(
             original_count = len(df)
             print(f"  Cleaning {original_count} documents...")
 
-            # Vectorized cleaning with progress bar
-            tqdm.pandas(desc="    Cleaning text")
-            df['text'] = df['text'].progress_apply(lambda x: fix_text(str(x)) if pd.notna(x) else "")
-            df['text'] = df['text'].str.replace(r'\s+', ' ', regex=True)
-            df['text'] = df['text'].str.replace(r'\b[\w\.-]+@[\w\.-]+\.\w+\b', '[EMAIL]', regex=True)
-            df['text'] = df['text'].str.strip()
+            # Parallel text cleaning using multiprocessing
+            df['text'] = parallel_clean_texts(df['text'].tolist(), n_workers=n_workers)
 
             if checkpoint:
                 checkpoint.save_checkpoint(df, filename, 'clean', file_hash)
@@ -283,6 +317,7 @@ def process_all_files(
     use_gpu: bool = True,
     use_cache: bool = True,
     batch_size: int = 128,
+    n_workers: int = None,
 ) -> None:
     """Process all matching files sequentially (best for GPU)."""
 
@@ -293,18 +328,23 @@ def process_all_files(
         if f.startswith(file_pattern) and f.endswith('.parquet')
     ])
 
+    if n_workers is None:
+        n_workers = cpu_count()
+
     print(f"\n{'='*60}")
     print(f"Found {len(files_to_process)} files to process")
     print(f"GPU acceleration: {use_gpu and torch.cuda.is_available()}")
     print(f"Caching enabled: {use_cache}")
     print(f"Batch size: {batch_size}")
+    print(f"CPU workers: {n_workers}")
     print(f"{'='*60}\n")
 
     results = []
     for filename in files_to_process:
         result = process_single_file(
             filename, input_dir, output_dir,
-            use_gpu=use_gpu, use_cache=use_cache, batch_size=batch_size
+            use_gpu=use_gpu, use_cache=use_cache, batch_size=batch_size,
+            n_workers=n_workers
         )
         results.append(result)
 
@@ -334,6 +374,8 @@ def main():
                        help='Disable checkpoint caching')
     parser.add_argument('--batch-size', type=int, default=128,
                        help='Batch size for toxicity detection (default: 128)')
+    parser.add_argument('--workers', type=int, default=None,
+                       help='Number of CPU workers for text cleaning (default: all cores)')
     parser.add_argument('--input-dir', type=str, default='data/raw',
                        help='Input directory (default: data/raw)')
     parser.add_argument('--output-dir', type=str, default='data/processed',
@@ -342,11 +384,13 @@ def main():
     args = parser.parse_args()
 
     use_gpu = torch.cuda.is_available() and not args.no_gpu
+    n_workers = args.workers if args.workers else cpu_count()
 
     print(f"Starting optimized data cleaning:")
     print(f"  - GPU acceleration: {use_gpu}")
     print(f"  - Checkpoint caching: {not args.no_cache}")
     print(f"  - Batch size: {args.batch_size}")
+    print(f"  - CPU workers: {n_workers}")
     print(f"  - File pattern: {args.pattern}")
     print()
 
@@ -357,6 +401,7 @@ def main():
         use_gpu=use_gpu,
         use_cache=not args.no_cache,
         batch_size=args.batch_size,
+        n_workers=n_workers,
     )
 
 
