@@ -3,9 +3,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTTrainer, SFTConfig
 from datasets import load_from_disk
 import yaml
+import os
+import sys
 
 # Import GPU utilities
-from gpu_utils import detect_gpu_type, print_gpu_info, setup_torch_backends
+from gpu_utils import (
+    detect_gpu_type, print_gpu_info, setup_torch_backends,
+    check_tokenizer_exists, check_checkpoint_exists
+)
 
 def train_sft(use_fp8=None, config_path="configs/sft.yaml", cli_overrides=None):
     """Train with SFT.
@@ -55,8 +60,22 @@ def train_sft(use_fp8=None, config_path="configs/sft.yaml", cli_overrides=None):
     print(f"Compiling model with torch.compile (mode={compile_mode})...")
     model = torch.compile(model, mode=compile_mode)
 
-    train_dataset = load_from_disk(config['data']['train_data'])
-    eval_dataset = load_from_disk(config['data']['val_data'])
+    # Validate data paths
+    train_data_path = config['data']['train_data']
+    eval_data_path = config['data']['val_data']
+
+    if not os.path.exists(train_data_path):
+        print(f"Error: SFT training data not found at {train_data_path}")
+        print("\nTo prepare SFT data, run:")
+        print("  python scripts/06_prepare_sft_data.py")
+        sys.exit(1)
+
+    if not os.path.exists(eval_data_path):
+        print(f"Error: SFT validation data not found at {eval_data_path}")
+        sys.exit(1)
+
+    train_dataset = load_from_disk(train_data_path)
+    eval_dataset = load_from_disk(eval_data_path)
 
     # Use SFTConfig for packing support (up to 6x speedup)
     training_args = SFTConfig(
@@ -128,7 +147,21 @@ if __name__ == "__main__":
     parser.add_argument("--logging_steps", type=int, help="Override logging frequency")
     parser.add_argument("--output_dir", type=str, help="Override output directory")
     parser.add_argument("--resume_from_checkpoint", type=str, help="Path to checkpoint to resume from")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
+
+    # Set random seed
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    # Validate prerequisites
+    if not check_tokenizer_exists():
+        sys.exit(1)
+    if not check_checkpoint_exists("checkpoints/pretrain_final", "Pretrained model"):
+        print("\nTo create pretrained checkpoint, run:")
+        print("  python scripts/05_pretrain.py")
+        sys.exit(1)
 
     use_fp8 = None
     if args.fp8:

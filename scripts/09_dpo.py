@@ -3,9 +3,14 @@ from trl import DPOTrainer, DPOConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_from_disk
 import yaml
+import os
+import sys
 
 # Import GPU utilities
-from gpu_utils import detect_gpu_type, print_gpu_info, setup_torch_backends
+from gpu_utils import (
+    detect_gpu_type, print_gpu_info, setup_torch_backends,
+    check_tokenizer_exists, check_checkpoint_exists
+)
 
 def train_dpo(use_fp8=None, config_path="configs/dpo.yaml", cli_overrides=None):
     """Train with DPO.
@@ -64,8 +69,22 @@ def train_dpo(use_fp8=None, config_path="configs/dpo.yaml", cli_overrides=None):
     print(f"Compiling model with torch.compile (mode={compile_mode})...")
     model = torch.compile(model, mode=compile_mode)
 
-    train_dataset = load_from_disk("data/dpo/train")
-    eval_dataset = load_from_disk("data/dpo/val")
+    # Validate data paths (use config if available, fallback to defaults)
+    train_data_path = config.get('data', {}).get('train_data', "data/dpo/train")
+    eval_data_path = config.get('data', {}).get('val_data', "data/dpo/val")
+
+    if not os.path.exists(train_data_path):
+        print(f"Error: DPO training data not found at {train_data_path}")
+        print("\nTo prepare DPO data, run:")
+        print("  python scripts/08_prepare_dpo_data.py")
+        sys.exit(1)
+
+    if not os.path.exists(eval_data_path):
+        print(f"Error: DPO validation data not found at {eval_data_path}")
+        sys.exit(1)
+
+    train_dataset = load_from_disk(train_data_path)
+    eval_dataset = load_from_disk(eval_data_path)
 
     training_args = DPOConfig(
         output_dir=cli_overrides.get('output_dir', "checkpoints/dpo"),
@@ -138,7 +157,21 @@ if __name__ == "__main__":
     parser.add_argument("--logging_steps", type=int, help="Override logging frequency")
     parser.add_argument("--output_dir", type=str, help="Override output directory")
     parser.add_argument("--resume_from_checkpoint", type=str, help="Path to checkpoint to resume from")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
+
+    # Set random seed
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    # Validate prerequisites
+    if not check_tokenizer_exists():
+        sys.exit(1)
+    if not check_checkpoint_exists("checkpoints/sft_final", "SFT model"):
+        print("\nTo create SFT checkpoint, run:")
+        print("  python scripts/07_sft.py")
+        sys.exit(1)
 
     use_fp8 = None
     if args.fp8:

@@ -128,15 +128,44 @@ class TestPromotionGates:
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
-        assert 'pretrain' in config
-        assert 'sft' in config
-        assert 'dpo' in config
+        # Config uses 'gates' top-level key with transition names
+        assert 'gates' in config
+        gates = config['gates']
+        assert 'pretrain_to_sft' in gates
+        assert 'sft_to_dpo' in gates
+        assert 'dpo_to_production' in gates
 
     def test_gates_have_thresholds(self):
-        """Test that each stage has metric thresholds."""
+        """Test that each gate has metric thresholds."""
         config_path = os.path.join(CONFIG_DIR, 'promotion_gates.yaml')
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
-        for stage in ['pretrain', 'sft', 'dpo']:
-            assert 'metrics' in config[stage] or len(config[stage]) > 0
+        gates = config['gates']
+
+        # Check pretrain_to_sft gate
+        pretrain_gate = gates['pretrain_to_sft']
+        assert 'perplexity_threshold' in pretrain_gate
+
+        # Check sft_to_dpo gate
+        sft_gate = gates['sft_to_dpo']
+        assert 'instruction_following_score' in sft_gate
+
+        # Check dpo_to_production gate
+        dpo_gate = gates['dpo_to_production']
+        assert 'safety_refusal_rate' in dpo_gate
+
+    def test_gates_thresholds_valid_ranges(self):
+        """Test that gate thresholds are in valid ranges."""
+        config_path = os.path.join(CONFIG_DIR, 'promotion_gates.yaml')
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+
+        gates = config['gates']
+
+        # Perplexity should be positive
+        assert gates['pretrain_to_sft']['perplexity_threshold'] > 0
+
+        # Scores should be between 0 and 1
+        assert 0 <= gates['sft_to_dpo']['instruction_following_score'] <= 1
+        assert 0 <= gates['dpo_to_production']['safety_refusal_rate'] <= 1

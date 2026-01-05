@@ -10,9 +10,13 @@ from datasets import load_from_disk
 import yaml
 import wandb
 import os
+import sys
 
 # Import GPU utilities
-from gpu_utils import detect_gpu_type, print_gpu_info, setup_torch_backends
+from gpu_utils import (
+    detect_gpu_type, print_gpu_info, setup_torch_backends,
+    check_tokenizer_exists, check_checkpoint_exists
+)
 
 from transformers import TrainerCallback
 
@@ -161,9 +165,25 @@ def setup_training(use_fp8=None, config_path="configs/pretrain.yaml", cli_overri
         dataloader_persistent_workers=config['data'].get('persistent_workers', True),
     )
 
-    # Load dataset
-    train_dataset = load_from_disk("data/packed/train")
-    eval_dataset = load_from_disk("data/packed/val")
+    # Load dataset (use config paths with fallback to defaults)
+    train_data_path = config['data'].get('train_path', "data/packed/train")
+    eval_data_path = config['data'].get('val_path', "data/packed/val")
+
+    if not os.path.exists(train_data_path):
+        print(f"Error: Training data not found at {train_data_path}")
+        print("\nTo prepare training data, run:")
+        print("  python scripts/01_download_data.py")
+        print("  python scripts/02_clean_deduplicate_optimized.py")
+        print("  python scripts/03_tokenize_and_pack.py")
+        print("\nOr for demo: python scripts/setup_demo.py")
+        sys.exit(1)
+
+    if not os.path.exists(eval_data_path):
+        print(f"Error: Validation data not found at {eval_data_path}")
+        sys.exit(1)
+
+    train_dataset = load_from_disk(train_data_path)
+    eval_dataset = load_from_disk(eval_data_path)
 
     # Data collator
     data_collator = DataCollatorForLanguageModeling(
@@ -220,8 +240,13 @@ def train_with_fp8(config, gpu_info):
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
 
-    # Load dataset
-    train_dataset = load_from_disk("data/packed/train")
+    # Load dataset (use config paths with fallback to defaults)
+    train_data_path = config['data'].get('train_path', "data/packed/train")
+    if not os.path.exists(train_data_path):
+        print(f"Error: Training data not found at {train_data_path}")
+        sys.exit(1)
+
+    train_dataset = load_from_disk(train_data_path)
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     train_loader = DataLoader(
@@ -316,7 +341,22 @@ def main():
     parser.add_argument("--logging_steps", type=int, help="Override logging frequency")
     parser.add_argument("--output_dir", type=str, help="Override output directory")
     parser.add_argument("--resume_from_checkpoint", type=str, help="Path to checkpoint to resume from")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
+
+    # Set random seed
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    # Validate prerequisites
+    if not check_tokenizer_exists():
+        sys.exit(1)
+    if not check_checkpoint_exists("checkpoints/init", "Initial model"):
+        print("\nTo initialize the model, run:")
+        print("  python scripts/04_init_model.py")
+        print("\nOr for demo: python scripts/setup_demo.py")
+        sys.exit(1)
 
     use_fp8 = None
     if args.fp8:

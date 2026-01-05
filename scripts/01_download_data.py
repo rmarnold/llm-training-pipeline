@@ -28,8 +28,10 @@ def download_datasets(config_path="configs/data_sources.yaml"):
                         "rows": "cached"
                     }
                     continue
-                except:
-                    print(f"  File corrupted, re-downloading...")
+                except (IOError, OSError) as e:
+                    print(f"  File read error ({e}), re-downloading...")
+                except Exception as e:
+                    print(f"  File validation failed ({type(e).__name__}: {e}), re-downloading...")
 
             print(f"Downloading {ds_config['name']}...")
             # Handle both 'subset' and 'version' fields
