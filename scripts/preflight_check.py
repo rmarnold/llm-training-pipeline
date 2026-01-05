@@ -15,9 +15,13 @@ Usage:
     python scripts/preflight_check.py lora
     python scripts/preflight_check.py --all
 """
+from __future__ import annotations
+
 import argparse
 import os
 import sys
+from typing import Any, Dict, List, Literal, Optional, Tuple
+
 import yaml
 import json
 
@@ -25,12 +29,12 @@ import json
 class PreflightChecker:
     """Validate training prerequisites."""
 
-    def __init__(self, verbose=True):
+    def __init__(self, verbose: bool = True) -> None:
         self.verbose = verbose
-        self.errors = []
-        self.warnings = []
+        self.errors: List[str] = []
+        self.warnings: List[str] = []
 
-    def log(self, message, level="info"):
+    def log(self, message: str, level: Literal["info", "error", "warning"] = "info") -> None:
         """Log a message."""
         if level == "error":
             self.errors.append(message)
@@ -42,7 +46,7 @@ class PreflightChecker:
         elif self.verbose:
             print(f"[OK]    {message}")
 
-    def check_file_exists(self, path, description):
+    def check_file_exists(self, path: str, description: str) -> bool:
         """Check if a file exists."""
         if os.path.exists(path):
             self.log(f"{description}: {path}")
@@ -51,7 +55,7 @@ class PreflightChecker:
             self.log(f"{description} not found: {path}", "error")
             return False
 
-    def check_directory_exists(self, path, description):
+    def check_directory_exists(self, path: str, description: str) -> bool:
         """Check if a directory exists and is not empty."""
         if not os.path.exists(path):
             self.log(f"{description} not found: {path}", "error")
@@ -65,7 +69,7 @@ class PreflightChecker:
         self.log(f"{description}: {path}")
         return True
 
-    def check_tokenizer(self, tokenizer_path="configs/tokenizer"):
+    def check_tokenizer(self, tokenizer_path: str = "configs/tokenizer") -> bool:
         """Validate tokenizer exists and has required files."""
         if not os.path.exists(tokenizer_path):
             self.log(f"Tokenizer not found at {tokenizer_path}", "error")
@@ -94,7 +98,7 @@ class PreflightChecker:
         self.log(f"Tokenizer valid: {tokenizer_path}")
         return True
 
-    def check_model_checkpoint(self, checkpoint_path):
+    def check_model_checkpoint(self, checkpoint_path: str) -> bool:
         """Validate model checkpoint exists and has required files."""
         if not os.path.exists(checkpoint_path):
             self.log(f"Model checkpoint not found: {checkpoint_path}", "error")
@@ -120,7 +124,7 @@ class PreflightChecker:
         self.log(f"Model checkpoint valid: {checkpoint_path}")
         return True
 
-    def check_config(self, config_path):
+    def check_config(self, config_path: str) -> bool:
         """Validate config file loads and has required sections."""
         if not os.path.exists(config_path):
             self.log(f"Config not found: {config_path}", "error")
@@ -140,11 +144,11 @@ class PreflightChecker:
         self.log(f"Config valid: {config_path}")
         return True
 
-    def check_data_directory(self, data_path, description):
+    def check_data_directory(self, data_path: str, description: str) -> bool:
         """Check training data directory."""
         return self.check_directory_exists(data_path, description)
 
-    def check_gpu(self):
+    def check_gpu(self) -> bool:
         """Check GPU availability and memory."""
         try:
             import torch
@@ -168,7 +172,7 @@ class PreflightChecker:
             self.log("PyTorch not installed - cannot check GPU", "warning")
             return True
 
-    def check_pretrain(self):
+    def check_pretrain(self) -> bool:
         """Validate prerequisites for pretraining."""
         print("\n" + "="*60)
         print("PRE-FLIGHT CHECK: PRETRAINING")
@@ -194,7 +198,7 @@ class PreflightChecker:
 
         return all_valid
 
-    def check_sft(self):
+    def check_sft(self) -> bool:
         """Validate prerequisites for SFT."""
         print("\n" + "="*60)
         print("PRE-FLIGHT CHECK: SFT")
@@ -220,7 +224,7 @@ class PreflightChecker:
 
         return all_valid
 
-    def check_dpo(self):
+    def check_dpo(self) -> bool:
         """Validate prerequisites for DPO."""
         print("\n" + "="*60)
         print("PRE-FLIGHT CHECK: DPO")
@@ -246,7 +250,7 @@ class PreflightChecker:
 
         return all_valid
 
-    def check_lora(self):
+    def check_lora(self) -> bool:
         """Validate prerequisites for LoRA fine-tuning."""
         print("\n" + "="*60)
         print("PRE-FLIGHT CHECK: LoRA")
@@ -275,9 +279,9 @@ class PreflightChecker:
 
         return all_valid
 
-    def check_all(self):
+    def check_all(self) -> Dict[str, bool]:
         """Check all stages."""
-        results = {}
+        results: Dict[str, bool] = {}
 
         for stage, checker in [
             ("pretrain", self.check_pretrain),
@@ -291,7 +295,7 @@ class PreflightChecker:
 
         return results
 
-    def summary(self):
+    def summary(self) -> bool:
         """Print summary of checks."""
         print("\n" + "="*60)
         print("SUMMARY")
@@ -315,7 +319,7 @@ class PreflightChecker:
             return False
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Pre-flight validation for training pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,

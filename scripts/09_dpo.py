@@ -1,18 +1,46 @@
+from __future__ import annotations
+
+import os
+import sys
+from typing import Any, Dict, Optional
+
 import torch
+import yaml
 from trl import DPOTrainer, DPOConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_from_disk
-import yaml
-import os
-import sys
 
 # Import GPU utilities
 from gpu_utils import (
     detect_gpu_type, print_gpu_info, setup_torch_backends,
-    check_tokenizer_exists, check_checkpoint_exists
+    check_tokenizer_exists, check_checkpoint_exists, OOMHandler
 )
+from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 
-def train_dpo(use_fp8=None, config_path="configs/dpo.yaml", cli_overrides=None):
+
+class OOMRecoveryCallback(TrainerCallback):
+    """Callback for logging OOM recovery events during DPO training."""
+
+    def __init__(self) -> None:
+        self.handler = OOMHandler()
+
+    def on_log(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        logs: Optional[Dict[str, Any]] = None,
+        **kwargs: Any
+    ) -> None:
+        if self.handler.oom_count > 0 and logs is not None:
+            logs["oom_recovery/total_events"] = self.handler.oom_count
+
+
+def train_dpo(
+    use_fp8: Optional[bool] = None,
+    config_path: str = "configs/dpo.yaml",
+    cli_overrides: Optional[Dict[str, Any]] = None
+) -> None:
     """Train with DPO.
 
     Args:
@@ -138,13 +166,19 @@ def train_dpo(use_fp8=None, config_path="configs/dpo.yaml", cli_overrides=None):
         processing_class=tokenizer,
     )
 
+    # Add OOM recovery callback if enabled
+    if cli_overrides.get('enable_oom_recovery', False):
+        print("OOM recovery: ENABLED")
+        trainer.add_callback(OOMRecoveryCallback())
+
     print("\n🚀 Starting DPO training...")
     trainer.train(resume_from_checkpoint=cli_overrides.get('resume_from_checkpoint'))
     trainer.save_model(cli_overrides.get('output_dir', "checkpoints/dpo_final"))
 
     print("✓ DPO training complete!")
 
-if __name__ == "__main__":
+
+def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="DPO training for 7B model")
     parser.add_argument("--fp8", action="store_true", help="Force FP8 precision (H100 only)")
@@ -160,6 +194,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--train_data_path", type=str, help="Override training data path")
     parser.add_argument("--eval_data_path", type=str, help="Override evaluation data path")
+    parser.add_argument("--enable-oom-recovery", action="store_true", help="Enable automatic OOM recovery")
     args = parser.parse_args()
 
     # Set random seed
@@ -199,5 +234,11 @@ if __name__ == "__main__":
         cli_overrides['train_data_path'] = args.train_data_path
     if args.eval_data_path is not None:
         cli_overrides['eval_data_path'] = args.eval_data_path
+    if getattr(args, 'enable_oom_recovery', False):
+        cli_overrides['enable_oom_recovery'] = True
 
     train_dpo(use_fp8=use_fp8, config_path=args.config, cli_overrides=cli_overrides)
+
+
+if __name__ == "__main__":
+    main()

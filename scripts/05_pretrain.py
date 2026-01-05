@@ -1,24 +1,57 @@
+from __future__ import annotations
+
+import os
+import sys
+from typing import Any, Dict, Optional, Tuple
+
 import torch
+import yaml
+import wandb
 from transformers import (
     Trainer,
     TrainingArguments,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
     AutoTokenizer,
     AutoModelForCausalLM,
     DataCollatorForLanguageModeling
 )
 from datasets import load_from_disk
-import yaml
-import wandb
-import os
-import sys
 
 # Import GPU utilities
 from gpu_utils import (
     detect_gpu_type, print_gpu_info, setup_torch_backends,
-    check_tokenizer_exists, check_checkpoint_exists
+    check_tokenizer_exists, check_checkpoint_exists, GPUInfo,
+    OOMHandler, get_safe_batch_size
 )
 
-from transformers import TrainerCallback
+
+class OOMRecoveryCallback(TrainerCallback):
+    """Callback for automatic OOM recovery during training.
+
+    When an OOM error occurs during training, this callback:
+    1. Catches the error and clears GPU memory
+    2. Increases gradient accumulation steps (effectively reducing memory usage)
+    3. Allows training to continue
+
+    Note: This works best with gradient accumulation. The callback doubles
+    accumulation steps on OOM, which halves effective per-step memory usage.
+    """
+
+    def __init__(self, max_accumulation: int = 64) -> None:
+        self.max_accumulation = max_accumulation
+        self.handler = OOMHandler()
+        self.oom_occurred = False
+
+    def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any) -> None:
+        # Reset OOM flag at start of each step
+        self.oom_occurred = False
+
+    def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        # Log OOM recovery info if it occurred
+        if self.handler.oom_count > 0 and logs is not None:
+            logs["oom_recovery/total_events"] = self.handler.oom_count
 
 
 class CurriculumCallback(TrainerCallback):
@@ -40,7 +73,7 @@ class CurriculumCallback(TrainerCallback):
     The callback saves curriculum state to allow seamless resumption.
     """
 
-    def __init__(self, curriculum_config, output_dir="checkpoints/pretrain"):
+    def __init__(self, curriculum_config: Dict[str, Any], output_dir: str = "checkpoints/pretrain") -> None:
         self.schedule = curriculum_config.get('schedule', [])
         self.data_pattern = curriculum_config.get('data_pattern', "data/packed/train_{seq_length}")
         self.auto_stop = curriculum_config.get('auto_stop_at_boundary', True)
@@ -54,7 +87,7 @@ class CurriculumCallback(TrainerCallback):
         else:
             self.current_seq_length = 2048
 
-    def get_current_stage(self, global_step):
+    def get_current_stage(self, global_step: int) -> Tuple[int, int]:
         """Get the curriculum stage for a given step."""
         for i, stage in enumerate(self.schedule):
             if global_step < stage['steps']:
@@ -64,11 +97,11 @@ class CurriculumCallback(TrainerCallback):
             return len(self.schedule) - 1, self.schedule[-1]['seq_length']
         return 0, 2048
 
-    def get_data_path(self, seq_length):
+    def get_data_path(self, seq_length: int) -> str:
         """Get data path for a given sequence length."""
         return self.data_pattern.format(seq_length=seq_length)
 
-    def on_step_begin(self, args, state, control, **kwargs):
+    def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any) -> None:
         if not self.schedule:
             return
 
@@ -94,7 +127,7 @@ class CurriculumCallback(TrainerCallback):
                 control.should_save = True
                 control.should_training_stop = True
 
-    def on_train_begin(self, args, state, control, **kwargs):
+    def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any) -> None:
         if self.schedule:
             # Determine starting stage based on resumed step
             start_idx, start_seq = self.get_current_stage(state.global_step)
@@ -112,7 +145,7 @@ class CurriculumCallback(TrainerCallback):
                 marker = ">>>" if i == self.current_idx else "   "
                 print(f"{marker} Stage {i+1}: {stage['seq_length']} tokens @ step {stage['steps']}")
 
-    def _save_curriculum_state(self, global_step):
+    def _save_curriculum_state(self, global_step: int) -> None:
         """Save curriculum state for resumption."""
         import json
         state_path = os.path.join(self.output_dir, "curriculum_state.json")
@@ -126,7 +159,11 @@ class CurriculumCallback(TrainerCallback):
             }, f, indent=2)
 
 
-def get_curriculum_data_path(config, global_step=0, cli_overrides=None):
+def get_curriculum_data_path(
+    config: Dict[str, Any],
+    global_step: int = 0,
+    cli_overrides: Optional[Dict[str, Any]] = None
+) -> Tuple[str, str]:
     """Get the appropriate data path based on curriculum stage.
 
     Args:
@@ -177,7 +214,11 @@ def get_curriculum_data_path(config, global_step=0, cli_overrides=None):
 
     return train_path, val_path
 
-def setup_training(use_fp8=None, config_path="configs/pretrain.yaml", cli_overrides=None):
+def setup_training(
+    use_fp8: Optional[bool] = None,
+    config_path: str = "configs/pretrain.yaml",
+    cli_overrides: Optional[Dict[str, Any]] = None
+) -> Tuple[Trainer, GPUInfo]:
     """Setup training with automatic GPU optimization.
 
     Args:
@@ -342,9 +383,18 @@ def setup_training(use_fp8=None, config_path="configs/pretrain.yaml", cli_overri
         output_dir = cli_overrides.get('output_dir', config['checkpointing']['output_dir'])
         trainer.add_callback(CurriculumCallback(config['curriculum'], output_dir=output_dir))
 
+    # Add OOM recovery callback if enabled
+    if cli_overrides.get('enable_oom_recovery', False):
+        print("OOM recovery: ENABLED")
+        trainer.add_callback(OOMRecoveryCallback())
+
     return trainer, gpu_info
 
-def train_with_fp8(config, gpu_info):
+def train_with_fp8(
+    config: Dict[str, Any],
+    gpu_info: GPUInfo,
+    enable_oom_recovery: bool = False
+) -> None:
     """Train using FP8 precision with Accelerate (H100 only)"""
     from gpu_utils import get_fp8_accelerator
     from torch.utils.data import DataLoader
@@ -417,32 +467,55 @@ def train_with_fp8(config, gpu_info):
         model, optimizer, train_loader, scheduler
     )
 
-    # Training loop
+    # Training loop with optional OOM recovery
     print(f"\n🚀 Starting FP8 pretraining ({max_steps:,} steps)...")
+    if enable_oom_recovery:
+        print("OOM recovery: ENABLED")
+
     model.train()
     global_step = 0
     progress_bar = tqdm(total=max_steps, desc="Training")
 
+    # OOM handler for FP8 training
+    oom_handler = OOMHandler(
+        initial_batch_size=config['training']['per_device_train_batch_size'],
+        min_batch_size=1,
+    ) if enable_oom_recovery else None
+
     while global_step < max_steps:
         for batch in train_loader:
-            with accelerator.accumulate(model):
-                outputs = model(**batch)
-                loss = outputs.loss
-                accelerator.backward(loss)
+            try:
+                with accelerator.accumulate(model):
+                    outputs = model(**batch)
+                    loss = outputs.loss
+                    accelerator.backward(loss)
 
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), config['training']['max_grad_norm'])
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(model.parameters(), config['training']['max_grad_norm'])
 
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+
+                # Reset OOM retry count on success
+                if oom_handler:
+                    oom_handler.reset()
+
+            except RuntimeError as e:
+                if oom_handler and oom_handler.handle_oom(e):
+                    # Skip this batch and continue
+                    continue
+                raise
 
             if accelerator.sync_gradients:
                 global_step += 1
                 progress_bar.update(1)
 
                 if global_step % 10 == 0:
-                    progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+                    postfix = {"loss": f"{loss.item():.4f}"}
+                    if oom_handler and oom_handler.oom_count > 0:
+                        postfix["oom_events"] = oom_handler.oom_count
+                    progress_bar.set_postfix(postfix)
 
                 if global_step % config['checkpointing']['save_steps'] == 0:
                     accelerator.wait_for_everyone()
@@ -457,6 +530,11 @@ def train_with_fp8(config, gpu_info):
 
     progress_bar.close()
 
+    # Print OOM summary if any occurred
+    if oom_handler and oom_handler.oom_count > 0:
+        stats = oom_handler.get_stats()
+        print(f"\n[OOM Summary] Total OOM events: {stats['total_oom_events']}")
+
     # Save final model
     accelerator.wait_for_everyone()
     unwrapped_model = accelerator.unwrap_model(model)
@@ -466,7 +544,7 @@ def train_with_fp8(config, gpu_info):
     )
     print("✓ FP8 Pretraining complete!")
 
-def main():
+def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(description="Pretrain 7B model")
     parser.add_argument("--fp8", action="store_true", help="Force FP8 precision (H100 only)")
@@ -482,6 +560,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--train_data_path", type=str, help="Override training data path")
     parser.add_argument("--eval_data_path", type=str, help="Override evaluation data path")
+    parser.add_argument("--enable-oom-recovery", action="store_true", help="Enable automatic OOM recovery")
     args = parser.parse_args()
 
     # Set random seed
@@ -522,6 +601,8 @@ def main():
         cli_overrides['train_data_path'] = args.train_data_path
     if args.eval_data_path is not None:
         cli_overrides['eval_data_path'] = args.eval_data_path
+    if getattr(args, 'enable_oom_recovery', False):
+        cli_overrides['enable_oom_recovery'] = True
 
     # Setup and detect GPU
     gpu_info = detect_gpu_type()
@@ -538,7 +619,11 @@ def main():
         # Apply CLI overrides to config
         if 'max_steps' in cli_overrides:
             config['training']['max_steps'] = cli_overrides['max_steps']
-        train_with_fp8(config, gpu_info)
+        train_with_fp8(
+            config,
+            gpu_info,
+            enable_oom_recovery=cli_overrides.get('enable_oom_recovery', False)
+        )
     else:
         # Use standard BF16 training path
         if use_fp8 and not gpu_info['fp8_available']:

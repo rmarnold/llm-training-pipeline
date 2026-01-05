@@ -282,6 +282,23 @@ bash scripts/resume_pipeline.sh pretrain
 - Enable sequence packing for SFT
 - Use FP8 on H100
 
+### OOM (Out of Memory) Errors
+
+All training scripts support automatic OOM recovery:
+
+```bash
+# Enable OOM recovery for any training script
+python scripts/05_pretrain.py --enable-oom-recovery
+python scripts/07_sft.py --enable-oom-recovery
+python scripts/09_dpo.py --enable-oom-recovery
+```
+
+When OOM recovery is enabled:
+- GPU memory is automatically cleared on OOM
+- Training continues with reduced batch size
+- OOM events are logged for monitoring
+- Works with both standard and FP8 training paths
+
 ## License
 
 [Add your license here]
