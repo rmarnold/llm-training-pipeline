@@ -16,9 +16,21 @@ dependencies = [
     "tensorboard>=2.14",
     "tqdm>=4.66",
     "flash-attn>=2.3",
+    # Data cleaning dependencies
+    "pandas>=2.0",
+    "datasketch>=1.6",
+    "ftfy>=6.1",
+    "detoxify>=0.5",
+    # Evaluation dependencies
+    "evaluate>=0.4",
+    "nvidia-ml-py3>=7.352",
 ]
 
 [project.optional-dependencies]
 fp8 = [
     "transformer-engine[pytorch]>=1.2",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
 ]
