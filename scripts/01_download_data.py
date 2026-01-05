@@ -16,22 +16,21 @@ def download_datasets(config_path="configs/data_sources.yaml"):
             output_path = f"data/raw/{phase}_{ds_config['name']}.parquet"
             if os.path.exists(output_path):
                 print(f"✓ {ds_config['name']} already exists, skipping download")
-                # Add to manifest if not corrupted
+                # Quick validation using file size (skip slow SHA256 for existing files)
                 try:
-                    import hashlib
-                    with open(output_path, "rb") as f:
-                        file_hash = hashlib.sha256(f.read()).hexdigest()
-                    manifest[ds_config['name']] = {
-                        "path": output_path,
-                        "sha256": file_hash,
-                        "license": ds_config["license"],
-                        "rows": "cached"
-                    }
-                    continue
+                    file_size = os.path.getsize(output_path)
+                    if file_size > 0:
+                        manifest[ds_config['name']] = {
+                            "path": output_path,
+                            "size_bytes": file_size,
+                            "license": ds_config["license"],
+                            "rows": "cached"
+                        }
+                        continue
+                    else:
+                        print(f"  File is empty, re-downloading...")
                 except (IOError, OSError) as e:
                     print(f"  File read error ({e}), re-downloading...")
-                except Exception as e:
-                    print(f"  File validation failed ({type(e).__name__}: {e}), re-downloading...")
 
             print(f"Downloading {ds_config['name']}...")
             # Handle both 'subset' and 'version' fields
