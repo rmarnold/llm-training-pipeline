@@ -38,7 +38,9 @@ def parallel_clean_texts(
 ) -> list[str]:
     """Clean texts in parallel with optional incremental checkpointing."""
     if n_workers is None:
-        n_workers = cpu_count()
+        # Default to half of CPU cores to avoid memory issues
+        # Each worker adds memory overhead, and we need RAM for results
+        n_workers = max(1, cpu_count() // 2)
 
     n_workers = min(n_workers, cpu_count())
     n_texts = len(texts)
