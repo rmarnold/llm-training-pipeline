@@ -1,8 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "llm-training-pipeline"
 version = "0.1.0"
 description = "Production LLM training pipeline for 7B models on A100/H100 GPUs"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",
     "transformers>=4.36",
@@ -15,7 +19,6 @@ dependencies = [
     "wandb>=0.16",
     "tensorboard>=2.14",
     "tqdm>=4.66",
-    "flash-attn>=2.3",
     # Data cleaning dependencies
     "pandas>=2.0",
     "datasketch>=1.6",
@@ -27,6 +30,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+flash = [
+    "flash-attn>=2.3",
+]
 fp8 = [
     "transformer-engine[pytorch]>=1.2",
 ]
@@ -34,3 +40,7 @@ dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scripts*", "configs*"]
