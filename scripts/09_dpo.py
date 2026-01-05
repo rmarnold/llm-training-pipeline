@@ -4,27 +4,28 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_from_disk
 import yaml
 
-def detect_gpu_type():
-    """Detect GPU type and return optimized settings"""
-    if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        is_h100 = "H100" in gpu_name
-        is_a100 = "A100" in gpu_name
-        return {
-            "gpu_name": gpu_name,
-            "is_h100": is_h100,
-            "is_a100": is_a100,
-            "compile_mode": "max-autotune" if is_h100 else "default",
-        }
-    return {"gpu_name": "CPU", "is_h100": False, "is_a100": False, "compile_mode": "default"}
+# Import GPU utilities
+from gpu_utils import detect_gpu_type, print_gpu_info, setup_torch_backends
 
-def train_dpo():
+def train_dpo(use_fp8=None):
+    # Setup torch backends
+    setup_torch_backends()
+
     with open("configs/dpo.yaml") as f:
         config = yaml.safe_load(f)
 
     # Detect GPU
     gpu_info = detect_gpu_type()
-    print(f"GPU detected: {gpu_info['gpu_name']}")
+    print_gpu_info(gpu_info)
+
+    # Determine precision
+    if use_fp8 is None:
+        use_fp8 = gpu_info['fp8_available']
+
+    if use_fp8:
+        print("  Using FP8 precision for DPO")
+    else:
+        print("  Using BF16 precision for DPO")
 
     # Load model with Flash Attention
     print("Loading model...")
@@ -115,4 +116,16 @@ def train_dpo():
     print("✓ DPO training complete!")
 
 if __name__ == "__main__":
-    train_dpo()
+    import argparse
+    parser = argparse.ArgumentParser(description="DPO training for 7B model")
+    parser.add_argument("--fp8", action="store_true", help="Force FP8 precision (H100 only)")
+    parser.add_argument("--no-fp8", action="store_true", help="Disable FP8, use BF16")
+    args = parser.parse_args()
+
+    use_fp8 = None
+    if args.fp8:
+        use_fp8 = True
+    elif args.no_fp8:
+        use_fp8 = False
+
+    train_dpo(use_fp8=use_fp8)

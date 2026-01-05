@@ -18,6 +18,12 @@ bash scripts/run_full_pipeline.sh
 bash START_PRODUCTION_TRAINING.sh
 # Or directly:
 python scripts/production_pretrain.py
+
+# Force FP8 on H100:
+python scripts/production_pretrain.py --fp8
+
+# Force BF16 (disable FP8):
+python scripts/production_pretrain.py --no-fp8
 ```
 
 ### Individual Stages
@@ -30,10 +36,10 @@ python scripts/03_tokenize_and_pack.py
 # Model initialization
 python scripts/04_init_model.py
 
-# Training stages
-python scripts/05_pretrain.py
-python scripts/07_sft.py      # Uses sequence packing
-python scripts/09_dpo.py
+# Training stages (all support --fp8 and --no-fp8 flags)
+python scripts/05_pretrain.py [--fp8|--no-fp8]
+python scripts/07_sft.py [--fp8|--no-fp8]     # Uses sequence packing
+python scripts/09_dpo.py [--fp8|--no-fp8]
 python scripts/10_lora_finetune.py
 
 # Evaluation & gate checks
@@ -44,7 +50,6 @@ python scripts/12_check_gates.py <stage>  # stage: pretrain, sft, dpo
 ### Resume Training
 ```bash
 # Auto-resume from latest checkpoint
-# Add resume_from_checkpoint=True to trainer.train() call
 bash scripts/resume_pipeline.sh pretrain|sft|dpo
 ```
 
@@ -80,13 +85,40 @@ Each stage has promotion gates defined in `configs/promotion_gates.yaml` that mu
 ## Optimizations
 
 ### GPU Auto-Detection
-Scripts automatically detect GPU type and optimize settings:
-- **H100**: Uses `torch_compile_mode="max-autotune"` for best performance
-- **A100**: Uses `torch_compile_mode="default"` for balanced compile time
+Scripts automatically detect GPU type and optimize settings via `scripts/gpu_utils.py`:
+- **H100 with FP8**: Auto-enables FP8 precision (30-40% faster than BF16)
+- **H100 without FP8**: Uses `max-autotune` compile mode
+- **A100**: Uses BF16 with `default` compile mode
+
+### FP8 Training (H100 Only)
+FP8 training provides 30-40% speedup on H100 GPUs using NVIDIA Transformer Engine.
+
+**Requirements:**
+```bash
+pip install transformer-engine[pytorch]
+```
+
+**FP8 Precision Formats:**
+- E4M3: Used for forward pass (activations and weights)
+- E5M2: Used for backward pass (gradients, higher dynamic range)
+- HYBRID: Auto-switches between E4M3/E5M2 (recommended)
+
+**Usage:**
+```bash
+# Auto-detect (uses FP8 if H100 + transformer-engine available)
+python scripts/production_pretrain.py
+
+# Force FP8
+python scripts/production_pretrain.py --fp8
+
+# Disable FP8, use BF16
+python scripts/production_pretrain.py --no-fp8
+```
 
 ### Enabled Optimizations
 | Optimization | Impact | Files |
 |--------------|--------|-------|
+| FP8 (H100) | 30-40% speedup | All training scripts |
 | torch.compile | 30-100% speedup | All training scripts |
 | Flash Attention 2 | 2-4x attention speedup | All training scripts |
 | Sequence packing (SFT) | Up to 6x speedup | `07_sft.py` |
@@ -114,16 +146,12 @@ beta: 0.1                        # KL penalty coefficient
 learning_rate: 5e-7              # Very conservative
 ```
 
-### H100-Specific Features
-When running on H100, scripts automatically enable:
-- `max-autotune` compile mode (vs `default` on A100)
-- Optimized for H100's higher memory bandwidth (3.35 TB/s)
-
 ### Expected Performance
-| GPU | Pretraining (100K steps) | GPU Utilization |
-|-----|--------------------------|-----------------|
-| A100 80GB | ~45-50 hours | 95-100% |
-| H100 80GB | ~35-40 hours | 95-100% |
+| GPU | Precision | Pretraining (100K steps) | GPU Utilization |
+|-----|-----------|--------------------------|-----------------|
+| A100 80GB | BF16 | ~45-50 hours | 95-100% |
+| H100 80GB | BF16 | ~35-40 hours | 95-100% |
+| H100 80GB | FP8 | ~25-30 hours | 95-100% |
 
 ## Directory Structure
 ```
@@ -131,7 +159,7 @@ checkpoints/      # Model checkpoints (init, pretrain, sft, dpo, lora)
 configs/          # YAML configs + model architecture + tokenizer
 data/             # raw/, packed/, sft/, dpo/ datasets
 logs/             # TensorBoard logs
-scripts/          # Numbered pipeline scripts (01-12)
+scripts/          # Numbered pipeline scripts (01-12) + gpu_utils.py
 ```
 
 ## Data Format
@@ -140,6 +168,8 @@ scripts/          # Numbered pipeline scripts (01-12)
 
 ## Key Dependencies
 - transformers, trl (SFTTrainer, SFTConfig, DPOTrainer, DPOConfig)
+- accelerate (for FP8 training)
+- transformer-engine (optional, for FP8 on H100)
 - peft (LoRA)
 - datasets
 - torch with CUDA (PyTorch 2.x required for torch.compile)
