@@ -30,25 +30,44 @@ def _clean_text_worker(text: str) -> str:
     return text.strip()
 
 
-def parallel_clean_texts(texts: list[str], n_workers: int = None, chunk_size: int = 10000) -> list[str]:
-    """Clean texts in parallel using multiprocessing."""
+def _indexed_clean_worker(item: tuple) -> tuple:
+    """Worker that preserves index for unordered processing."""
+    idx, text = item
+    return idx, _clean_text_worker(text)
+
+
+def parallel_clean_texts(texts: list[str], n_workers: int = None) -> list[str]:
+    """Clean texts in parallel using multiprocessing with optimized chunking."""
     if n_workers is None:
         n_workers = cpu_count()
 
     n_workers = min(n_workers, cpu_count())
+    n_texts = len(texts)
 
-    if n_workers <= 1 or len(texts) < chunk_size:
+    if n_workers <= 1 or n_texts < 1000:
         # Fall back to sequential for small datasets
         return [_clean_text_worker(t) for t in tqdm(texts, desc="    Cleaning text")]
 
-    print(f"    Using {n_workers} CPU workers for text cleaning...")
+    # Optimal chunk size: balance IPC overhead vs worker utilization
+    # Larger chunks = fewer IPC calls = less overhead
+    # Target: ~100 chunks total for good progress bar granularity
+    chunk_size = max(1000, n_texts // (n_workers * 8))
+
+    print(f"    Using {n_workers} CPU workers (chunk_size={chunk_size:,})...")
+
+    # Use imap_unordered for better throughput (order doesn't matter for cleaning)
+    # Pre-allocate results list and fill by index to maintain order
+    results = [''] * n_texts
 
     with Pool(processes=n_workers) as pool:
-        results = list(tqdm(
-            pool.imap(_clean_text_worker, texts, chunksize=chunk_size),
-            total=len(texts),
+        indexed_texts = list(enumerate(texts))
+
+        for idx, cleaned in tqdm(
+            pool.imap_unordered(_indexed_clean_worker, indexed_texts, chunksize=chunk_size),
+            total=n_texts,
             desc="    Cleaning text"
-        ))
+        ):
+            results[idx] = cleaned
 
     return results
 
