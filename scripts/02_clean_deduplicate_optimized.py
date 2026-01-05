@@ -30,8 +30,13 @@ def _clean_text_worker(text: str) -> str:
     return text.strip()
 
 
-def parallel_clean_texts(texts: list[str], n_workers: int = None) -> list[str]:
-    """Clean texts in parallel using multiprocessing."""
+def parallel_clean_texts(
+    texts: list[str],
+    n_workers: int = None,
+    checkpoint_callback=None,
+    checkpoint_interval: int = 500000
+) -> list[str]:
+    """Clean texts in parallel with optional incremental checkpointing."""
     if n_workers is None:
         n_workers = cpu_count()
 
@@ -41,18 +46,22 @@ def parallel_clean_texts(texts: list[str], n_workers: int = None) -> list[str]:
     if n_workers <= 1 or n_texts < 1000:
         return [_clean_text_worker(t) for t in tqdm(texts, desc="    Cleaning text")]
 
-    # Chunk size 5000: good balance of speed (~3700 it/s) and progress updates
     chunk_size = 5000
-
     print(f"    Using {n_workers} CPU workers (chunk_size={chunk_size:,})...")
 
+    results = []
+    last_checkpoint = 0
+
     with Pool(processes=n_workers) as pool:
-        # Simple imap - ordered, no tuple overhead, fastest
-        results = list(tqdm(
-            pool.imap(_clean_text_worker, texts, chunksize=chunk_size),
-            total=n_texts,
-            desc="    Cleaning text"
-        ))
+        with tqdm(total=n_texts, desc="    Cleaning text") as pbar:
+            for cleaned in pool.imap(_clean_text_worker, texts, chunksize=chunk_size):
+                results.append(cleaned)
+                pbar.update(1)
+
+                # Incremental checkpoint every N items
+                if checkpoint_callback and len(results) - last_checkpoint >= checkpoint_interval:
+                    checkpoint_callback(results, len(results))
+                    last_checkpoint = len(results)
 
     return results
 
@@ -245,14 +254,49 @@ def process_single_file(
         else:
             df = pd.read_parquet(input_path)
             original_count = len(df)
-            print(f"  Cleaning {original_count} documents...")
 
-            # Parallel text cleaning using multiprocessing
-            df['text'] = parallel_clean_texts(df['text'].tolist(), n_workers=n_workers)
+            # Check for partial progress
+            partial_path = checkpoint.cache_dir / f"{filename}_clean_partial_{file_hash}.parquet" if checkpoint else None
+            start_idx = 0
+            partial_results = []
 
+            if partial_path and partial_path.exists():
+                print(f"  Resuming from partial checkpoint...")
+                partial_df = pd.read_parquet(partial_path)
+                start_idx = len(partial_df)
+                partial_results = partial_df['text'].tolist()
+                print(f"    Loaded {start_idx:,} already cleaned documents")
+
+            remaining = original_count - start_idx
+            print(f"  Cleaning {remaining:,} documents (of {original_count:,} total)...")
+
+            # Checkpoint callback for incremental saves
+            def save_partial(results, count):
+                if checkpoint:
+                    all_results = partial_results + results
+                    partial_df = pd.DataFrame({'text': all_results})
+                    partial_df.to_parquet(partial_path, index=False)
+                    print(f"\n    [Checkpoint saved: {len(all_results):,}/{original_count:,} cleaned]")
+
+            # Clean remaining texts
+            texts_to_clean = df['text'].tolist()[start_idx:]
+            new_results = parallel_clean_texts(
+                texts_to_clean,
+                n_workers=n_workers,
+                checkpoint_callback=save_partial if checkpoint else None,
+                checkpoint_interval=500000  # Save every 500K docs
+            )
+
+            # Combine partial + new results
+            all_cleaned = partial_results + new_results
+            df['text'] = all_cleaned
+
+            # Save final checkpoint and cleanup partial
             if checkpoint:
                 checkpoint.save_checkpoint(df, filename, 'clean', file_hash)
                 checkpoint.save_state(filename, file_hash, {'completed': ['clean'], 'original_count': original_count})
+                if partial_path and partial_path.exists():
+                    partial_path.unlink()  # Remove partial checkpoint
 
         # Step 2: Quality filtering
         if 'quality' in completed_steps and checkpoint:
