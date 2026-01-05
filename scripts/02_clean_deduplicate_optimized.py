@@ -1,37 +1,45 @@
+"""Optimized data cleaning with caching, checkpoints, and GPU acceleration."""
+from __future__ import annotations
+
 import os
+import json
+import hashlib
 import pandas as pd
 from datasketch import MinHash, MinHashLSH
 from ftfy import fix_text
 from detoxify import Detoxify
 import re
 import torch
-import multiprocessing as mp
-from multiprocessing import cpu_count
 from tqdm import tqdm
 import numpy as np
+from pathlib import Path
+from typing import Optional
 
-# IMPORTANT: Set spawn method for CUDA compatibility
-# Must be called before any CUDA operations
-if __name__ == "__main__":
-    mp.set_start_method('spawn', force=True)
 
 class DataCleaner:
-    def __init__(self, toxicity_threshold=0.7, use_gpu=True, batch_size=32):
-        # Use GPU if available
-        device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
-        print(f"Using device: {device}")
-        self.toxicity_model = Detoxify('original', device=device)
+    """GPU-accelerated data cleaner with batched processing."""
+
+    # Class-level model cache to avoid reloading
+    _model_cache: dict = {}
+
+    def __init__(self, toxicity_threshold: float = 0.7, use_gpu: bool = True, batch_size: int = 128):
+        self.device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
         self.toxicity_threshold = toxicity_threshold
         self.batch_size = batch_size
         self.lsh = MinHashLSH(threshold=0.85, num_perm=128)
 
-    def clean_text(self, text):
-        """Vectorized text cleaning"""
+        # Use cached model if available (avoid re-downloading)
+        cache_key = f"detoxify_{self.device}"
+        if cache_key not in DataCleaner._model_cache:
+            print(f"Loading toxicity model on {self.device}...")
+            DataCleaner._model_cache[cache_key] = Detoxify('original', device=self.device)
+        self.toxicity_model = DataCleaner._model_cache[cache_key]
+
+    def clean_text(self, text: str) -> str:
+        """Clean a single text document."""
         if pd.isna(text):
             return ""
-        # Fix encoding issues
         text = fix_text(str(text))
-        # Remove excessive whitespace
         text = re.sub(r'\s+', ' ', text)
         # Remove PII patterns
         text = re.sub(r'\b[\w\.-]+@[\w\.-]+\.\w+\b', '[EMAIL]', text)
@@ -39,204 +47,317 @@ class DataCleaner:
         text = re.sub(r'\b\d{3}-\d{3}-\d{4}\b', '[PHONE]', text)
         return text.strip()
 
-    def filter_quality_batch(self, texts, min_words=50, max_words=10000):
-        """Vectorized quality filtering"""
+    def filter_quality_batch(self, texts: list[str], min_words: int = 50, max_words: int = 10000) -> list[bool]:
+        """Batch quality filtering."""
         results = []
         for text in texts:
             word_count = len(text.split())
             if word_count < min_words or word_count > max_words:
                 results.append(False)
                 continue
-
-            # Check character variety (detect gibberish)
             unique_chars = len(set(text.lower()))
             if unique_chars < 20:
                 results.append(False)
                 continue
-
             results.append(True)
         return results
 
-    def is_toxic_batch(self, texts):
-        """Batch toxicity detection - MUCH faster than one-by-one"""
+    def is_toxic_batch(self, texts: list[str], show_progress: bool = True) -> list[bool]:
+        """Batch toxicity detection with progress bar."""
         if not texts:
             return []
 
-        # Process in batches for memory efficiency
         all_results = []
-        for i in range(0, len(texts), self.batch_size):
+        iterator = range(0, len(texts), self.batch_size)
+        if show_progress:
+            iterator = tqdm(iterator, desc="    Toxicity check", unit="batch")
+
+        for i in iterator:
             batch = texts[i:i + self.batch_size]
-            results = self.toxicity_model.predict(batch)
-            # Check if any toxicity score exceeds threshold
+            with torch.no_grad():
+                results = self.toxicity_model.predict(batch)
             for j in range(len(batch)):
-                is_toxic = any(results[key][j] > self.toxicity_threshold
-                             for key in results.keys())
+                is_toxic = any(results[key][j] > self.toxicity_threshold for key in results.keys())
                 all_results.append(is_toxic)
 
         return all_results
 
-    def compute_minhash(self, text):
-        """Compute MinHash for a text"""
+    def compute_minhash(self, text: str) -> MinHash:
+        """Compute MinHash for deduplication."""
         m = MinHash(num_perm=128)
         for word in text.split():
             m.update(word.encode('utf8'))
         return m
 
-    def deduplicate_batch(self, texts, doc_ids):
-        """Batch deduplication using MinHash LSH"""
+    def deduplicate_batch(self, texts: list[str], doc_ids: list[str], show_progress: bool = True) -> list[bool]:
+        """Batch deduplication with progress bar."""
         keep_mask = []
+        iterator = zip(texts, doc_ids)
+        if show_progress:
+            iterator = tqdm(list(iterator), desc="    Deduplicating", unit="doc")
 
-        for text, doc_id in zip(texts, doc_ids):
+        for text, doc_id in iterator:
             m = self.compute_minhash(text)
-
-            # Check if duplicate
-            result = self.lsh.query(m)
-            if result:
+            if self.lsh.query(m):
                 keep_mask.append(False)
             else:
                 self.lsh.insert(doc_id, m)
                 keep_mask.append(True)
-
         return keep_mask
 
-def process_single_file(args):
-    """Process a single file - designed for parallel execution"""
-    filename, input_dir, output_dir = args
+
+class CheckpointManager:
+    """Manage intermediate checkpoints for resumable processing."""
+
+    def __init__(self, cache_dir: str = "data/.cache"):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def get_file_hash(self, filepath: str) -> str:
+        """Get hash of file for cache invalidation."""
+        stat = os.stat(filepath)
+        return hashlib.md5(f"{filepath}_{stat.st_size}_{stat.st_mtime}".encode()).hexdigest()[:12]
+
+    def get_checkpoint_path(self, filename: str, step: str, file_hash: str) -> Path:
+        """Get path for a checkpoint file."""
+        return self.cache_dir / f"{filename}_{step}_{file_hash}.parquet"
+
+    def get_state_path(self, filename: str, file_hash: str) -> Path:
+        """Get path for processing state."""
+        return self.cache_dir / f"{filename}_{file_hash}_state.json"
+
+    def save_checkpoint(self, df: pd.DataFrame, filename: str, step: str, file_hash: str) -> None:
+        """Save intermediate checkpoint."""
+        path = self.get_checkpoint_path(filename, step, file_hash)
+        df.to_parquet(path, index=False)
+
+    def load_checkpoint(self, filename: str, step: str, file_hash: str) -> Optional[pd.DataFrame]:
+        """Load checkpoint if it exists."""
+        path = self.get_checkpoint_path(filename, step, file_hash)
+        if path.exists():
+            return pd.read_parquet(path)
+        return None
+
+    def save_state(self, filename: str, file_hash: str, state: dict) -> None:
+        """Save processing state."""
+        path = self.get_state_path(filename, file_hash)
+        with open(path, 'w') as f:
+            json.dump(state, f)
+
+    def load_state(self, filename: str, file_hash: str) -> Optional[dict]:
+        """Load processing state if it exists."""
+        path = self.get_state_path(filename, file_hash)
+        if path.exists():
+            with open(path) as f:
+                return json.load(f)
+        return None
+
+    def cleanup(self, filename: str, file_hash: str) -> None:
+        """Remove checkpoints after successful completion."""
+        for step in ['clean', 'quality', 'toxicity', 'dedup']:
+            path = self.get_checkpoint_path(filename, step, file_hash)
+            if path.exists():
+                path.unlink()
+        state_path = self.get_state_path(filename, file_hash)
+        if state_path.exists():
+            state_path.unlink()
+
+
+def process_single_file(
+    filename: str,
+    input_dir: str = "data/raw",
+    output_dir: str = "data/processed",
+    use_gpu: bool = True,
+    use_cache: bool = True,
+    batch_size: int = 128,
+) -> tuple[str, int, int]:
+    """Process a single file with checkpointing support."""
 
     input_path = os.path.join(input_dir, filename)
     output_filename = filename.replace('.parquet', '_clean.parquet')
     output_path = os.path.join(output_dir, output_filename)
 
-    # Skip if already processed
+    # Skip if already fully processed
     if os.path.exists(output_path):
-        print(f"✓ Skipping {filename} (already processed)")
-        return filename, 0, 0
+        print(f"Skipping {filename} (already processed)")
+        # Read to get stats
+        df = pd.read_parquet(output_path)
+        return filename, len(df), len(df)
 
-    print(f"Processing {filename}...")
+    print(f"\nProcessing {filename}...")
+
+    # Initialize checkpoint manager
+    checkpoint = CheckpointManager() if use_cache else None
+    file_hash = checkpoint.get_file_hash(input_path) if checkpoint else ""
 
     try:
-        # Read data
-        df = pd.read_parquet(input_path)
-        original_count = len(df)
+        # Check for existing state
+        state = checkpoint.load_state(filename, file_hash) if checkpoint else None
+        completed_steps = state.get('completed', []) if state else []
+        original_count = state.get('original_count', 0) if state else 0
 
-        # Initialize cleaner (GPU will be used automatically)
-        cleaner = DataCleaner(use_gpu=True, batch_size=64)
+        # Step 1: Load and clean text
+        if 'clean' in completed_steps and checkpoint:
+            print(f"  Loading cached clean data...")
+            df = checkpoint.load_checkpoint(filename, 'clean', file_hash)
+        else:
+            df = pd.read_parquet(input_path)
+            original_count = len(df)
+            print(f"  Cleaning {original_count} documents...")
 
-        # Step 1: Clean text (vectorized)
-        print(f"  Cleaning text...")
-        df['text'] = df['text'].apply(cleaner.clean_text)
+            # Vectorized cleaning with progress bar
+            tqdm.pandas(desc="    Cleaning text")
+            df['text'] = df['text'].progress_apply(lambda x: fix_text(str(x)) if pd.notna(x) else "")
+            df['text'] = df['text'].str.replace(r'\s+', ' ', regex=True)
+            df['text'] = df['text'].str.replace(r'\b[\w\.-]+@[\w\.-]+\.\w+\b', '[EMAIL]', regex=True)
+            df['text'] = df['text'].str.strip()
 
-        # Step 2: Quality filtering (vectorized)
-        print(f"  Filtering quality...")
-        quality_mask = cleaner.filter_quality_batch(df['text'].tolist())
-        df = df[quality_mask].reset_index(drop=True)
-        print(f"    After quality filter: {len(df)}/{original_count} ({len(df)/original_count*100:.1f}%)")
+            if checkpoint:
+                checkpoint.save_checkpoint(df, filename, 'clean', file_hash)
+                checkpoint.save_state(filename, file_hash, {'completed': ['clean'], 'original_count': original_count})
 
-        # Step 3: Toxicity filtering (batched GPU inference)
-        print(f"  Filtering toxicity (GPU batched)...")
-        toxic_mask = cleaner.is_toxic_batch(df['text'].tolist())
-        df = df[~np.array(toxic_mask)].reset_index(drop=True)
-        print(f"    After toxicity filter: {len(df)}/{original_count} ({len(df)/original_count*100:.1f}%)")
+        # Step 2: Quality filtering
+        if 'quality' in completed_steps and checkpoint:
+            print(f"  Loading cached quality-filtered data...")
+            df = checkpoint.load_checkpoint(filename, 'quality', file_hash)
+        else:
+            print(f"  Filtering by quality...")
+            # Vectorized quality checks
+            word_counts = df['text'].str.split().str.len()
+            unique_chars = df['text'].str.lower().apply(lambda x: len(set(x)))
+            quality_mask = (word_counts >= 50) & (word_counts <= 10000) & (unique_chars >= 20)
+            df = df[quality_mask].reset_index(drop=True)
+            print(f"    After quality filter: {len(df)}/{original_count} ({len(df)/original_count*100:.1f}%)")
 
-        # Step 4: Deduplication (batched)
-        print(f"  Deduplicating...")
+            if checkpoint:
+                checkpoint.save_checkpoint(df, filename, 'quality', file_hash)
+                checkpoint.save_state(filename, file_hash, {'completed': ['clean', 'quality'], 'original_count': original_count})
+
+        # Step 3: Toxicity filtering (GPU-accelerated)
+        if 'toxicity' in completed_steps and checkpoint:
+            print(f"  Loading cached toxicity-filtered data...")
+            df = checkpoint.load_checkpoint(filename, 'toxicity', file_hash)
+        else:
+            print(f"  Filtering toxicity ({len(df)} docs, batch_size={batch_size})...")
+            cleaner = DataCleaner(use_gpu=use_gpu, batch_size=batch_size)
+            toxic_mask = cleaner.is_toxic_batch(df['text'].tolist(), show_progress=True)
+            df = df[~np.array(toxic_mask)].reset_index(drop=True)
+            print(f"    After toxicity filter: {len(df)}/{original_count} ({len(df)/original_count*100:.1f}%)")
+
+            if checkpoint:
+                checkpoint.save_checkpoint(df, filename, 'toxicity', file_hash)
+                checkpoint.save_state(filename, file_hash, {'completed': ['clean', 'quality', 'toxicity'], 'original_count': original_count})
+
+        # Step 4: Deduplication
+        print(f"  Deduplicating {len(df)} docs...")
+        cleaner = DataCleaner(use_gpu=False)  # Dedup is CPU-only
         doc_ids = [f"{filename}_{i}" for i in range(len(df))]
-        keep_mask = cleaner.deduplicate_batch(df['text'].tolist(), doc_ids)
+        keep_mask = cleaner.deduplicate_batch(df['text'].tolist(), doc_ids, show_progress=True)
         df = df[keep_mask].reset_index(drop=True)
         final_count = len(df)
         print(f"    After deduplication: {final_count}/{original_count} ({final_count/original_count*100:.1f}%)")
 
-        # Add source column
+        # Add source column and save
         df['source'] = filename
-
-        # Save
+        os.makedirs(output_dir, exist_ok=True)
         df.to_parquet(output_path, index=False)
-        print(f"✓ Saved {output_filename}: {final_count}/{original_count} documents ({final_count/original_count*100:.1f}%)")
+        print(f"Saved {output_filename}: {final_count}/{original_count} documents")
+
+        # Cleanup checkpoints on success
+        if checkpoint:
+            checkpoint.cleanup(filename, file_hash)
 
         return filename, final_count, original_count
 
     except Exception as e:
-        print(f"✗ Error processing {filename}: {e}")
+        print(f"Error processing {filename}: {e}")
+        import traceback
+        traceback.print_exc()
         return filename, 0, 0
 
-def process_all_files_parallel(input_dir="data/raw", output_dir="data/processed",
-                               file_pattern="pretraining_", max_workers=None):
-    """Process multiple files in parallel using all CPU cores"""
+
+def process_all_files(
+    input_dir: str = "data/raw",
+    output_dir: str = "data/processed",
+    file_pattern: str = "pretraining_",
+    use_gpu: bool = True,
+    use_cache: bool = True,
+    batch_size: int = 128,
+) -> None:
+    """Process all matching files sequentially (best for GPU)."""
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Get list of files to process
-    files_to_process = [
+    files_to_process = sorted([
         f for f in os.listdir(input_dir)
         if f.startswith(file_pattern) and f.endswith('.parquet')
-    ]
+    ])
 
     print(f"\n{'='*60}")
     print(f"Found {len(files_to_process)} files to process")
-    print(f"Using up to {max_workers or cpu_count()} parallel workers")
+    print(f"GPU acceleration: {use_gpu and torch.cuda.is_available()}")
+    print(f"Caching enabled: {use_cache}")
+    print(f"Batch size: {batch_size}")
     print(f"{'='*60}\n")
 
-    # Prepare arguments for parallel processing
-    args_list = [(f, input_dir, output_dir) for f in files_to_process]
-
-    # Process files in parallel
-    # Note: When using GPU, we use spawn method which is slower to start
-    # but necessary for CUDA compatibility
-    if max_workers == 1:
-        # Sequential processing (for debugging)
-        results = [process_single_file(args) for args in args_list]
-    else:
-        # Parallel processing with spawn (CUDA-safe)
-        ctx = mp.get_context('spawn')
-        with ctx.Pool(processes=max_workers) as pool:
-            results = pool.map(process_single_file, args_list)
+    results = []
+    for filename in files_to_process:
+        result = process_single_file(
+            filename, input_dir, output_dir,
+            use_gpu=use_gpu, use_cache=use_cache, batch_size=batch_size
+        )
+        results.append(result)
 
     # Summary
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
     total_kept = sum(r[1] for r in results)
-    total_original = sum(r[2] for r in results)
+    total_original = sum(r[2] for r in results if r[2] > 0)
     for filename, kept, original in results:
         if original > 0:
             print(f"  {filename}: {kept}/{original} ({kept/original*100:.1f}%)")
-    print(f"\nTotal: {total_kept}/{total_original} ({total_kept/total_original*100:.1f}% kept)")
+    if total_original > 0:
+        print(f"\nTotal: {total_kept}/{total_original} ({total_kept/total_original*100:.1f}% kept)")
     print(f"{'='*60}\n")
+
 
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description='Clean and deduplicate data with GPU acceleration')
-    parser.add_argument('--workers', type=int, default=None,
-                       help='Number of parallel workers (default: 1 for GPU, all cores for CPU)')
+    parser = argparse.ArgumentParser(description='Clean and deduplicate data with GPU acceleration and caching')
     parser.add_argument('--pattern', type=str, default='pretraining_',
                        help='File pattern to match (default: pretraining_)')
     parser.add_argument('--no-gpu', action='store_true',
                        help='Disable GPU acceleration')
+    parser.add_argument('--no-cache', action='store_true',
+                       help='Disable checkpoint caching')
+    parser.add_argument('--batch-size', type=int, default=128,
+                       help='Batch size for toxicity detection (default: 128)')
+    parser.add_argument('--input-dir', type=str, default='data/raw',
+                       help='Input directory (default: data/raw)')
+    parser.add_argument('--output-dir', type=str, default='data/processed',
+                       help='Output directory (default: data/processed)')
 
     args = parser.parse_args()
 
     use_gpu = torch.cuda.is_available() and not args.no_gpu
 
-    # For GPU processing, use sequential by default (multiple GPU workers compete for memory)
-    # For CPU processing, use all cores
-    if args.workers is not None:
-        workers = args.workers
-    elif use_gpu:
-        workers = 1  # Sequential for GPU - avoids memory competition
-    else:
-        workers = cpu_count()
-
-    print(f"Starting optimized data cleaning with:")
+    print(f"Starting optimized data cleaning:")
     print(f"  - GPU acceleration: {use_gpu}")
-    print(f"  - Parallel workers: {workers}")
-    print(f"  - Batch processing: Enabled")
+    print(f"  - Checkpoint caching: {not args.no_cache}")
+    print(f"  - Batch size: {args.batch_size}")
     print(f"  - File pattern: {args.pattern}")
-    if use_gpu and workers > 1:
-        print(f"  - Warning: Multiple GPU workers may cause memory issues")
     print()
 
-    process_all_files_parallel(max_workers=workers, file_pattern=args.pattern)
+    process_all_files(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        file_pattern=args.pattern,
+        use_gpu=use_gpu,
+        use_cache=not args.no_cache,
+        batch_size=args.batch_size,
+    )
 
 
 if __name__ == "__main__":
