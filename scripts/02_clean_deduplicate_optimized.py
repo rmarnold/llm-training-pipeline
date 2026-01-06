@@ -332,7 +332,9 @@ def _init_datatrove_filters():
 
 
 def _filter_single_text_datatrove(text: str) -> bool:
-    """Filter a single text using datatrove filters (for multiprocessing)."""
+    """Filter a single text using datatrove filters (for multiprocessing).
+    Returns True if passed, False if rejected.
+    """
     filters = _init_datatrove_filters()
     if filters is None:
         return True  # No filters available, keep doc
@@ -353,6 +355,29 @@ def _filter_single_text_datatrove(text: str) -> bool:
         return False
 
 
+def _filter_single_text_datatrove_with_reason(text: str) -> str:
+    """Filter a single text and return rejection reason (for stats).
+    Returns: 'passed', 'repetition', 'quality', 'fineweb', or 'error'
+    """
+    filters = _init_datatrove_filters()
+    if filters is None:
+        return 'passed'
+
+    try:
+        doc = Document(text=text, id="0")
+
+        if not filters['gopher_rep'].filter(doc):
+            return 'repetition'
+        if not filters['gopher_quality'].filter(doc):
+            return 'quality'
+        if not filters['fineweb'].filter(doc):
+            return 'fineweb'
+
+        return 'passed'
+    except Exception:
+        return 'error'
+
+
 def _filter_single_text_basic(text: str) -> bool:
     """Basic quality filter (fast fallback)."""
     word_count = len(text.split())
@@ -362,6 +387,19 @@ def _filter_single_text_basic(text: str) -> bool:
     if unique_chars < 20:
         return False
     return True
+
+
+def _filter_single_text_basic_with_reason(text: str) -> str:
+    """Basic quality filter with rejection reason."""
+    word_count = len(text.split())
+    if word_count < 50:
+        return 'too_short'
+    if word_count > 10000:
+        return 'too_long'
+    unique_chars = len(set(text.lower()))
+    if unique_chars < 20:
+        return 'low_diversity'
+    return 'passed'
 
 
 class DatatroveQualityFilter:
@@ -406,6 +444,42 @@ class DatatroveQualityFilter:
                 results = pool.map(_filter_single_text_datatrove, texts, chunksize=1000)
 
         return results
+
+    def filter_batch_with_stats(self, texts: list[str], show_progress: bool = False) -> tuple[list[bool], dict]:
+        """Apply quality filters and return rejection statistics.
+
+        Returns:
+            tuple: (mask list, stats dict)
+            - mask: List of booleans (True = keep, False = filter out)
+            - stats: Dict with counts for each rejection reason
+        """
+        n_texts = len(texts)
+
+        # Get rejection reasons for each text
+        if n_texts < 1000:
+            reasons = [_filter_single_text_datatrove_with_reason(t) for t in texts]
+        else:
+            with Pool(processes=self.n_workers) as pool:
+                if show_progress:
+                    reasons = list(tqdm(
+                        pool.imap(_filter_single_text_datatrove_with_reason, texts, chunksize=1000),
+                        total=n_texts,
+                        desc="      Quality filter"
+                    ))
+                else:
+                    reasons = pool.map(_filter_single_text_datatrove_with_reason, texts, chunksize=1000)
+
+        # Convert reasons to boolean mask and count stats
+        mask = [r == 'passed' for r in reasons]
+        stats = {
+            'passed': reasons.count('passed'),
+            'failed_repetition': reasons.count('repetition'),
+            'failed_quality': reasons.count('quality'),
+            'failed_fineweb': reasons.count('fineweb'),
+            'failed_error': reasons.count('error'),
+        }
+
+        return mask, stats
 
 
 def apply_quality_filter_parallel(
@@ -653,6 +727,15 @@ def process_single_file(
         filter_type = "datatrove (Gopher+FineWeb) parallel" if quality_filter else "basic"
         print(f"    Using {filter_type} quality filters ({n_workers} workers)")
 
+        # Aggregate stats across all chunks
+        total_quality_stats = {
+            'passed': 0,
+            'failed_repetition': 0,
+            'failed_quality': 0,
+            'failed_fineweb': 0,
+            'failed_error': 0,
+        }
+
         for i, chunk_path in enumerate(all_chunk_files):
             # Load one chunk at a time
             chunk_df = pd.read_parquet(chunk_path)
@@ -661,8 +744,24 @@ def process_single_file(
 
             # Quality filter (datatrove production filters or basic fallback)
             if quality_filter:
-                # Datatrove: Gopher repetition + quality + FineWeb filters (parallel)
-                quality_mask = quality_filter.filter_batch(chunk_df['text'].tolist(), show_progress=True)
+                # Datatrove: Gopher repetition + quality + FineWeb filters (parallel with stats)
+                quality_mask, chunk_stats = quality_filter.filter_batch_with_stats(
+                    chunk_df['text'].tolist(), show_progress=True
+                )
+                # Accumulate stats
+                for key in total_quality_stats:
+                    total_quality_stats[key] += chunk_stats.get(key, 0)
+                # Print per-chunk rejection breakdown
+                print(f"      Rejection breakdown:")
+                print(f"        - Passed: {chunk_stats['passed']:,} ({chunk_stats['passed']/chunk_size*100:.1f}%)")
+                if chunk_stats['failed_repetition'] > 0:
+                    print(f"        - Failed repetition: {chunk_stats['failed_repetition']:,} ({chunk_stats['failed_repetition']/chunk_size*100:.1f}%)")
+                if chunk_stats['failed_quality'] > 0:
+                    print(f"        - Failed quality: {chunk_stats['failed_quality']:,} ({chunk_stats['failed_quality']/chunk_size*100:.1f}%)")
+                if chunk_stats['failed_fineweb'] > 0:
+                    print(f"        - Failed fineweb: {chunk_stats['failed_fineweb']:,} ({chunk_stats['failed_fineweb']/chunk_size*100:.1f}%)")
+                if chunk_stats['failed_error'] > 0:
+                    print(f"        - Failed error: {chunk_stats['failed_error']:,} ({chunk_stats['failed_error']/chunk_size*100:.1f}%)")
             else:
                 # Basic fallback: word count + unique chars (parallel)
                 quality_mask = apply_quality_filter_parallel(
@@ -691,8 +790,20 @@ def process_single_file(
             # Delete original chunk to free disk space
             chunk_path.unlink()
 
-        print(f"    After quality filter: {total_after_quality}/{original_count} ({total_after_quality/original_count*100:.1f}%)")
-        print(f"    After toxicity filter: {total_after_toxicity}/{original_count} ({total_after_toxicity/original_count*100:.1f}%)")
+        print(f"\n    Quality filter summary:")
+        print(f"      Total passed: {total_after_quality:,}/{original_count:,} ({total_after_quality/original_count*100:.1f}%)")
+        if quality_filter and sum(total_quality_stats.values()) > 0:
+            total_filtered = original_count
+            print(f"      Rejection reasons:")
+            if total_quality_stats['failed_repetition'] > 0:
+                print(f"        - Repetition (spam/duplicates): {total_quality_stats['failed_repetition']:,} ({total_quality_stats['failed_repetition']/total_filtered*100:.1f}%)")
+            if total_quality_stats['failed_quality'] > 0:
+                print(f"        - Quality (word count/stop words): {total_quality_stats['failed_quality']:,} ({total_quality_stats['failed_quality']/total_filtered*100:.1f}%)")
+            if total_quality_stats['failed_fineweb'] > 0:
+                print(f"        - FineWeb (line structure): {total_quality_stats['failed_fineweb']:,} ({total_quality_stats['failed_fineweb']/total_filtered*100:.1f}%)")
+            if total_quality_stats['failed_error'] > 0:
+                print(f"        - Errors: {total_quality_stats['failed_error']:,} ({total_quality_stats['failed_error']/total_filtered*100:.1f}%)")
+        print(f"    After toxicity filter: {total_after_toxicity:,}/{original_count:,} ({total_after_toxicity/original_count*100:.1f}%)")
 
         # Stream deduplication - process chunks one at a time, write output incrementally
         # This avoids loading all filtered data into memory at once
