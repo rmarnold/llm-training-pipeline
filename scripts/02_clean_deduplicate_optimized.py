@@ -310,44 +310,89 @@ class DataCleaner:
 
 # Global filter instances for multiprocessing workers
 _datatrove_filters = None
+_datatrove_filter_config = {
+    'use_gopher_quality': True,  # Fast: word count, stop words, symbol ratio
+    'use_fineweb': True,         # Medium: line structure, punctuation
+    'use_gopher_rep': True,      # Slow: n-gram repetition analysis
+}
+
+
+def configure_datatrove_filters(
+    use_gopher_quality: bool = True,
+    use_fineweb: bool = True,
+    use_gopher_rep: bool = True
+):
+    """Configure which datatrove filters to use.
+
+    For faster processing, disable expensive filters:
+    - use_gopher_rep=False: Skip n-gram analysis (biggest speedup, ~2x faster)
+    - use_fineweb=False: Skip line structure checks (~15% faster)
+
+    Args:
+        use_gopher_quality: Enable word count/stop word checks (fast, recommended)
+        use_fineweb: Enable line structure checks (medium speed)
+        use_gopher_rep: Enable repetition/spam detection (slow but catches spam)
+    """
+    global _datatrove_filter_config, _datatrove_filters
+    _datatrove_filter_config = {
+        'use_gopher_quality': use_gopher_quality,
+        'use_fineweb': use_fineweb,
+        'use_gopher_rep': use_gopher_rep,
+    }
+    # Reset filters so they get re-initialized with new config
+    _datatrove_filters = None
 
 
 def _init_datatrove_filters():
     """Initialize datatrove filters for the current process."""
     global _datatrove_filters
     if _datatrove_filters is None and DATATROVE_AVAILABLE:
-        _datatrove_filters = {
-            'gopher_rep': GopherRepetitionFilter(),
-            'gopher_quality': GopherQualityFilter(
+        _datatrove_filters = {}
+
+        if _datatrove_filter_config.get('use_gopher_quality', True):
+            _datatrove_filters['gopher_quality'] = GopherQualityFilter(
                 min_doc_words=50,
                 max_doc_words=100000,
                 min_avg_word_length=3,
                 max_avg_word_length=10,
                 min_stop_words=2,
                 max_symbol_word_ratio=0.1,
-            ),
-            'fineweb': FineWebQualityFilter(),
-        }
+            )
+
+        if _datatrove_filter_config.get('use_fineweb', True):
+            _datatrove_filters['fineweb'] = FineWebQualityFilter()
+
+        if _datatrove_filter_config.get('use_gopher_rep', True):
+            _datatrove_filters['gopher_rep'] = GopherRepetitionFilter()
+
     return _datatrove_filters
 
 
 def _filter_single_text_datatrove(text: str) -> bool:
     """Filter a single text using datatrove filters (for multiprocessing).
     Returns True if passed, False if rejected.
+
+    OPTIMIZED: Runs filters in order of speed (fastest first = fail-fast):
+    1. GopherQuality (fast - simple word stats)
+    2. FineWeb (medium - line analysis)
+    3. GopherRepetition (slow - n-gram analysis)
     """
     filters = _init_datatrove_filters()
-    if filters is None:
-        return True  # No filters available, keep doc
+    if not filters:
+        return True  # No filters available/enabled, keep doc
 
     try:
         doc = Document(text=text, id="0")
 
-        # Apply filters in sequence (fail-fast)
-        if not filters['gopher_rep'].filter(doc):
+        # Apply filters in order of speed (fastest first for fail-fast)
+        # 1. GopherQuality is fastest (simple word count, stop words, etc.)
+        if 'gopher_quality' in filters and not filters['gopher_quality'].filter(doc):
             return False
-        if not filters['gopher_quality'].filter(doc):
+        # 2. FineWeb is medium speed (line analysis)
+        if 'fineweb' in filters and not filters['fineweb'].filter(doc):
             return False
-        if not filters['fineweb'].filter(doc):
+        # 3. GopherRepetition is slowest (n-gram analysis) - run last
+        if 'gopher_rep' in filters and not filters['gopher_rep'].filter(doc):
             return False
 
         return True
@@ -357,21 +402,24 @@ def _filter_single_text_datatrove(text: str) -> bool:
 
 def _filter_single_text_datatrove_with_reason(text: str) -> str:
     """Filter a single text and return rejection reason (for stats).
-    Returns: 'passed', 'repetition', 'quality', 'fineweb', or 'error'
+    Returns: 'passed', 'quality', 'fineweb', 'repetition', or 'error'
+
+    OPTIMIZED: Same order as _filter_single_text_datatrove (fastest first)
     """
     filters = _init_datatrove_filters()
-    if filters is None:
+    if not filters:
         return 'passed'
 
     try:
         doc = Document(text=text, id="0")
 
-        if not filters['gopher_rep'].filter(doc):
-            return 'repetition'
-        if not filters['gopher_quality'].filter(doc):
+        # Run in order of speed (fastest first)
+        if 'gopher_quality' in filters and not filters['gopher_quality'].filter(doc):
             return 'quality'
-        if not filters['fineweb'].filter(doc):
+        if 'fineweb' in filters and not filters['fineweb'].filter(doc):
             return 'fineweb'
+        if 'gopher_rep' in filters and not filters['gopher_rep'].filter(doc):
+            return 'repetition'
 
         return 'passed'
     except Exception:
@@ -436,12 +484,12 @@ class DatatroveQualityFilter:
         with Pool(processes=self.n_workers) as pool:
             if show_progress:
                 results = list(tqdm(
-                    pool.imap(_filter_single_text_datatrove, texts, chunksize=1000),
+                    pool.imap(_filter_single_text_datatrove, texts, chunksize=5000),
                     total=n_texts,
                     desc="      Quality filter"
                 ))
             else:
-                results = pool.map(_filter_single_text_datatrove, texts, chunksize=1000)
+                results = pool.map(_filter_single_text_datatrove, texts, chunksize=5000)
 
         return results
 
@@ -462,12 +510,12 @@ class DatatroveQualityFilter:
             with Pool(processes=self.n_workers) as pool:
                 if show_progress:
                     reasons = list(tqdm(
-                        pool.imap(_filter_single_text_datatrove_with_reason, texts, chunksize=1000),
+                        pool.imap(_filter_single_text_datatrove_with_reason, texts, chunksize=5000),
                         total=n_texts,
                         desc="      Quality filter"
                     ))
                 else:
-                    reasons = pool.map(_filter_single_text_datatrove_with_reason, texts, chunksize=1000)
+                    reasons = pool.map(_filter_single_text_datatrove_with_reason, texts, chunksize=5000)
 
         # Convert reasons to boolean mask and count stats
         mask = [r == 'passed' for r in reasons]
@@ -515,12 +563,12 @@ def apply_quality_filter_parallel(
     with Pool(processes=n_workers) as pool:
         if show_progress:
             results = list(tqdm(
-                pool.imap(filter_fn, texts, chunksize=1000),
+                pool.imap(filter_fn, texts, chunksize=5000),
                 total=n_texts,
                 desc="      Quality filter"
             ))
         else:
-            results = pool.map(filter_fn, texts, chunksize=1000)
+            results = pool.map(filter_fn, texts, chunksize=5000)
 
     return results
 
@@ -962,6 +1010,13 @@ def main():
                        help='Use fast cleaning (skip Unicode fixing) [default: enabled]')
     parser.add_argument('--full-clean', action='store_true',
                        help='Use full cleaning with plsfix (Rust-based, 10x faster than ftfy)')
+    # Datatrove filter options
+    parser.add_argument('--no-repetition-filter', action='store_true',
+                       help='Skip GopherRepetitionFilter (2x faster, but misses spam)')
+    parser.add_argument('--no-fineweb-filter', action='store_true',
+                       help='Skip FineWebQualityFilter (15% faster, less strict)')
+    parser.add_argument('--fast-quality', action='store_true',
+                       help='Only use GopherQualityFilter (fastest, basic filtering)')
 
     args = parser.parse_args()
 
@@ -974,8 +1029,31 @@ def main():
         _CLEANING_MODE = 'fast'
         print("Cleaning mode: FAST (skip Unicode fixing, ~5-10x faster)")
 
+    # Configure datatrove filters
+    if args.fast_quality:
+        # Fastest: only basic quality checks
+        configure_datatrove_filters(
+            use_gopher_quality=True,
+            use_fineweb=False,
+            use_gopher_rep=False
+        )
+        print("Quality filters: FAST (GopherQuality only)")
+    else:
+        use_rep = not args.no_repetition_filter
+        use_fineweb = not args.no_fineweb_filter
+        configure_datatrove_filters(
+            use_gopher_quality=True,
+            use_fineweb=use_fineweb,
+            use_gopher_rep=use_rep
+        )
+        filters_enabled = []
+        if True: filters_enabled.append("GopherQuality")
+        if use_fineweb: filters_enabled.append("FineWeb")
+        if use_rep: filters_enabled.append("GopherRepetition")
+        print(f"Quality filters: {', '.join(filters_enabled)}")
+
     use_gpu = torch.cuda.is_available() and not args.no_gpu
-    # Default to half of CPU cores - streaming approach prevents memory buildup
+    # Default to 80% of CPU cores - streaming approach prevents memory buildup
     n_workers = args.workers if args.workers else max(1, int(cpu_count() * 0.8))
 
     print(f"Starting optimized data cleaning:")
