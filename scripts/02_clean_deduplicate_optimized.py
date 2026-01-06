@@ -449,12 +449,21 @@ def process_single_file(
             # Now load all chunks and combine for final output
             print(f"  Combining {current_chunk_idx} chunks into final output...")
             all_chunk_files = sorted(chunk_dir.glob(chunk_pattern)) if chunk_dir else []
-            all_cleaned = []
-            for chunk_path in tqdm(all_chunk_files, desc="    Loading chunks"):
-                chunk_df = pd.read_parquet(chunk_path)
-                all_cleaned.extend(chunk_df['text'].tolist())
 
-            df['text'] = all_cleaned
+            if all_chunk_files:
+                # Fast concatenation using pyarrow (avoids pandas overhead)
+                import pyarrow.parquet as pq
+                import pyarrow as pa
+
+                tables = []
+                for chunk_path in tqdm(all_chunk_files, desc="    Loading chunks"):
+                    tables.append(pq.read_table(chunk_path))
+
+                print("    Concatenating tables...")
+                combined_table = pa.concat_tables(tables)
+                df = combined_table.to_pandas()
+            else:
+                df = pd.DataFrame({'text': []})
 
             # Save final checkpoint and cleanup chunk files
             if checkpoint:
