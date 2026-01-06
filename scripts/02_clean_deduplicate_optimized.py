@@ -308,6 +308,62 @@ class DataCleaner:
         return keep_mask
 
 
+# Global filter instances for multiprocessing workers
+_datatrove_filters = None
+
+
+def _init_datatrove_filters():
+    """Initialize datatrove filters for the current process."""
+    global _datatrove_filters
+    if _datatrove_filters is None and DATATROVE_AVAILABLE:
+        _datatrove_filters = {
+            'gopher_rep': GopherRepetitionFilter(),
+            'gopher_quality': GopherQualityFilter(
+                min_doc_words=50,
+                max_doc_words=100000,
+                min_avg_word_length=3,
+                max_avg_word_length=10,
+                min_stop_words=2,
+                max_symbol_word_ratio=0.1,
+            ),
+            'fineweb': FineWebQualityFilter(),
+        }
+    return _datatrove_filters
+
+
+def _filter_single_text_datatrove(text: str) -> bool:
+    """Filter a single text using datatrove filters (for multiprocessing)."""
+    filters = _init_datatrove_filters()
+    if filters is None:
+        return True  # No filters available, keep doc
+
+    try:
+        doc = Document(text=text, id="0")
+
+        # Apply filters in sequence (fail-fast)
+        if not filters['gopher_rep'].filter(doc):
+            return False
+        if not filters['gopher_quality'].filter(doc):
+            return False
+        if not filters['fineweb'].filter(doc):
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+def _filter_single_text_basic(text: str) -> bool:
+    """Basic quality filter (fast fallback)."""
+    word_count = len(text.split())
+    if word_count < 50 or word_count > 10000:
+        return False
+    unique_chars = len(set(text.lower()))
+    if unique_chars < 20:
+        return False
+    return True
+
+
 class DatatroveQualityFilter:
     """Production-grade quality filtering using datatrove (FineWeb/Gopher filters).
 
@@ -315,90 +371,84 @@ class DatatroveQualityFilter:
     - GopherRepetitionFilter: Detects repeated n-grams, lines, paragraphs
     - GopherQualityFilter: Word count, stop words, alpha ratio, etc.
     - FineWebQualityFilter: Line-ending punctuation, short lines, etc.
+
+    Uses multiprocessing for parallel filtering on large batches.
     """
 
-    def __init__(self, language: str = "en"):
+    def __init__(self, n_workers: int = None):
         if not DATATROVE_AVAILABLE:
             raise ImportError("datatrove not installed. Run: pip install datatrove")
 
-        # Initialize filters (these are fast, rule-based)
-        self.gopher_rep_filter = GopherRepetitionFilter()
-        self.gopher_quality_filter = GopherQualityFilter(
-            min_doc_words=50,
-            max_doc_words=100000,
-            min_avg_word_length=3,
-            max_avg_word_length=10,
-            min_stop_words=2,  # Relaxed for diverse content
-            max_symbol_word_ratio=0.1,
-        )
-        self.fineweb_filter = FineWebQualityFilter()
+        self.n_workers = n_workers or max(1, cpu_count() // 2)
+        # Initialize filters in main process too (for small batches)
+        _init_datatrove_filters()
 
-    def filter_batch(self, texts: list[str], doc_ids: list[str] = None) -> list[bool]:
-        """Apply all quality filters to a batch of texts.
+    def filter_batch(self, texts: list[str], show_progress: bool = False) -> list[bool]:
+        """Apply all quality filters to a batch of texts using parallel processing.
 
         Returns a list of booleans (True = keep, False = filter out).
-        Much faster than old vectorized pandas approach.
         """
-        if doc_ids is None:
-            doc_ids = [str(i) for i in range(len(texts))]
+        n_texts = len(texts)
 
-        results = []
-        for text, doc_id in zip(texts, doc_ids):
-            # Create datatrove Document
-            doc = Document(text=text, id=doc_id)
+        # For small batches, use single-threaded
+        if n_texts < 1000:
+            return [_filter_single_text_datatrove(t) for t in texts]
 
-            # Apply filters in sequence (fail-fast)
-            try:
-                # 1. Repetition filter (catches spam, repeated content)
-                if not self.gopher_rep_filter.filter(doc):
-                    results.append(False)
-                    continue
-
-                # 2. Gopher quality filter (word stats, stop words, etc.)
-                if not self.gopher_quality_filter.filter(doc):
-                    results.append(False)
-                    continue
-
-                # 3. FineWeb filter (line quality, punctuation, etc.)
-                if not self.fineweb_filter.filter(doc):
-                    results.append(False)
-                    continue
-
-                results.append(True)
-            except Exception:
-                # If any filter errors, reject the doc
-                results.append(False)
+        # Parallel processing for large batches
+        with Pool(processes=self.n_workers) as pool:
+            if show_progress:
+                results = list(tqdm(
+                    pool.imap(_filter_single_text_datatrove, texts, chunksize=1000),
+                    total=n_texts,
+                    desc="      Quality filter"
+                ))
+            else:
+                results = pool.map(_filter_single_text_datatrove, texts, chunksize=1000)
 
         return results
 
 
-def apply_quality_filter(texts: list[str], use_datatrove: bool = True) -> list[bool]:
-    """Apply quality filtering to texts.
+def apply_quality_filter_parallel(
+    texts: list[str],
+    use_datatrove: bool = True,
+    n_workers: int = None,
+    show_progress: bool = False
+) -> list[bool]:
+    """Apply quality filtering to texts with parallel processing.
 
     Args:
         texts: List of text documents
         use_datatrove: If True, use production datatrove filters. If False, use basic filters.
+        n_workers: Number of parallel workers (default: cpu_count // 2)
+        show_progress: Show progress bar
 
     Returns:
         List of booleans (True = keep, False = filter out)
     """
+    n_workers = n_workers or max(1, cpu_count() // 2)
+    n_texts = len(texts)
+
     if use_datatrove and DATATROVE_AVAILABLE:
-        filter = DatatroveQualityFilter()
-        return filter.filter_batch(texts)
+        filter_fn = _filter_single_text_datatrove
     else:
-        # Fallback to basic filtering (fast but less accurate)
-        results = []
-        for text in texts:
-            word_count = len(text.split())
-            if word_count < 50 or word_count > 10000:
-                results.append(False)
-                continue
-            unique_chars = len(set(text.lower()))
-            if unique_chars < 20:
-                results.append(False)
-                continue
-            results.append(True)
-        return results
+        filter_fn = _filter_single_text_basic
+
+    # For small batches, use single-threaded
+    if n_texts < 1000:
+        return [filter_fn(t) for t in texts]
+
+    # Parallel processing for large batches
+    with Pool(processes=n_workers) as pool:
+        if show_progress:
+            results = list(tqdm(
+                pool.imap(filter_fn, texts, chunksize=1000),
+                total=n_texts,
+                desc="      Quality filter"
+            ))
+        else:
+            results = pool.map(filter_fn, texts, chunksize=1000)
+
+    return results
 
 
 class CheckpointManager:
@@ -599,32 +649,38 @@ def process_single_file(
         total_after_toxicity = 0
 
         # Initialize datatrove quality filter once (if available)
-        quality_filter = DatatroveQualityFilter() if DATATROVE_AVAILABLE else None
-        filter_type = "datatrove (Gopher+FineWeb)" if quality_filter else "basic"
-        print(f"    Using {filter_type} quality filters")
+        quality_filter = DatatroveQualityFilter(n_workers=n_workers) if DATATROVE_AVAILABLE else None
+        filter_type = "datatrove (Gopher+FineWeb) parallel" if quality_filter else "basic"
+        print(f"    Using {filter_type} quality filters ({n_workers} workers)")
 
-        for i, chunk_path in enumerate(tqdm(all_chunk_files, desc="    Processing chunks")):
+        for i, chunk_path in enumerate(all_chunk_files):
             # Load one chunk at a time
             chunk_df = pd.read_parquet(chunk_path)
             chunk_size = len(chunk_df)
+            print(f"    Chunk {i+1}/{len(all_chunk_files)}: {chunk_size:,} docs")
 
             # Quality filter (datatrove production filters or basic fallback)
             if quality_filter:
-                # Datatrove: Gopher repetition + quality + FineWeb filters
-                quality_mask = quality_filter.filter_batch(chunk_df['text'].tolist())
+                # Datatrove: Gopher repetition + quality + FineWeb filters (parallel)
+                quality_mask = quality_filter.filter_batch(chunk_df['text'].tolist(), show_progress=True)
             else:
-                # Basic fallback: word count + unique chars
-                word_counts = chunk_df['text'].str.split().str.len()
-                unique_chars = chunk_df['text'].str.lower().apply(lambda x: len(set(x)) if x else 0)
-                quality_mask = ((word_counts >= 50) & (word_counts <= 10000) & (unique_chars >= 20)).tolist()
+                # Basic fallback: word count + unique chars (parallel)
+                quality_mask = apply_quality_filter_parallel(
+                    chunk_df['text'].tolist(),
+                    use_datatrove=False,
+                    n_workers=n_workers,
+                    show_progress=True
+                )
             chunk_df = chunk_df[quality_mask].reset_index(drop=True)
             total_after_quality += len(chunk_df)
+            print(f"      After quality: {len(chunk_df):,} docs ({len(chunk_df)/chunk_size*100:.1f}% kept)")
 
             # Toxicity filter (GPU-accelerated)
             if len(chunk_df) > 0:
-                toxic_mask = cleaner.is_toxic_batch(chunk_df['text'].tolist(), show_progress=False)
+                toxic_mask = cleaner.is_toxic_batch(chunk_df['text'].tolist(), show_progress=True)
                 chunk_df = chunk_df[~np.array(toxic_mask)].reset_index(drop=True)
             total_after_toxicity += len(chunk_df)
+            print(f"      After toxicity: {len(chunk_df):,} docs")
 
             # Save filtered chunk
             if len(chunk_df) > 0:
