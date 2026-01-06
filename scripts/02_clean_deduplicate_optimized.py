@@ -30,17 +30,78 @@ def _clean_text_worker(text: str) -> str:
     return text.strip()
 
 
+def parallel_clean_texts_streaming(
+    texts: list[str],
+    n_workers: int = None,
+    chunk_callback=None,
+    chunk_size: int = 500000
+):
+    """Clean texts in parallel with streaming output to avoid memory buildup.
+
+    Instead of accumulating all results in memory, yields chunks of results
+    and calls chunk_callback to save them incrementally.
+
+    Args:
+        texts: List of texts to clean
+        n_workers: Number of CPU workers (default: cpu_count // 4 for memory safety)
+        chunk_callback: Function to call with each chunk of results
+        chunk_size: Number of results per chunk (default: 500K)
+
+    Yields:
+        Chunks of cleaned text results
+    """
+    if n_workers is None:
+        # Use fewer workers to reduce memory pressure
+        # Each worker adds ~500MB-1GB overhead
+        n_workers = max(1, cpu_count() // 4)
+
+    n_workers = min(n_workers, cpu_count())
+    n_texts = len(texts)
+
+    if n_texts == 0:
+        return
+
+    pool_chunk_size = 5000
+    print(f"    Using {n_workers} CPU workers (pool_chunk={pool_chunk_size:,}, save_chunk={chunk_size:,})...")
+
+    current_chunk = []
+    chunk_idx = 0
+
+    with Pool(processes=n_workers) as pool:
+        with tqdm(total=n_texts, desc="    Cleaning text") as pbar:
+            for cleaned in pool.imap(_clean_text_worker, texts, chunksize=pool_chunk_size):
+                current_chunk.append(cleaned)
+                pbar.update(1)
+
+                # When chunk is full, save it and clear memory
+                if len(current_chunk) >= chunk_size:
+                    if chunk_callback:
+                        chunk_callback(current_chunk, chunk_idx)
+                    yield current_chunk
+                    chunk_idx += 1
+                    current_chunk = []  # Clear memory
+
+    # Yield remaining results
+    if current_chunk:
+        if chunk_callback:
+            chunk_callback(current_chunk, chunk_idx)
+        yield current_chunk
+
+
 def parallel_clean_texts(
     texts: list[str],
     n_workers: int = None,
     checkpoint_callback=None,
     checkpoint_interval: int = 500000
 ) -> list[str]:
-    """Clean texts in parallel with optional incremental checkpointing."""
+    """Clean texts in parallel with optional incremental checkpointing.
+
+    Note: For large datasets (>2M docs), use parallel_clean_texts_streaming instead
+    to avoid memory issues.
+    """
     if n_workers is None:
-        # Default to half of CPU cores to avoid memory issues
-        # Each worker adds memory overhead, and we need RAM for results
-        n_workers = max(1, cpu_count() // 2)
+        # Default to quarter of CPU cores to avoid memory issues
+        n_workers = max(1, cpu_count() // 4)
 
     n_workers = min(n_workers, cpu_count())
     n_texts = len(texts)
@@ -261,19 +322,18 @@ def process_single_file(
             chunk_pattern = f"{filename}_clean_chunk_*_{file_hash}.parquet"
             chunk_dir = checkpoint.cache_dir if checkpoint else None
             start_idx = 0
-            partial_results = []
             existing_chunks = []
 
             if chunk_dir:
-                # Find all existing chunk files and load them in order
+                # Find all existing chunk files - count docs without loading into memory
                 existing_chunks = sorted(chunk_dir.glob(chunk_pattern))
                 if existing_chunks:
-                    print(f"  Resuming from {len(existing_chunks)} checkpoint chunk(s)...")
+                    print(f"  Found {len(existing_chunks)} existing checkpoint chunk(s)...")
+                    # Count rows without loading full data into memory
                     for chunk_path in existing_chunks:
-                        chunk_df = pd.read_parquet(chunk_path)
-                        partial_results.extend(chunk_df['text'].tolist())
-                    start_idx = len(partial_results)
-                    print(f"    Loaded {start_idx:,} already cleaned documents")
+                        chunk_df = pd.read_parquet(chunk_path, columns=[])  # Just get row count
+                        start_idx += len(chunk_df)
+                    print(f"    {start_idx:,} documents already cleaned")
 
             remaining = original_count - start_idx
             # Track chunks for append-only saves
@@ -281,51 +341,59 @@ def process_single_file(
 
             if remaining <= 0:
                 print(f"  All documents already cleaned from chunks")
-                all_cleaned = partial_results
             else:
                 print(f"  Cleaning {remaining:,} documents (of {original_count:,} total)...")
 
-                last_saved_count = 0
-
-                # Checkpoint callback - append-only (only saves NEW data as separate chunk)
-                def save_chunk(results, count):
-                    nonlocal current_chunk_idx, last_saved_count
+                # Streaming chunk callback - saves each chunk to disk immediately
+                def save_chunk_streaming(chunk_data, idx):
+                    nonlocal current_chunk_idx
                     if checkpoint:
-                        # Only save the new portion since last checkpoint
-                        new_results = results[last_saved_count:]
-                        if new_results:
-                            chunk_path = chunk_dir / f"{filename}_clean_chunk_{current_chunk_idx:04d}_{file_hash}.parquet"
-                            print(f"\n    [Saving chunk {current_chunk_idx}: {len(new_results):,} docs...]", end="", flush=True)
-                            chunk_df = pd.DataFrame({'text': new_results})
-                            chunk_df.to_parquet(chunk_path, index=False)
-                            print(f" done]")
-                            current_chunk_idx += 1
-                            last_saved_count = count
+                        actual_idx = current_chunk_idx + idx
+                        chunk_path = chunk_dir / f"{filename}_clean_chunk_{actual_idx:04d}_{file_hash}.parquet"
+                        print(f"\n    [Saving chunk {actual_idx}: {len(chunk_data):,} docs...]", end="", flush=True)
+                        chunk_df = pd.DataFrame({'text': chunk_data})
+                        chunk_df.to_parquet(chunk_path, index=False)
+                        print(f" done]")
 
-                # Clean remaining texts
+                # Use streaming approach - processes and saves in chunks, doesn't accumulate in memory
                 texts_to_clean = df['text'].tolist()[start_idx:]
-                new_results = parallel_clean_texts(
-                    texts_to_clean,
-                    n_workers=n_workers,
-                    checkpoint_callback=save_chunk if checkpoint else None,
-                    checkpoint_interval=500000  # Save every 500K docs
-                )
 
-                # Combine partial + new results
-                all_cleaned = partial_results + new_results
+                # Determine workers based on available memory
+                # With 167GB RAM and 8M docs, use fewer workers
+                safe_workers = max(1, min(n_workers, cpu_count() // 4))
+
+                chunks_generated = 0
+                for chunk in parallel_clean_texts_streaming(
+                    texts_to_clean,
+                    n_workers=safe_workers,
+                    chunk_callback=save_chunk_streaming if checkpoint else None,
+                    chunk_size=500000
+                ):
+                    chunks_generated += 1
+                    # Chunk is saved to disk by callback, we don't keep it in memory
+
+                current_chunk_idx += chunks_generated
+
+            # Now load all chunks and combine for final output
+            print(f"  Combining {current_chunk_idx} chunks into final output...")
+            all_chunk_files = sorted(chunk_dir.glob(chunk_pattern)) if chunk_dir else []
+            all_cleaned = []
+            for chunk_path in tqdm(all_chunk_files, desc="    Loading chunks"):
+                chunk_df = pd.read_parquet(chunk_path)
+                all_cleaned.extend(chunk_df['text'].tolist())
 
             df['text'] = all_cleaned
 
             # Save final checkpoint and cleanup chunk files
             if checkpoint:
+                print(f"  Saving final cleaned data...")
                 checkpoint.save_checkpoint(df, filename, 'clean', file_hash)
                 checkpoint.save_state(filename, file_hash, {'completed': ['clean'], 'original_count': original_count})
                 # Remove chunk files after successful merge
-                chunk_files = list(chunk_dir.glob(chunk_pattern))
-                for chunk_path in chunk_files:
+                for chunk_path in all_chunk_files:
                     chunk_path.unlink()
-                if chunk_files:
-                    print(f"    Cleaned up {len(chunk_files)} chunk files")
+                if all_chunk_files:
+                    print(f"    Cleaned up {len(all_chunk_files)} chunk files")
 
         # Step 2: Quality filtering
         if 'quality' in completed_steps and checkpoint:
@@ -406,7 +474,7 @@ def process_all_files(
     ])
 
     if n_workers is None:
-        n_workers = cpu_count()
+        n_workers = max(1, cpu_count() // 4)
 
     print(f"\n{'='*60}")
     print(f"Found {len(files_to_process)} files to process")
@@ -461,7 +529,9 @@ def main():
     args = parser.parse_args()
 
     use_gpu = torch.cuda.is_available() and not args.no_gpu
-    n_workers = args.workers if args.workers else cpu_count()
+    # Default to 1/4 of CPU cores to avoid memory issues with large datasets
+    # Each worker adds memory overhead, and results accumulate in main process
+    n_workers = args.workers if args.workers else max(1, cpu_count() // 4)
 
     print(f"Starting optimized data cleaning:")
     print(f"  - GPU acceleration: {use_gpu}")
