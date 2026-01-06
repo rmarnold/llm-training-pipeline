@@ -318,7 +318,7 @@ class DataCleaner:
         try:
             with torch.no_grad():
                 if self.use_fp16:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):
                         _ = self.toxicity_model.predict(warmup_texts)
                 else:
                     _ = self.toxicity_model.predict(warmup_texts)
@@ -382,7 +382,7 @@ class DataCleaner:
             with torch.no_grad():
                 # Use automatic mixed precision for faster inference on A100/H100
                 if self.use_fp16 and self.device == 'cuda':
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):
                         results = self.toxicity_model.predict(batch)
                 else:
                     results = self.toxicity_model.predict(batch)
