@@ -255,15 +255,14 @@ class DataCleaner:
                     if 'A100' in gpu_name or 'H100' in gpu_name or gpu_mem >= 35:
                         self.use_fp16 = True
 
-                    # Much larger batch sizes for A100 - the model is small
-                    if gpu_mem >= 70:  # A100-80GB or similar
-                        batch_size = 1024 if self.use_fp16 else 512
-                    elif gpu_mem >= 35:  # A100-40GB or similar
-                        batch_size = 768 if self.use_fp16 else 384
-                    elif gpu_mem >= 20:  # RTX 3090/4090
-                        batch_size = 512 if self.use_fp16 else 256
-                    else:
+                    # Inference batch size (capped at 256 for optimal GPU utilization)
+                    # Larger batches cause CPU tokenization to bottleneck GPU
+                    if gpu_mem >= 35:  # A100 or similar
                         batch_size = 256
+                    elif gpu_mem >= 20:  # RTX 3090/4090
+                        batch_size = 192
+                    else:
+                        batch_size = 128
 
                     print(f"    Auto-tuned toxicity: batch_size={batch_size}, fp16={self.use_fp16} for {gpu_name} ({gpu_mem:.0f}GB)")
                 except Exception as e:
@@ -314,14 +313,29 @@ class DataCleaner:
     def _warmup_gpu(self):
         """Warmup GPU by running a small batch through the model."""
         print(f"    Warming up GPU with test batch...")
-        warmup_texts = ["This is a test sentence for GPU warmup."] * 8
+        warmup_texts = ["This is a test sentence for GPU warmup."] * 16
         try:
+            model = self.toxicity_model.model
+            tokenizer = self.toxicity_model.tokenizer
+
+            # Tokenize
+            inputs = tokenizer(
+                warmup_texts,
+                return_tensors="pt",
+                truncation=True,
+                padding=True,
+                max_length=512,
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+            # Run inference
             with torch.no_grad():
                 if self.use_fp16:
                     with torch.amp.autocast('cuda'):
-                        _ = self.toxicity_model.predict(warmup_texts)
+                        _ = model(**inputs)
                 else:
-                    _ = self.toxicity_model.predict(warmup_texts)
+                    _ = model(**inputs)
+
             torch.cuda.synchronize()
             print(f"    GPU warmup complete")
         except Exception as e:
@@ -358,41 +372,66 @@ class DataCleaner:
         """Batch toxicity detection with progress bar.
 
         Optimizations for A100/H100:
+        - Pre-tokenize all texts first (batch tokenization is faster)
         - Uses fp16 (half precision) for 2-3x faster inference
-        - Larger batch sizes (768-1024) to maximize GPU utilization
-        - CUDA warmup to compile kernels before main loop
+        - Runs inference on pre-tokenized batches (no CPU wait during GPU)
         """
         if not texts:
             return []
 
+        # Access the underlying model and tokenizer
+        model = self.toxicity_model.model
+        tokenizer = self.toxicity_model.tokenizer
+
+        # Optimal batch size for inference (smaller than tokenization batch)
+        # Tokenization is CPU-bound, inference is GPU-bound
+        infer_batch_size = min(self.batch_size, 256)  # Cap inference batch at 256
+
         all_results = []
-        n_batches = (len(texts) + self.batch_size - 1) // self.batch_size
-        iterator = range(0, len(texts), self.batch_size)
+        n_batches = (len(texts) + infer_batch_size - 1) // infer_batch_size
 
         if show_progress:
-            # Show batch size and device info in progress bar
             desc = f"    Toxicity ({self.device}"
             if self.use_fp16:
                 desc += ", fp16"
-            desc += f", bs={self.batch_size})"
+            desc += f", bs={infer_batch_size})"
+
+        # Process in inference-sized batches with pre-tokenization
+        iterator = range(0, len(texts), infer_batch_size)
+        if show_progress:
             iterator = tqdm(iterator, desc=desc, unit="batch", total=n_batches)
 
         for i in iterator:
-            batch = texts[i:i + self.batch_size]
+            batch_texts = texts[i:i + infer_batch_size]
+
+            # Tokenize batch (this is CPU-bound but batched tokenization is faster)
+            inputs = tokenizer(
+                batch_texts,
+                return_tensors="pt",
+                truncation=True,
+                padding=True,
+                max_length=512,
+            )
+
+            # Move to device
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+            # Run inference
             with torch.no_grad():
-                # Use automatic mixed precision for faster inference on A100/H100
                 if self.use_fp16 and self.device == 'cuda':
                     with torch.amp.autocast('cuda'):
-                        results = self.toxicity_model.predict(batch)
+                        outputs = model(**inputs)
                 else:
-                    results = self.toxicity_model.predict(batch)
+                    outputs = model(**inputs)
 
-            # Vectorized threshold check (faster than loop)
-            batch_toxic = [
-                any(results[key][j] > self.toxicity_threshold for key in results.keys())
-                for j in range(len(batch))
-            ]
-            all_results.extend(batch_toxic)
+            # Get predictions (sigmoid for multi-label)
+            predictions = torch.sigmoid(outputs.logits).cpu().numpy()
+
+            # Check if any toxicity score exceeds threshold
+            # Detoxify has 6 classes: toxicity, severe_toxicity, obscene, threat, insult, identity_attack
+            for j in range(len(batch_texts)):
+                is_toxic = any(predictions[j, k] > self.toxicity_threshold for k in range(predictions.shape[1]))
+                all_results.append(is_toxic)
 
         return all_results
 
