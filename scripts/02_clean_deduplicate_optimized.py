@@ -493,10 +493,13 @@ def process_single_file(
         original_count = state.get('original_count', 0) if state else 0
 
         # Step 1: Load and clean text (PARALLEL - uses all CPU cores)
-        # Note: We always use the streaming approach now for memory efficiency
-        # Old 'clean' checkpoints are ignored - we use chunk files instead
-        df = pd.read_parquet(input_path)
-        original_count = len(df)
+        # Use streaming to avoid loading entire file into memory
+        import pyarrow.parquet as pq
+
+        # Get row count from metadata (instant, no data loading)
+        parquet_file = pq.ParquetFile(input_path)
+        original_count = parquet_file.metadata.num_rows
+        print(f"  Source file: {original_count:,} documents")
 
         # Check for partial progress using append-only chunk files
         chunk_pattern = f"{filename}_clean_chunk_*_{file_hash}.parquet"
@@ -509,11 +512,9 @@ def process_single_file(
             existing_chunks = sorted(chunk_dir.glob(chunk_pattern))
             if existing_chunks:
                 print(f"  Found {len(existing_chunks)} existing checkpoint chunk(s)...")
-                # Count rows by reading parquet metadata (fast, no data loading)
-                import pyarrow.parquet as pq
                 for chunk_path in existing_chunks:
-                    parquet_file = pq.ParquetFile(chunk_path)
-                    start_idx += parquet_file.metadata.num_rows
+                    chunk_pf = pq.ParquetFile(chunk_path)
+                    start_idx += chunk_pf.metadata.num_rows
                 print(f"    {start_idx:,} documents already cleaned")
 
         remaining = original_count - start_idx
@@ -524,6 +525,12 @@ def process_single_file(
             print(f"  All documents already cleaned from chunks")
         else:
             print(f"  Cleaning {remaining:,} documents (of {original_count:,} total)...")
+
+            # Stream parquet in batches - never load entire file at once
+            BATCH_SIZE = 100000  # Read 100K rows at a time from parquet
+            rows_seen = 0
+            texts_buffer = []
+            chunks_generated = 0
 
             # Streaming chunk callback - saves each chunk to disk immediately
             def save_chunk_streaming(chunk_data, idx):
@@ -536,18 +543,46 @@ def process_single_file(
                     chunk_df.to_parquet(chunk_path, index=False)
                     print(f" done]")
 
-            # Use streaming approach - processes and saves in chunks, doesn't accumulate in memory
-            texts_to_clean = df['text'].tolist()[start_idx:]
+            print(f"    Streaming from parquet (batch_size={BATCH_SIZE:,})...")
 
-            chunks_generated = 0
-            for chunk in parallel_clean_texts_streaming(
-                texts_to_clean,
-                n_workers=n_workers,
-                chunk_callback=save_chunk_streaming if checkpoint else None,
-                chunk_size=500000
-            ):
-                chunks_generated += 1
-                # Chunk is saved to disk by callback, we don't keep it in memory
+            # Stream batches from parquet file
+            for batch in parquet_file.iter_batches(batch_size=BATCH_SIZE, columns=['text']):
+                batch_texts = batch.column('text').to_pylist()
+                batch_start = rows_seen
+                batch_end = rows_seen + len(batch_texts)
+
+                # Skip already-processed rows
+                if batch_end <= start_idx:
+                    rows_seen = batch_end
+                    continue
+
+                # Partial skip (batch straddles start_idx)
+                if batch_start < start_idx:
+                    batch_texts = batch_texts[start_idx - batch_start:]
+
+                texts_buffer.extend(batch_texts)
+                rows_seen = batch_end
+
+                # When buffer is large enough, process it through cleaning
+                if len(texts_buffer) >= 500000:
+                    for chunk in parallel_clean_texts_streaming(
+                        texts_buffer,
+                        n_workers=n_workers,
+                        chunk_callback=save_chunk_streaming if checkpoint else None,
+                        chunk_size=500000
+                    ):
+                        chunks_generated += 1
+                    texts_buffer = []
+
+            # Process remaining texts in buffer
+            if texts_buffer:
+                for chunk in parallel_clean_texts_streaming(
+                    texts_buffer,
+                    n_workers=n_workers,
+                    chunk_callback=save_chunk_streaming if checkpoint else None,
+                    chunk_size=500000
+                ):
+                    chunks_generated += 1
 
             current_chunk_idx += chunks_generated
 
