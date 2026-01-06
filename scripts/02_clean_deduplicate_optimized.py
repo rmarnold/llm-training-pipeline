@@ -386,137 +386,175 @@ def process_single_file(
         original_count = state.get('original_count', 0) if state else 0
 
         # Step 1: Load and clean text (PARALLEL - uses all CPU cores)
-        if 'clean' in completed_steps and checkpoint:
-            print(f"  Loading cached clean data...")
-            df = checkpoint.load_checkpoint(filename, 'clean', file_hash)
-        else:
-            df = pd.read_parquet(input_path)
-            original_count = len(df)
+        # Note: We always use the streaming approach now for memory efficiency
+        # Old 'clean' checkpoints are ignored - we use chunk files instead
+        df = pd.read_parquet(input_path)
+        original_count = len(df)
 
-            # Check for partial progress using append-only chunk files
-            chunk_pattern = f"{filename}_clean_chunk_*_{file_hash}.parquet"
-            chunk_dir = checkpoint.cache_dir if checkpoint else None
-            start_idx = 0
-            existing_chunks = []
+        # Check for partial progress using append-only chunk files
+        chunk_pattern = f"{filename}_clean_chunk_*_{file_hash}.parquet"
+        chunk_dir = checkpoint.cache_dir if checkpoint else None
+        start_idx = 0
+        existing_chunks = []
 
-            if chunk_dir:
-                # Find all existing chunk files - count docs without loading into memory
-                existing_chunks = sorted(chunk_dir.glob(chunk_pattern))
-                if existing_chunks:
-                    print(f"  Found {len(existing_chunks)} existing checkpoint chunk(s)...")
-                    # Count rows by reading parquet metadata (fast, no data loading)
-                    import pyarrow.parquet as pq
-                    for chunk_path in existing_chunks:
-                        parquet_file = pq.ParquetFile(chunk_path)
-                        start_idx += parquet_file.metadata.num_rows
-                    print(f"    {start_idx:,} documents already cleaned")
-
-            remaining = original_count - start_idx
-            # Track chunks for append-only saves
-            current_chunk_idx = len(existing_chunks)
-
-            if remaining <= 0:
-                print(f"  All documents already cleaned from chunks")
-            else:
-                print(f"  Cleaning {remaining:,} documents (of {original_count:,} total)...")
-
-                # Streaming chunk callback - saves each chunk to disk immediately
-                def save_chunk_streaming(chunk_data, idx):
-                    nonlocal current_chunk_idx
-                    if checkpoint:
-                        actual_idx = current_chunk_idx + idx
-                        chunk_path = chunk_dir / f"{filename}_clean_chunk_{actual_idx:04d}_{file_hash}.parquet"
-                        print(f"\n    [Saving chunk {actual_idx}: {len(chunk_data):,} docs...]", end="", flush=True)
-                        chunk_df = pd.DataFrame({'text': chunk_data})
-                        chunk_df.to_parquet(chunk_path, index=False)
-                        print(f" done]")
-
-                # Use streaming approach - processes and saves in chunks, doesn't accumulate in memory
-                texts_to_clean = df['text'].tolist()[start_idx:]
-
-                chunks_generated = 0
-                for chunk in parallel_clean_texts_streaming(
-                    texts_to_clean,
-                    n_workers=n_workers,
-                    chunk_callback=save_chunk_streaming if checkpoint else None,
-                    chunk_size=500000
-                ):
-                    chunks_generated += 1
-                    # Chunk is saved to disk by callback, we don't keep it in memory
-
-                current_chunk_idx += chunks_generated
-
-            # Process each chunk through quality + toxicity filters (memory-efficient)
-            # Instead of combining all chunks then filtering, we filter each chunk
-            print(f"  Processing {current_chunk_idx} chunks through quality/toxicity filters...")
-            all_chunk_files = sorted(chunk_dir.glob(chunk_pattern)) if chunk_dir else []
-
-            # Initialize toxicity model once
-            cleaner = DataCleaner(use_gpu=use_gpu, batch_size=batch_size)
-
-            filtered_chunks = []
-            total_after_quality = 0
-            total_after_toxicity = 0
-
-            for i, chunk_path in enumerate(tqdm(all_chunk_files, desc="    Processing chunks")):
-                # Load one chunk at a time
-                chunk_df = pd.read_parquet(chunk_path)
-                chunk_size = len(chunk_df)
-
-                # Quality filter (vectorized, fast)
-                word_counts = chunk_df['text'].str.split().str.len()
-                unique_chars = chunk_df['text'].str.lower().apply(lambda x: len(set(x)) if x else 0)
-                quality_mask = (word_counts >= 50) & (word_counts <= 10000) & (unique_chars >= 20)
-                chunk_df = chunk_df[quality_mask].reset_index(drop=True)
-                total_after_quality += len(chunk_df)
-
-                # Toxicity filter (GPU-accelerated)
-                if len(chunk_df) > 0:
-                    toxic_mask = cleaner.is_toxic_batch(chunk_df['text'].tolist(), show_progress=False)
-                    chunk_df = chunk_df[~np.array(toxic_mask)].reset_index(drop=True)
-                total_after_toxicity += len(chunk_df)
-
-                # Save filtered chunk
-                if len(chunk_df) > 0:
-                    filtered_path = chunk_dir / f"{filename}_filtered_chunk_{i:04d}_{file_hash}.parquet"
-                    chunk_df.to_parquet(filtered_path, index=False)
-                    filtered_chunks.append(filtered_path)
-
-                # Delete original chunk to free disk space
-                chunk_path.unlink()
-
-            print(f"    After quality filter: {total_after_quality}/{original_count} ({total_after_quality/original_count*100:.1f}%)")
-            print(f"    After toxicity filter: {total_after_toxicity}/{original_count} ({total_after_toxicity/original_count*100:.1f}%)")
-
-            # Now combine filtered chunks (much smaller than original)
-            print(f"  Combining {len(filtered_chunks)} filtered chunks...")
-            if filtered_chunks:
+        if chunk_dir:
+            # Find all existing chunk files - count docs without loading into memory
+            existing_chunks = sorted(chunk_dir.glob(chunk_pattern))
+            if existing_chunks:
+                print(f"  Found {len(existing_chunks)} existing checkpoint chunk(s)...")
+                # Count rows by reading parquet metadata (fast, no data loading)
                 import pyarrow.parquet as pq
-                import pyarrow as pa
-                tables = [pq.read_table(p) for p in filtered_chunks]
-                combined_table = pa.concat_tables(tables)
-                df = combined_table.to_pandas()
+                for chunk_path in existing_chunks:
+                    parquet_file = pq.ParquetFile(chunk_path)
+                    start_idx += parquet_file.metadata.num_rows
+                print(f"    {start_idx:,} documents already cleaned")
 
-                # Cleanup filtered chunks
-                for p in filtered_chunks:
-                    p.unlink()
-            else:
-                df = pd.DataFrame({'text': []})
+        remaining = original_count - start_idx
+        # Track chunks for append-only saves
+        current_chunk_idx = len(existing_chunks)
 
-        # Step 2: Deduplication (must be done on combined data for cross-chunk dedup)
-        print(f"  Deduplicating {len(df)} docs...")
+        if remaining <= 0:
+            print(f"  All documents already cleaned from chunks")
+        else:
+            print(f"  Cleaning {remaining:,} documents (of {original_count:,} total)...")
+
+            # Streaming chunk callback - saves each chunk to disk immediately
+            def save_chunk_streaming(chunk_data, idx):
+                nonlocal current_chunk_idx
+                if checkpoint:
+                    actual_idx = current_chunk_idx + idx
+                    chunk_path = chunk_dir / f"{filename}_clean_chunk_{actual_idx:04d}_{file_hash}.parquet"
+                    print(f"\n    [Saving chunk {actual_idx}: {len(chunk_data):,} docs...]", end="", flush=True)
+                    chunk_df = pd.DataFrame({'text': chunk_data})
+                    chunk_df.to_parquet(chunk_path, index=False)
+                    print(f" done]")
+
+            # Use streaming approach - processes and saves in chunks, doesn't accumulate in memory
+            texts_to_clean = df['text'].tolist()[start_idx:]
+
+            chunks_generated = 0
+            for chunk in parallel_clean_texts_streaming(
+                texts_to_clean,
+                n_workers=n_workers,
+                chunk_callback=save_chunk_streaming if checkpoint else None,
+                chunk_size=500000
+            ):
+                chunks_generated += 1
+                # Chunk is saved to disk by callback, we don't keep it in memory
+
+            current_chunk_idx += chunks_generated
+
+        # Process each chunk through quality + toxicity filters (memory-efficient)
+        # Instead of combining all chunks then filtering, we filter each chunk
+        print(f"  Processing {current_chunk_idx} chunks through quality/toxicity filters...")
+        all_chunk_files = sorted(chunk_dir.glob(chunk_pattern)) if chunk_dir else []
+
+        # Initialize toxicity model once
+        cleaner = DataCleaner(use_gpu=use_gpu, batch_size=batch_size)
+
+        filtered_chunks = []
+        total_after_quality = 0
+        total_after_toxicity = 0
+
+        for i, chunk_path in enumerate(tqdm(all_chunk_files, desc="    Processing chunks")):
+            # Load one chunk at a time
+            chunk_df = pd.read_parquet(chunk_path)
+            chunk_size = len(chunk_df)
+
+            # Quality filter (vectorized, fast)
+            word_counts = chunk_df['text'].str.split().str.len()
+            unique_chars = chunk_df['text'].str.lower().apply(lambda x: len(set(x)) if x else 0)
+            quality_mask = (word_counts >= 50) & (word_counts <= 10000) & (unique_chars >= 20)
+            chunk_df = chunk_df[quality_mask].reset_index(drop=True)
+            total_after_quality += len(chunk_df)
+
+            # Toxicity filter (GPU-accelerated)
+            if len(chunk_df) > 0:
+                toxic_mask = cleaner.is_toxic_batch(chunk_df['text'].tolist(), show_progress=False)
+                chunk_df = chunk_df[~np.array(toxic_mask)].reset_index(drop=True)
+            total_after_toxicity += len(chunk_df)
+
+            # Save filtered chunk
+            if len(chunk_df) > 0:
+                filtered_path = chunk_dir / f"{filename}_filtered_chunk_{i:04d}_{file_hash}.parquet"
+                chunk_df.to_parquet(filtered_path, index=False)
+                filtered_chunks.append(filtered_path)
+
+            # Delete original chunk to free disk space
+            chunk_path.unlink()
+
+        print(f"    After quality filter: {total_after_quality}/{original_count} ({total_after_quality/original_count*100:.1f}%)")
+        print(f"    After toxicity filter: {total_after_toxicity}/{original_count} ({total_after_toxicity/original_count*100:.1f}%)")
+
+        # Stream deduplication - process chunks one at a time, write output incrementally
+        # This avoids loading all filtered data into memory at once
+        print(f"  Streaming deduplication across {len(filtered_chunks)} filtered chunks...")
+
+        import pyarrow.parquet as pq
+        import pyarrow as pa
+
         dedup_cleaner = DataCleaner(use_gpu=False)  # Dedup is CPU-only
-        doc_ids = [f"{filename}_{i}" for i in range(len(df))]
-        keep_mask = dedup_cleaner.deduplicate_batch(df['text'].tolist(), doc_ids, show_progress=True)
-        df = df[keep_mask].reset_index(drop=True)
-        final_count = len(df)
-        print(f"    After deduplication: {final_count}/{original_count} ({final_count/original_count*100:.1f}%)")
+        doc_counter = 0
+        kept_buffer = []
+        final_count = 0
+        WRITE_BATCH = 100000  # Write every 100K docs to avoid memory buildup
 
-        # Add source column and save
-        df['source'] = filename
+        schema = pa.schema([('text', pa.string()), ('source', pa.string())])
+        temp_output_path = output_path + '.tmp'
+        writer = None
+
+        for chunk_idx, p in enumerate(tqdm(filtered_chunks, desc="    Deduplicating")):
+            chunk_df = pd.read_parquet(p)
+
+            for text in chunk_df['text']:
+                doc_id = f"{filename}_{doc_counter}"
+                doc_counter += 1
+
+                m = dedup_cleaner.compute_minhash(text)
+                if not dedup_cleaner.lsh.query(m):
+                    dedup_cleaner.lsh.insert(doc_id, m)
+                    kept_buffer.append({'text': text, 'source': filename})
+
+                    # Write batch when buffer is full
+                    if len(kept_buffer) >= WRITE_BATCH:
+                        batch_df = pd.DataFrame(kept_buffer)
+                        table = pa.Table.from_pandas(batch_df, schema=schema, preserve_index=False)
+                        if writer is None:
+                            writer = pq.ParquetWriter(temp_output_path, schema)
+                        writer.write_table(table)
+                        final_count += len(kept_buffer)
+                        print(f"\n      [Written {final_count:,} docs so far]", end="", flush=True)
+                        kept_buffer = []
+
+            # Delete filtered chunk after processing
+            p.unlink()
+
+        # Write final batch
+        if kept_buffer:
+            batch_df = pd.DataFrame(kept_buffer)
+            table = pa.Table.from_pandas(batch_df, schema=schema, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(temp_output_path, schema)
+            writer.write_table(table)
+            final_count += len(kept_buffer)
+
+        if writer:
+            writer.close()
+
+        print(f"\n    After deduplication: {final_count}/{original_count} ({final_count/original_count*100:.1f}%)")
+
+        # Rename temp file to final output
+        if os.path.exists(temp_output_path):
+            os.rename(temp_output_path, output_path)
+            print(f"Saved {output_filename}: {final_count}/{original_count} documents")
+        else:
+            # No docs passed all filters
+            df = pd.DataFrame({'text': [], 'source': []})
+            df.to_parquet(output_path, index=False)
+            print(f"Saved {output_filename}: 0/{original_count} documents (all filtered)")
+
+        # Ensure output directory exists (for cases where streaming wrote the file)
         os.makedirs(output_dir, exist_ok=True)
-        df.to_parquet(output_path, index=False)
-        print(f"Saved {output_filename}: {final_count}/{original_count} documents")
 
         # Cleanup checkpoints on success
         if checkpoint:
