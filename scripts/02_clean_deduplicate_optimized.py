@@ -224,9 +224,30 @@ class DataCleaner:
     # Class-level model cache to avoid reloading
     _model_cache: dict = {}
 
-    def __init__(self, toxicity_threshold: float = 0.7, use_gpu: bool = True, batch_size: int = 128):
+    def __init__(self, toxicity_threshold: float = 0.7, use_gpu: bool = True, batch_size: int = None):
         self.device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
         self.toxicity_threshold = toxicity_threshold
+
+        # Auto-tune batch size based on GPU memory
+        # A100 (40GB/80GB) can handle much larger batches than default 128
+        if batch_size is None:
+            if self.device == 'cuda':
+                try:
+                    gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+                    if gpu_mem >= 70:  # A100-80GB or similar
+                        batch_size = 512
+                    elif gpu_mem >= 35:  # A100-40GB or similar
+                        batch_size = 384
+                    elif gpu_mem >= 20:  # RTX 3090/4090
+                        batch_size = 256
+                    else:
+                        batch_size = 128
+                    print(f"    Auto-tuned toxicity batch_size={batch_size} for {gpu_mem:.0f}GB GPU")
+                except Exception:
+                    batch_size = 128
+            else:
+                batch_size = 64  # CPU is slower, use smaller batches
+
         self.batch_size = batch_size
         self.lsh = MinHashLSH(threshold=0.85, num_perm=128)
 
@@ -341,6 +362,18 @@ def configure_datatrove_filters(
     }
     # Reset filters so they get re-initialized with new config
     _datatrove_filters = None
+
+
+def _worker_init(config: dict):
+    """Initialize datatrove filters in worker process.
+
+    This is called once per worker when the Pool starts, ensuring
+    filters are properly initialized in each worker process.
+    """
+    global _datatrove_filter_config, _datatrove_filters
+    _datatrove_filter_config = config
+    _datatrove_filters = None  # Force re-initialization with passed config
+    _init_datatrove_filters()
 
 
 def _init_datatrove_filters():
@@ -466,8 +499,13 @@ class DatatroveQualityFilter:
             raise ImportError("datatrove not installed. Run: pip install datatrove")
 
         self.n_workers = n_workers or max(1, int(cpu_count() * 0.8))
+        # Store config for passing to workers
+        self.filter_config = dict(_datatrove_filter_config)
         # Initialize filters in main process too (for small batches)
         _init_datatrove_filters()
+        # Log which filters are enabled
+        enabled = [k for k, v in self.filter_config.items() if v]
+        print(f"      Datatrove filters enabled: {enabled}")
 
     def filter_batch(self, texts: list[str], show_progress: bool = False) -> list[bool]:
         """Apply all quality filters to a batch of texts using parallel processing.
@@ -480,8 +518,12 @@ class DatatroveQualityFilter:
         if n_texts < 1000:
             return [_filter_single_text_datatrove(t) for t in texts]
 
-        # Parallel processing for large batches
-        with Pool(processes=self.n_workers) as pool:
+        # Parallel processing with initializer to ensure filters are set up in workers
+        with Pool(
+            processes=self.n_workers,
+            initializer=_worker_init,
+            initargs=(self.filter_config,)
+        ) as pool:
             if show_progress:
                 results = list(tqdm(
                     pool.imap(_filter_single_text_datatrove, texts, chunksize=5000),
@@ -507,7 +549,12 @@ class DatatroveQualityFilter:
         if n_texts < 1000:
             reasons = [_filter_single_text_datatrove_with_reason(t) for t in texts]
         else:
-            with Pool(processes=self.n_workers) as pool:
+            # Use initializer to ensure filters are properly set up in each worker
+            with Pool(
+                processes=self.n_workers,
+                initializer=_worker_init,
+                initargs=(self.filter_config,)
+            ) as pool:
                 if show_progress:
                     reasons = list(tqdm(
                         pool.imap(_filter_single_text_datatrove_with_reason, texts, chunksize=5000),
@@ -552,15 +599,21 @@ def apply_quality_filter_parallel(
 
     if use_datatrove and DATATROVE_AVAILABLE:
         filter_fn = _filter_single_text_datatrove
+        # Use initializer for datatrove filters
+        pool_kwargs = {
+            'initializer': _worker_init,
+            'initargs': (dict(_datatrove_filter_config),)
+        }
     else:
         filter_fn = _filter_single_text_basic
+        pool_kwargs = {}
 
     # For small batches, use single-threaded
     if n_texts < 1000:
         return [filter_fn(t) for t in texts]
 
     # Parallel processing for large batches
-    with Pool(processes=n_workers) as pool:
+    with Pool(processes=n_workers, **pool_kwargs) as pool:
         if show_progress:
             results = list(tqdm(
                 pool.imap(filter_fn, texts, chunksize=5000),
@@ -998,8 +1051,8 @@ def main():
                        help='Disable GPU acceleration')
     parser.add_argument('--no-cache', action='store_true',
                        help='Disable checkpoint caching')
-    parser.add_argument('--batch-size', type=int, default=128,
-                       help='Batch size for toxicity detection (default: 128)')
+    parser.add_argument('--batch-size', type=int, default=None,
+                       help='Batch size for toxicity detection (default: auto-tune based on GPU memory)')
     parser.add_argument('--workers', type=int, default=None,
                        help='Number of CPU workers for text cleaning (default: all cores)')
     parser.add_argument('--input-dir', type=str, default='data/raw',
