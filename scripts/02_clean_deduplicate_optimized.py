@@ -43,7 +43,7 @@ def parallel_clean_texts_streaming(
 
     Args:
         texts: List of texts to clean
-        n_workers: Number of CPU workers (default: cpu_count // 4 for memory safety)
+        n_workers: Number of CPU workers (default: cpu_count // 2)
         chunk_callback: Function to call with each chunk of results
         chunk_size: Number of results per chunk (default: 500K)
 
@@ -51,9 +51,9 @@ def parallel_clean_texts_streaming(
         Chunks of cleaned text results
     """
     if n_workers is None:
-        # Use fewer workers to reduce memory pressure
-        # Each worker adds ~500MB-1GB overhead
-        n_workers = max(1, cpu_count() // 4)
+        # With streaming, we can use more workers since results don't accumulate
+        # Each worker adds ~500MB-1GB overhead, but that's manageable
+        n_workers = max(1, cpu_count() // 2)
 
     n_workers = min(n_workers, cpu_count())
     n_texts = len(texts)
@@ -358,14 +358,10 @@ def process_single_file(
                 # Use streaming approach - processes and saves in chunks, doesn't accumulate in memory
                 texts_to_clean = df['text'].tolist()[start_idx:]
 
-                # Determine workers based on available memory
-                # With 167GB RAM and 8M docs, use fewer workers
-                safe_workers = max(1, min(n_workers, cpu_count() // 4))
-
                 chunks_generated = 0
                 for chunk in parallel_clean_texts_streaming(
                     texts_to_clean,
-                    n_workers=safe_workers,
+                    n_workers=n_workers,
                     chunk_callback=save_chunk_streaming if checkpoint else None,
                     chunk_size=500000
                 ):
@@ -474,7 +470,7 @@ def process_all_files(
     ])
 
     if n_workers is None:
-        n_workers = max(1, cpu_count() // 4)
+        n_workers = max(1, cpu_count() // 2)
 
     print(f"\n{'='*60}")
     print(f"Found {len(files_to_process)} files to process")
@@ -529,9 +525,8 @@ def main():
     args = parser.parse_args()
 
     use_gpu = torch.cuda.is_available() and not args.no_gpu
-    # Default to 1/4 of CPU cores to avoid memory issues with large datasets
-    # Each worker adds memory overhead, and results accumulate in main process
-    n_workers = args.workers if args.workers else max(1, cpu_count() // 4)
+    # Default to half of CPU cores - streaming approach prevents memory buildup
+    n_workers = args.workers if args.workers else max(1, cpu_count() // 2)
 
     print(f"Starting optimized data cleaning:")
     print(f"  - GPU acceleration: {use_gpu}")
