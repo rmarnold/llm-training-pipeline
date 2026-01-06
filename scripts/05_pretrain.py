@@ -19,6 +19,64 @@ from transformers import (
 )
 from datasets import load_from_disk
 
+# Kernel optimization flags (set before model loading)
+_CCE_PATCHED = False
+
+
+def setup_kernel_optimizations(
+    use_liger_kernel: bool = False,
+    use_cce: bool = False,
+    model_type: str = "llama"
+) -> Dict[str, bool]:
+    """Setup kernel optimizations before model loading.
+
+    Args:
+        use_liger_kernel: Enable Liger Kernel (LinkedIn's Triton kernels)
+            - ~20% throughput improvement
+            - ~60% memory reduction
+            - Fused RMSNorm, RoPE, SwiGLU, CrossEntropy
+        use_cce: Enable Cut Cross-Entropy (Apple's memory-efficient CE)
+            - ~95% memory reduction on loss computation
+            - Especially useful for large vocab/seq lengths
+        model_type: Model architecture type (llama, mistral, gemma, etc.)
+
+    Returns:
+        Dict with actual enabled status of each optimization
+    """
+    global _CCE_PATCHED
+    enabled = {"liger_kernel": False, "cce": False}
+
+    # Cut Cross-Entropy must be applied BEFORE model loading
+    if use_cce and not _CCE_PATCHED:
+        try:
+            from cut_cross_entropy.transformers import cce_patch
+            cce_patch(model_type)
+            _CCE_PATCHED = True
+            enabled["cce"] = True
+            print(f"[Kernel Optimization] Cut Cross-Entropy enabled for {model_type}")
+            print(f"  - ~95% memory reduction on cross-entropy loss")
+        except ImportError:
+            print("Warning: cut-cross-entropy not installed. Install with:")
+            print("  pip install cut-cross-entropy")
+        except Exception as e:
+            print(f"Warning: Failed to enable Cut Cross-Entropy: {e}")
+    elif use_cce and _CCE_PATCHED:
+        enabled["cce"] = True
+
+    # Liger Kernel is enabled via TrainingArguments (handled separately)
+    if use_liger_kernel:
+        try:
+            import liger_kernel
+            enabled["liger_kernel"] = True
+            print(f"[Kernel Optimization] Liger Kernel will be enabled")
+            print(f"  - ~20% throughput improvement")
+            print(f"  - ~60% memory reduction")
+        except ImportError:
+            print("Warning: liger-kernel not installed. Install with:")
+            print("  pip install liger-kernel")
+
+    return enabled
+
 # Import GPU utilities
 from gpu_utils import (
     detect_gpu_type, print_gpu_info, setup_torch_backends,
@@ -217,7 +275,9 @@ def get_curriculum_data_path(
 def setup_training(
     use_fp8: Optional[bool] = None,
     config_path: str = "configs/pretrain.yaml",
-    cli_overrides: Optional[Dict[str, Any]] = None
+    cli_overrides: Optional[Dict[str, Any]] = None,
+    use_liger_kernel: bool = False,
+    use_cce: bool = False
 ) -> Tuple[Trainer, GPUInfo]:
     """Setup training with automatic GPU optimization.
 
@@ -225,8 +285,17 @@ def setup_training(
         use_fp8: Force FP8 precision (None = auto-detect)
         config_path: Path to YAML config file
         cli_overrides: Dict of CLI overrides (max_steps, save_steps, etc.)
+        use_liger_kernel: Enable Liger Kernel optimizations (~20% speedup, ~60% memory reduction)
+        use_cce: Enable Cut Cross-Entropy (~95% memory reduction on loss)
     """
     cli_overrides = cli_overrides or {}
+
+    # Setup kernel optimizations BEFORE model loading
+    kernel_status = setup_kernel_optimizations(
+        use_liger_kernel=use_liger_kernel,
+        use_cce=use_cce,
+        model_type="llama"  # Default to llama architecture
+    )
 
     # Setup torch backends
     setup_torch_backends()
@@ -326,6 +395,9 @@ def setup_training(
         dataloader_num_workers=config['data'].get('num_workers', 8),
         dataloader_pin_memory=config['data'].get('pin_memory', True),
         dataloader_persistent_workers=config['data'].get('persistent_workers', True),
+
+        # Kernel optimizations (Liger Kernel)
+        use_liger_kernel=kernel_status.get("liger_kernel", False),
     )
 
     # Load dataset (curriculum-aware paths)
@@ -393,13 +465,22 @@ def setup_training(
 def train_with_fp8(
     config: Dict[str, Any],
     gpu_info: GPUInfo,
-    enable_oom_recovery: bool = False
+    enable_oom_recovery: bool = False,
+    use_liger_kernel: bool = False,
+    use_cce: bool = False
 ) -> None:
     """Train using FP8 precision with Accelerate (H100 only)"""
     from gpu_utils import get_fp8_accelerator
     from torch.utils.data import DataLoader
     from transformers import get_cosine_schedule_with_warmup
     from tqdm import tqdm
+
+    # Setup kernel optimizations BEFORE model loading
+    kernel_status = setup_kernel_optimizations(
+        use_liger_kernel=use_liger_kernel,
+        use_cce=use_cce,
+        model_type="llama"
+    )
 
     print("\n" + "="*60)
     print("PRETRAINING WITH FP8 PRECISION")
@@ -561,7 +642,20 @@ def main() -> None:
     parser.add_argument("--train_data_path", type=str, help="Override training data path")
     parser.add_argument("--eval_data_path", type=str, help="Override evaluation data path")
     parser.add_argument("--enable-oom-recovery", action="store_true", help="Enable automatic OOM recovery")
+    # Kernel optimization flags
+    parser.add_argument("--use-liger-kernel", action="store_true", default=True,
+                        help="Enable Liger Kernel (~20%% speedup, ~60%% memory reduction) [default: enabled]")
+    parser.add_argument("--no-liger-kernel", action="store_true",
+                        help="Disable Liger Kernel")
+    parser.add_argument("--use-cce", action="store_true", default=True,
+                        help="Enable Cut Cross-Entropy (~95%% memory reduction on loss) [default: enabled]")
+    parser.add_argument("--no-cce", action="store_true",
+                        help="Disable Cut Cross-Entropy")
     args = parser.parse_args()
+
+    # Resolve kernel optimization flags
+    use_liger_kernel = args.use_liger_kernel and not args.no_liger_kernel
+    use_cce = args.use_cce and not args.no_cce
 
     # Set random seed
     torch.manual_seed(args.seed)
@@ -622,7 +716,9 @@ def main() -> None:
         train_with_fp8(
             config,
             gpu_info,
-            enable_oom_recovery=cli_overrides.get('enable_oom_recovery', False)
+            enable_oom_recovery=cli_overrides.get('enable_oom_recovery', False),
+            use_liger_kernel=use_liger_kernel,
+            use_cce=use_cce
         )
     else:
         # Use standard BF16 training path
@@ -632,7 +728,9 @@ def main() -> None:
         trainer, gpu_info = setup_training(
             use_fp8=False,
             config_path=args.config,
-            cli_overrides=cli_overrides
+            cli_overrides=cli_overrides,
+            use_liger_kernel=use_liger_kernel,
+            use_cce=use_cce
         )
         print("🚀 Starting pretraining...")
         trainer.train(resume_from_checkpoint=cli_overrides.get('resume_from_checkpoint'))
