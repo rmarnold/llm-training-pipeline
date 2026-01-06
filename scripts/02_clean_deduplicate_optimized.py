@@ -16,6 +16,20 @@ from typing import Optional
 from multiprocessing import Pool, cpu_count
 from functools import partial
 
+# Datatrove quality filters (production-grade, used by FineWeb/LLaMA)
+try:
+    from datatrove.data import Document
+    from datatrove.pipeline.filters import (
+        GopherQualityFilter,
+        GopherRepetitionFilter,
+        FineWebQualityFilter,
+        LanguageFilter,
+    )
+    DATATROVE_AVAILABLE = True
+except ImportError:
+    DATATROVE_AVAILABLE = False
+    print("Warning: datatrove not installed, using basic quality filters")
+
 # =============================================================================
 # FAST TEXT CLEANING - Pre-compiled patterns for 5-10x speedup
 # =============================================================================
@@ -294,6 +308,99 @@ class DataCleaner:
         return keep_mask
 
 
+class DatatroveQualityFilter:
+    """Production-grade quality filtering using datatrove (FineWeb/Gopher filters).
+
+    Much more sophisticated than basic word count/unique char filters:
+    - GopherRepetitionFilter: Detects repeated n-grams, lines, paragraphs
+    - GopherQualityFilter: Word count, stop words, alpha ratio, etc.
+    - FineWebQualityFilter: Line-ending punctuation, short lines, etc.
+    """
+
+    def __init__(self, language: str = "en"):
+        if not DATATROVE_AVAILABLE:
+            raise ImportError("datatrove not installed. Run: pip install datatrove")
+
+        # Initialize filters (these are fast, rule-based)
+        self.gopher_rep_filter = GopherRepetitionFilter()
+        self.gopher_quality_filter = GopherQualityFilter(
+            min_doc_words=50,
+            max_doc_words=100000,
+            min_avg_word_length=3,
+            max_avg_word_length=10,
+            min_stop_words=2,  # Relaxed for diverse content
+            max_symbol_word_ratio=0.1,
+        )
+        self.fineweb_filter = FineWebQualityFilter()
+
+    def filter_batch(self, texts: list[str], doc_ids: list[str] = None) -> list[bool]:
+        """Apply all quality filters to a batch of texts.
+
+        Returns a list of booleans (True = keep, False = filter out).
+        Much faster than old vectorized pandas approach.
+        """
+        if doc_ids is None:
+            doc_ids = [str(i) for i in range(len(texts))]
+
+        results = []
+        for text, doc_id in zip(texts, doc_ids):
+            # Create datatrove Document
+            doc = Document(text=text, id=doc_id)
+
+            # Apply filters in sequence (fail-fast)
+            try:
+                # 1. Repetition filter (catches spam, repeated content)
+                if not self.gopher_rep_filter.filter(doc):
+                    results.append(False)
+                    continue
+
+                # 2. Gopher quality filter (word stats, stop words, etc.)
+                if not self.gopher_quality_filter.filter(doc):
+                    results.append(False)
+                    continue
+
+                # 3. FineWeb filter (line quality, punctuation, etc.)
+                if not self.fineweb_filter.filter(doc):
+                    results.append(False)
+                    continue
+
+                results.append(True)
+            except Exception:
+                # If any filter errors, reject the doc
+                results.append(False)
+
+        return results
+
+
+def apply_quality_filter(texts: list[str], use_datatrove: bool = True) -> list[bool]:
+    """Apply quality filtering to texts.
+
+    Args:
+        texts: List of text documents
+        use_datatrove: If True, use production datatrove filters. If False, use basic filters.
+
+    Returns:
+        List of booleans (True = keep, False = filter out)
+    """
+    if use_datatrove and DATATROVE_AVAILABLE:
+        filter = DatatroveQualityFilter()
+        return filter.filter_batch(texts)
+    else:
+        # Fallback to basic filtering (fast but less accurate)
+        results = []
+        for text in texts:
+            word_count = len(text.split())
+            if word_count < 50 or word_count > 10000:
+                results.append(False)
+                continue
+            unique_chars = len(set(text.lower()))
+            if unique_chars < 20:
+                results.append(False)
+                continue
+            results.append(True)
+        return results
+
+
 class CheckpointManager:
     """Manage intermediate checkpoints for resumable processing."""
 
@@ -456,15 +563,25 @@ def process_single_file(
         total_after_quality = 0
         total_after_toxicity = 0
 
+        # Initialize datatrove quality filter once (if available)
+        quality_filter = DatatroveQualityFilter() if DATATROVE_AVAILABLE else None
+        filter_type = "datatrove (Gopher+FineWeb)" if quality_filter else "basic"
+        print(f"    Using {filter_type} quality filters")
+
         for i, chunk_path in enumerate(tqdm(all_chunk_files, desc="    Processing chunks")):
             # Load one chunk at a time
             chunk_df = pd.read_parquet(chunk_path)
             chunk_size = len(chunk_df)
 
-            # Quality filter (vectorized, fast)
-            word_counts = chunk_df['text'].str.split().str.len()
-            unique_chars = chunk_df['text'].str.lower().apply(lambda x: len(set(x)) if x else 0)
-            quality_mask = (word_counts >= 50) & (word_counts <= 10000) & (unique_chars >= 20)
+            # Quality filter (datatrove production filters or basic fallback)
+            if quality_filter:
+                # Datatrove: Gopher repetition + quality + FineWeb filters
+                quality_mask = quality_filter.filter_batch(chunk_df['text'].tolist())
+            else:
+                # Basic fallback: word count + unique chars
+                word_counts = chunk_df['text'].str.split().str.len()
+                unique_chars = chunk_df['text'].str.lower().apply(lambda x: len(set(x)) if x else 0)
+                quality_mask = ((word_counts >= 50) & (word_counts <= 10000) & (unique_chars >= 20)).tolist()
             chunk_df = chunk_df[quality_mask].reset_index(drop=True)
             total_after_quality += len(chunk_df)
 
