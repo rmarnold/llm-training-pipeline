@@ -377,7 +377,7 @@ def setup_training(
         report_to=config['logging']['report_to'],
 
         # Evaluation
-        evaluation_strategy=config['eval']['evaluation_strategy'],
+        eval_strategy=config['eval']['evaluation_strategy'],
         eval_steps=cli_overrides.get('eval_steps', config['eval']['eval_steps']),
         per_device_eval_batch_size=config['eval']['per_device_eval_batch_size'],
 
