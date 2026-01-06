@@ -236,10 +236,12 @@ class DataCleaner:
 
     # Class-level model cache to avoid reloading
     _model_cache: dict = {}
+    _model_warmed_up: set = set()
 
     def __init__(self, toxicity_threshold: float = 0.7, use_gpu: bool = True, batch_size: int = None):
         self.device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
         self.toxicity_threshold = toxicity_threshold
+        self.use_fp16 = False  # Will be set based on GPU capabilities
 
         # Auto-tune batch size based on GPU memory
         # A100 (40GB/80GB) can handle much larger batches than default 128
@@ -247,16 +249,25 @@ class DataCleaner:
             if self.device == 'cuda':
                 try:
                     gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+                    gpu_name = torch.cuda.get_device_name(0)
+
+                    # A100/H100 have excellent fp16/bf16 performance
+                    if 'A100' in gpu_name or 'H100' in gpu_name or gpu_mem >= 35:
+                        self.use_fp16 = True
+
+                    # Much larger batch sizes for A100 - the model is small
                     if gpu_mem >= 70:  # A100-80GB or similar
-                        batch_size = 512
+                        batch_size = 1024 if self.use_fp16 else 512
                     elif gpu_mem >= 35:  # A100-40GB or similar
-                        batch_size = 384
+                        batch_size = 768 if self.use_fp16 else 384
                     elif gpu_mem >= 20:  # RTX 3090/4090
-                        batch_size = 256
+                        batch_size = 512 if self.use_fp16 else 256
                     else:
-                        batch_size = 128
-                    print(f"    Auto-tuned toxicity batch_size={batch_size} for {gpu_mem:.0f}GB GPU")
-                except Exception:
+                        batch_size = 256
+
+                    print(f"    Auto-tuned toxicity: batch_size={batch_size}, fp16={self.use_fp16} for {gpu_name} ({gpu_mem:.0f}GB)")
+                except Exception as e:
+                    print(f"    Warning: Could not auto-tune GPU settings: {e}")
                     batch_size = 128
             else:
                 batch_size = 64  # CPU is slower, use smaller batches
@@ -268,8 +279,53 @@ class DataCleaner:
         cache_key = f"detoxify_{self.device}"
         if cache_key not in DataCleaner._model_cache:
             print(f"Loading toxicity model on {self.device}...")
-            DataCleaner._model_cache[cache_key] = Detoxify('original', device=self.device)
+            model = Detoxify('original', device=self.device)
+
+            # Verify model is actually on the correct device
+            if self.device == 'cuda':
+                try:
+                    # Check if model is on GPU
+                    param_device = next(model.model.parameters()).device
+                    if param_device.type != 'cuda':
+                        print(f"    Warning: Model loaded on {param_device}, moving to CUDA...")
+                        model.model = model.model.cuda()
+                    else:
+                        print(f"    Model verified on {param_device}")
+                except Exception as e:
+                    print(f"    Warning: Could not verify model device: {e}")
+
+            # Convert to fp16 for faster inference on A100/H100
+            if self.use_fp16 and self.device == 'cuda':
+                try:
+                    model.model.half()
+                    print(f"    Converted model to fp16 for faster inference")
+                except Exception as e:
+                    print(f"    Warning: Could not convert to fp16: {e}")
+
+            DataCleaner._model_cache[cache_key] = model
+
         self.toxicity_model = DataCleaner._model_cache[cache_key]
+
+        # Warmup GPU with a small batch (compiles CUDA kernels)
+        if self.device == 'cuda' and cache_key not in DataCleaner._model_warmed_up:
+            self._warmup_gpu()
+            DataCleaner._model_warmed_up.add(cache_key)
+
+    def _warmup_gpu(self):
+        """Warmup GPU by running a small batch through the model."""
+        print(f"    Warming up GPU with test batch...")
+        warmup_texts = ["This is a test sentence for GPU warmup."] * 8
+        try:
+            with torch.no_grad():
+                if self.use_fp16:
+                    with torch.cuda.amp.autocast():
+                        _ = self.toxicity_model.predict(warmup_texts)
+                else:
+                    _ = self.toxicity_model.predict(warmup_texts)
+            torch.cuda.synchronize()
+            print(f"    GPU warmup complete")
+        except Exception as e:
+            print(f"    Warning: GPU warmup failed: {e}")
 
     def clean_text(self, text: str) -> str:
         """Clean a single text document."""
@@ -299,22 +355,44 @@ class DataCleaner:
         return results
 
     def is_toxic_batch(self, texts: list[str], show_progress: bool = True) -> list[bool]:
-        """Batch toxicity detection with progress bar."""
+        """Batch toxicity detection with progress bar.
+
+        Optimizations for A100/H100:
+        - Uses fp16 (half precision) for 2-3x faster inference
+        - Larger batch sizes (768-1024) to maximize GPU utilization
+        - CUDA warmup to compile kernels before main loop
+        """
         if not texts:
             return []
 
         all_results = []
+        n_batches = (len(texts) + self.batch_size - 1) // self.batch_size
         iterator = range(0, len(texts), self.batch_size)
+
         if show_progress:
-            iterator = tqdm(iterator, desc="    Toxicity check", unit="batch")
+            # Show batch size and device info in progress bar
+            desc = f"    Toxicity ({self.device}"
+            if self.use_fp16:
+                desc += ", fp16"
+            desc += f", bs={self.batch_size})"
+            iterator = tqdm(iterator, desc=desc, unit="batch", total=n_batches)
 
         for i in iterator:
             batch = texts[i:i + self.batch_size]
             with torch.no_grad():
-                results = self.toxicity_model.predict(batch)
-            for j in range(len(batch)):
-                is_toxic = any(results[key][j] > self.toxicity_threshold for key in results.keys())
-                all_results.append(is_toxic)
+                # Use automatic mixed precision for faster inference on A100/H100
+                if self.use_fp16 and self.device == 'cuda':
+                    with torch.cuda.amp.autocast():
+                        results = self.toxicity_model.predict(batch)
+                else:
+                    results = self.toxicity_model.predict(batch)
+
+            # Vectorized threshold check (faster than loop)
+            batch_toxic = [
+                any(results[key][j] > self.toxicity_threshold for key in results.keys())
+                for j in range(len(batch))
+            ]
+            all_results.extend(batch_toxic)
 
         return all_results
 
@@ -454,22 +532,36 @@ def _filter_single_text_datatrove_with_reason(text: str) -> str:
     """
     filters = _init_datatrove_filters()
     if not filters:
-        return 'passed'
+        # Debug: log if filters are empty (shouldn't happen)
+        return 'no_filters'
 
     try:
         doc = Document(text=text, id="0")
 
         # Run in order of speed (fastest first)
-        if 'gopher_quality' in filters and not filters['gopher_quality'].filter(doc):
-            return 'quality'
-        if 'fineweb' in filters and not filters['fineweb'].filter(doc):
-            return 'fineweb'
-        if 'gopher_rep' in filters and not filters['gopher_rep'].filter(doc):
-            return 'repetition'
+        if 'gopher_quality' in filters:
+            result = filters['gopher_quality'].filter(doc)
+            # Handle tuple return (bool, reason) or just bool
+            passed = result[0] if isinstance(result, tuple) else result
+            if not passed:
+                return 'quality'
+
+        if 'fineweb' in filters:
+            result = filters['fineweb'].filter(doc)
+            passed = result[0] if isinstance(result, tuple) else result
+            if not passed:
+                return 'fineweb'
+
+        if 'gopher_rep' in filters:
+            result = filters['gopher_rep'].filter(doc)
+            passed = result[0] if isinstance(result, tuple) else result
+            if not passed:
+                return 'repetition'
 
         return 'passed'
-    except Exception:
-        return 'error'
+    except Exception as e:
+        # Debug: return the actual error for diagnosis
+        return f'error:{str(e)[:50]}'
 
 
 def _filter_single_text_basic(text: str) -> bool:
@@ -579,13 +671,27 @@ class DatatroveQualityFilter:
 
         # Convert reasons to boolean mask and count stats
         mask = [r == 'passed' for r in reasons]
+
+        # Count all unique reasons (including error details)
+        error_reasons = [r for r in reasons if r.startswith('error:')]
         stats = {
             'passed': reasons.count('passed'),
             'failed_repetition': reasons.count('repetition'),
             'failed_quality': reasons.count('quality'),
             'failed_fineweb': reasons.count('fineweb'),
-            'failed_error': reasons.count('error'),
+            'failed_error': len(error_reasons),
+            'no_filters': reasons.count('no_filters'),  # Debug: filters not initialized
         }
+
+        # Log unique errors if any
+        if error_reasons:
+            unique_errors = set(error_reasons[:10])  # First 10 unique
+            print(f"        Debug: Sample errors: {unique_errors}")
+
+        # Warn if filters weren't initialized
+        if stats['no_filters'] > 0:
+            print(f"        WARNING: {stats['no_filters']} docs had no filters applied!")
+            print(f"        This indicates filters failed to initialize in worker processes")
 
         return mask, stats
 
@@ -1314,6 +1420,10 @@ def process_single_file(
         print(f"      Total passed: {total_after_quality:,}/{original_count:,} ({total_after_quality/original_count*100:.1f}%)")
         if quality_filter and sum(total_quality_stats.values()) > 0:
             total_filtered = original_count
+            # Check for filter initialization issues
+            if total_quality_stats.get('no_filters', 0) > 0:
+                print(f"      WARNING: Filters not initialized in {total_quality_stats['no_filters']:,} docs!")
+                print(f"      This is likely a multiprocessing issue. Try --fast-quality or check datatrove installation.")
             print(f"      Rejection reasons:")
             if total_quality_stats['failed_repetition'] > 0:
                 print(f"        - Repetition (spam/duplicates): {total_quality_stats['failed_repetition']:,} ({total_quality_stats['failed_repetition']/total_filtered*100:.1f}%)")
