@@ -446,73 +446,68 @@ def process_single_file(
 
                 current_chunk_idx += chunks_generated
 
-            # Now load all chunks and combine for final output
-            print(f"  Combining {current_chunk_idx} chunks into final output...")
+            # Process each chunk through quality + toxicity filters (memory-efficient)
+            # Instead of combining all chunks then filtering, we filter each chunk
+            print(f"  Processing {current_chunk_idx} chunks through quality/toxicity filters...")
             all_chunk_files = sorted(chunk_dir.glob(chunk_pattern)) if chunk_dir else []
 
-            if all_chunk_files:
-                # Fast concatenation using pyarrow (avoids pandas overhead)
+            # Initialize toxicity model once
+            cleaner = DataCleaner(use_gpu=use_gpu, batch_size=batch_size)
+
+            filtered_chunks = []
+            total_after_quality = 0
+            total_after_toxicity = 0
+
+            for i, chunk_path in enumerate(tqdm(all_chunk_files, desc="    Processing chunks")):
+                # Load one chunk at a time
+                chunk_df = pd.read_parquet(chunk_path)
+                chunk_size = len(chunk_df)
+
+                # Quality filter (vectorized, fast)
+                word_counts = chunk_df['text'].str.split().str.len()
+                unique_chars = chunk_df['text'].str.lower().apply(lambda x: len(set(x)) if x else 0)
+                quality_mask = (word_counts >= 50) & (word_counts <= 10000) & (unique_chars >= 20)
+                chunk_df = chunk_df[quality_mask].reset_index(drop=True)
+                total_after_quality += len(chunk_df)
+
+                # Toxicity filter (GPU-accelerated)
+                if len(chunk_df) > 0:
+                    toxic_mask = cleaner.is_toxic_batch(chunk_df['text'].tolist(), show_progress=False)
+                    chunk_df = chunk_df[~np.array(toxic_mask)].reset_index(drop=True)
+                total_after_toxicity += len(chunk_df)
+
+                # Save filtered chunk
+                if len(chunk_df) > 0:
+                    filtered_path = chunk_dir / f"{filename}_filtered_chunk_{i:04d}_{file_hash}.parquet"
+                    chunk_df.to_parquet(filtered_path, index=False)
+                    filtered_chunks.append(filtered_path)
+
+                # Delete original chunk to free disk space
+                chunk_path.unlink()
+
+            print(f"    After quality filter: {total_after_quality}/{original_count} ({total_after_quality/original_count*100:.1f}%)")
+            print(f"    After toxicity filter: {total_after_toxicity}/{original_count} ({total_after_toxicity/original_count*100:.1f}%)")
+
+            # Now combine filtered chunks (much smaller than original)
+            print(f"  Combining {len(filtered_chunks)} filtered chunks...")
+            if filtered_chunks:
                 import pyarrow.parquet as pq
                 import pyarrow as pa
-
-                tables = []
-                for chunk_path in tqdm(all_chunk_files, desc="    Loading chunks"):
-                    tables.append(pq.read_table(chunk_path))
-
-                print("    Concatenating tables...")
+                tables = [pq.read_table(p) for p in filtered_chunks]
                 combined_table = pa.concat_tables(tables)
                 df = combined_table.to_pandas()
+
+                # Cleanup filtered chunks
+                for p in filtered_chunks:
+                    p.unlink()
             else:
                 df = pd.DataFrame({'text': []})
 
-            # Save final checkpoint and cleanup chunk files
-            if checkpoint:
-                print(f"  Saving final cleaned data...")
-                checkpoint.save_checkpoint(df, filename, 'clean', file_hash)
-                checkpoint.save_state(filename, file_hash, {'completed': ['clean'], 'original_count': original_count})
-                # Remove chunk files after successful merge
-                for chunk_path in all_chunk_files:
-                    chunk_path.unlink()
-                if all_chunk_files:
-                    print(f"    Cleaned up {len(all_chunk_files)} chunk files")
-
-        # Step 2: Quality filtering
-        if 'quality' in completed_steps and checkpoint:
-            print(f"  Loading cached quality-filtered data...")
-            df = checkpoint.load_checkpoint(filename, 'quality', file_hash)
-        else:
-            print(f"  Filtering by quality...")
-            # Vectorized quality checks
-            word_counts = df['text'].str.split().str.len()
-            unique_chars = df['text'].str.lower().apply(lambda x: len(set(x)))
-            quality_mask = (word_counts >= 50) & (word_counts <= 10000) & (unique_chars >= 20)
-            df = df[quality_mask].reset_index(drop=True)
-            print(f"    After quality filter: {len(df)}/{original_count} ({len(df)/original_count*100:.1f}%)")
-
-            if checkpoint:
-                checkpoint.save_checkpoint(df, filename, 'quality', file_hash)
-                checkpoint.save_state(filename, file_hash, {'completed': ['clean', 'quality'], 'original_count': original_count})
-
-        # Step 3: Toxicity filtering (GPU-accelerated)
-        if 'toxicity' in completed_steps and checkpoint:
-            print(f"  Loading cached toxicity-filtered data...")
-            df = checkpoint.load_checkpoint(filename, 'toxicity', file_hash)
-        else:
-            print(f"  Filtering toxicity ({len(df)} docs, batch_size={batch_size})...")
-            cleaner = DataCleaner(use_gpu=use_gpu, batch_size=batch_size)
-            toxic_mask = cleaner.is_toxic_batch(df['text'].tolist(), show_progress=True)
-            df = df[~np.array(toxic_mask)].reset_index(drop=True)
-            print(f"    After toxicity filter: {len(df)}/{original_count} ({len(df)/original_count*100:.1f}%)")
-
-            if checkpoint:
-                checkpoint.save_checkpoint(df, filename, 'toxicity', file_hash)
-                checkpoint.save_state(filename, file_hash, {'completed': ['clean', 'quality', 'toxicity'], 'original_count': original_count})
-
-        # Step 4: Deduplication
+        # Step 2: Deduplication (must be done on combined data for cross-chunk dedup)
         print(f"  Deduplicating {len(df)} docs...")
-        cleaner = DataCleaner(use_gpu=False)  # Dedup is CPU-only
+        dedup_cleaner = DataCleaner(use_gpu=False)  # Dedup is CPU-only
         doc_ids = [f"{filename}_{i}" for i in range(len(df))]
-        keep_mask = cleaner.deduplicate_batch(df['text'].tolist(), doc_ids, show_progress=True)
+        keep_mask = dedup_cleaner.deduplicate_batch(df['text'].tolist(), doc_ids, show_progress=True)
         df = df[keep_mask].reset_index(drop=True)
         final_count = len(df)
         print(f"    After deduplication: {final_count}/{original_count} ({final_count/original_count*100:.1f}%)")
