@@ -180,11 +180,24 @@ def pack_sequences(context_lengths=[2048], input_dir="data/processed", output_di
         val_size = min(1000, len(full_dataset) // 100)
         splits = full_dataset.train_test_split(test_size=val_size, seed=42)
 
-        splits['train'].save_to_disk(train_path)
-        splits['test'].save_to_disk(f"{output_dir}/val")
+        # Save to temp paths first (can't overwrite loaded dataset)
+        train_temp = f"{output_dir}/train_temp"
+        val_path = f"{output_dir}/val"
 
-        print(f"  Train: {len(splits['train'])} sequences")
-        print(f"  Val: {len(splits['test'])} sequences")
+        splits['train'].save_to_disk(train_temp)
+        splits['test'].save_to_disk(val_path)
+
+        # Delete original and rename temp
+        import shutil
+        del full_dataset, splits  # Release the loaded dataset
+        shutil.rmtree(train_path)
+        shutil.move(train_temp, train_path)
+
+        # Reload to get counts
+        final_train = Dataset.load_from_disk(train_path)
+        final_val = Dataset.load_from_disk(val_path)
+        print(f"  Train: {len(final_train)} sequences")
+        print(f"  Val: {len(final_val)} sequences")
 
     print(f"\n✓ Packing complete!")
 
