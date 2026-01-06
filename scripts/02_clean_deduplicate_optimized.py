@@ -329,10 +329,11 @@ def process_single_file(
                 existing_chunks = sorted(chunk_dir.glob(chunk_pattern))
                 if existing_chunks:
                     print(f"  Found {len(existing_chunks)} existing checkpoint chunk(s)...")
-                    # Count rows without loading full data into memory
+                    # Count rows by reading parquet metadata (fast, no data loading)
+                    import pyarrow.parquet as pq
                     for chunk_path in existing_chunks:
-                        chunk_df = pd.read_parquet(chunk_path, columns=[])  # Just get row count
-                        start_idx += len(chunk_df)
+                        parquet_file = pq.ParquetFile(chunk_path)
+                        start_idx += parquet_file.metadata.num_rows
                     print(f"    {start_idx:,} documents already cleaned")
 
             remaining = original_count - start_idx
