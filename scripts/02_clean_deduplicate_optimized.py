@@ -644,6 +644,9 @@ def apply_quality_filter_parallel(
 # =============================================================================
 
 if DATATROVE_PIPELINE_AVAILABLE:
+    import time as _time
+    from datatrove.pipeline.base import PipelineStep
+
     class PIICleanerFilter(BaseFilter):
         """Custom datatrove filter for PII removal and text normalization.
 
@@ -663,6 +666,43 @@ if DATATROVE_PIPELINE_AVAILABLE:
             else:
                 doc.text = _clean_text_fast(doc.text)
             return True  # Always keep, just modifies text
+
+    class ProgressTracker(PipelineStep):
+        """Track and report progress through the pipeline.
+
+        Logs progress every N documents to show pipeline is working.
+        """
+        name = "progress_tracker"
+        type = "🔢"
+
+        def __init__(self, log_every: int = 10000, stage_name: str = "Processing"):
+            super().__init__()
+            self.log_every = log_every
+            self.stage_name = stage_name
+            self.count = 0
+            self.passed = 0
+            self.start_time = None
+
+        def run(self, data, rank: int = 0, world_size: int = 1):
+            """Pass through documents while tracking progress."""
+            if self.start_time is None:
+                self.start_time = _time.time()
+
+            for doc in data:
+                self.count += 1
+                self.passed += 1
+
+                if self.count % self.log_every == 0:
+                    elapsed = _time.time() - self.start_time
+                    rate = self.count / elapsed if elapsed > 0 else 0
+                    print(f"    [{self.stage_name}] Rank {rank}: {self.count:,} docs processed ({rate:.0f} docs/sec)")
+
+                yield doc
+
+            # Final count
+            elapsed = _time.time() - self.start_time if self.start_time else 0
+            rate = self.count / elapsed if elapsed > 0 else 0
+            print(f"    [{self.stage_name}] Rank {rank}: COMPLETE - {self.count:,} docs in {elapsed:.1f}s ({rate:.0f} docs/sec)")
 
 
 def process_with_datatrove_pipeline(
@@ -748,14 +788,25 @@ def process_with_datatrove_pipeline(
         'after_dedup': 0,
     }
 
+    # Count original documents first
+    import pyarrow.parquet as pq
+    print("Counting input documents...")
+    for f in input_files:
+        pf = pq.ParquetFile(os.path.join(input_dir, f))
+        stats['original_docs'] += pf.metadata.num_rows
+    print(f"  Total input documents: {stats['original_docs']:,}")
+
     # =========================================================================
     # STAGE 1: Quality Filtering with Native Pipeline
     # =========================================================================
-    print("STAGE 1: Quality Filtering (native datatrove pipeline)")
+    print("\nSTAGE 1: Quality Filtering (native datatrove pipeline)")
     print("-" * 50)
 
-    # Build filter pipeline
-    filters = [PIICleanerFilter(use_full_clean=use_full_clean)]
+    # Build filter pipeline with progress tracking
+    filters = [
+        PIICleanerFilter(use_full_clean=use_full_clean),
+        ProgressTracker(log_every=50000, stage_name="Quality"),  # Log every 50K docs
+    ]
 
     if use_gopher_quality:
         filters.append(GopherQualityFilter(
@@ -772,6 +823,9 @@ def process_with_datatrove_pipeline(
 
     if use_gopher_rep:
         filters.append(GopherRepetitionFilter())
+
+    # Add progress tracker after filters to show how many passed
+    filters.append(ProgressTracker(log_every=50000, stage_name="Passed"))
 
     # Count tasks = number of input files for optimal parallelization
     n_tasks = len(input_files)
@@ -796,8 +850,13 @@ def process_with_datatrove_pipeline(
         workers=n_workers,
     )
 
+    import time as _time
+    start_time = _time.time()
     print(f"  Running with {n_tasks} tasks, {n_workers} workers...")
+    print(f"  Processing {stats['original_docs']:,} documents...")
     executor1.run()
+    elapsed = _time.time() - start_time
+    print(f"  Stage 1 completed in {elapsed:.1f}s")
 
     # Count results from stage 1
     stage1_files = list(stage1_dir.glob("*.parquet"))
@@ -842,6 +901,9 @@ def process_with_datatrove_pipeline(
     # =========================================================================
     print("\nSTAGE 3: Deduplication (native MinhashDedup)")
     print("-" * 50)
+    print(f"  Input: {stats['after_toxicity']:,} documents")
+
+    stage3_start = _time.time()
 
     # MinhashDedup configuration (similar to FineWeb)
     minhash_config = MinhashConfig(
@@ -855,12 +917,14 @@ def process_with_datatrove_pipeline(
 
     # Stage 3a: Compute signatures
     print("  3a: Computing MinHash signatures...")
+    step_start = _time.time()
     sig_pipeline = [
         ParquetReader(
             data_folder=str(stage2_dir),
             glob_pattern="*.parquet",
             text_key="text",
         ),
+        ProgressTracker(log_every=50000, stage_name="Signatures"),
         MinhashDedupSignature(
             output_folder=str(dedup_sig_dir),
             config=minhash_config,
@@ -874,9 +938,11 @@ def process_with_datatrove_pipeline(
         workers=n_workers,
     )
     executor_sig.run()
+    print(f"      Completed in {_time.time() - step_start:.1f}s")
 
     # Stage 3b: Find duplicate pairs in buckets
     print("  3b: Finding duplicate pairs...")
+    step_start = _time.time()
     bucket_pipeline = [
         MinhashDedupBuckets(
             input_folder=str(dedup_sig_dir),
@@ -892,9 +958,11 @@ def process_with_datatrove_pipeline(
         workers=min(n_workers, minhash_config.num_buckets),
     )
     executor_buckets.run()
+    print(f"      Completed in {_time.time() - step_start:.1f}s")
 
     # Stage 3c: Cluster duplicates
     print("  3c: Clustering duplicates...")
+    step_start = _time.time()
     cluster_pipeline = [
         MinhashDedupCluster(
             input_folder=str(dedup_buckets_dir),
@@ -909,9 +977,11 @@ def process_with_datatrove_pipeline(
         workers=1,
     )
     executor_cluster.run()
+    print(f"      Completed in {_time.time() - step_start:.1f}s")
 
     # Stage 3d: Filter out duplicates and write final output
     print("  3d: Filtering duplicates and writing output...")
+    step_start = _time.time()
     final_output_dir = Path(output_dir) / "final"
     final_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -924,6 +994,7 @@ def process_with_datatrove_pipeline(
         MinhashDedupFilter(
             input_folder=str(dedup_clusters_dir),
         ),
+        ProgressTracker(log_every=50000, stage_name="Dedup"),
         ParquetWriter(
             output_folder=str(final_output_dir),
             output_filename="${rank}.parquet",
@@ -937,6 +1008,7 @@ def process_with_datatrove_pipeline(
         workers=n_workers,
     )
     executor_filter.run()
+    print(f"      Completed in {_time.time() - step_start:.1f}s")
 
     # Count final results
     final_files = list(final_output_dir.glob("*.parquet"))
@@ -944,7 +1016,9 @@ def process_with_datatrove_pipeline(
         pf = pq.ParquetFile(f)
         stats['after_dedup'] += pf.metadata.num_rows
 
-    print(f"  After deduplication: {stats['after_dedup']:,} docs")
+    stage3_elapsed = _time.time() - stage3_start
+    print(f"  Stage 3 total: {stage3_elapsed:.1f}s")
+    print(f"  After deduplication: {stats['after_dedup']:,} docs ({stats['after_dedup']/stats['after_toxicity']*100:.1f}% kept)")
 
     # =========================================================================
     # Cleanup temp files
