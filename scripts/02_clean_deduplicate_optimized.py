@@ -257,52 +257,75 @@ def process_single_file(
             df = pd.read_parquet(input_path)
             original_count = len(df)
 
-            # Check for partial progress
-            partial_path = checkpoint.cache_dir / f"{filename}_clean_partial_{file_hash}.parquet" if checkpoint else None
+            # Check for partial progress using append-only chunk files
+            chunk_pattern = f"{filename}_clean_chunk_*_{file_hash}.parquet"
+            chunk_dir = checkpoint.cache_dir if checkpoint else None
             start_idx = 0
             partial_results = []
+            existing_chunks = []
 
-            if partial_path and partial_path.exists():
-                print(f"  Resuming from partial checkpoint...")
-                partial_df = pd.read_parquet(partial_path)
-                start_idx = len(partial_df)
-                partial_results = partial_df['text'].tolist()
-                print(f"    Loaded {start_idx:,} already cleaned documents")
+            if chunk_dir:
+                # Find all existing chunk files and load them in order
+                existing_chunks = sorted(chunk_dir.glob(chunk_pattern))
+                if existing_chunks:
+                    print(f"  Resuming from {len(existing_chunks)} checkpoint chunk(s)...")
+                    for chunk_path in existing_chunks:
+                        chunk_df = pd.read_parquet(chunk_path)
+                        partial_results.extend(chunk_df['text'].tolist())
+                    start_idx = len(partial_results)
+                    print(f"    Loaded {start_idx:,} already cleaned documents")
 
             remaining = original_count - start_idx
-            print(f"  Cleaning {remaining:,} documents (of {original_count:,} total)...")
+            # Track chunks for append-only saves
+            current_chunk_idx = len(existing_chunks)
 
-            # Checkpoint callback for incremental saves
-            # Only save checkpoints if we're starting fresh (not resuming from partial)
-            # This avoids the slow re-save of already checkpointed data
-            checkpoint_enabled = checkpoint and start_idx == 0
+            if remaining <= 0:
+                print(f"  All documents already cleaned from chunks")
+                all_cleaned = partial_results
+            else:
+                print(f"  Cleaning {remaining:,} documents (of {original_count:,} total)...")
 
-            def save_partial(results, count):
-                if checkpoint_enabled:
-                    print(f"\n    [Saving checkpoint: {count:,}/{remaining:,} cleaned...]", end="", flush=True)
-                    partial_df = pd.DataFrame({'text': results})
-                    partial_df.to_parquet(partial_path, index=False)
-                    print(f" done]")
+                last_saved_count = 0
 
-            # Clean remaining texts
-            texts_to_clean = df['text'].tolist()[start_idx:]
-            new_results = parallel_clean_texts(
-                texts_to_clean,
-                n_workers=n_workers,
-                checkpoint_callback=save_partial if checkpoint_enabled else None,
-                checkpoint_interval=500000  # Save every 500K docs
-            )
+                # Checkpoint callback - append-only (only saves NEW data as separate chunk)
+                def save_chunk(results, count):
+                    nonlocal current_chunk_idx, last_saved_count
+                    if checkpoint:
+                        # Only save the new portion since last checkpoint
+                        new_results = results[last_saved_count:]
+                        if new_results:
+                            chunk_path = chunk_dir / f"{filename}_clean_chunk_{current_chunk_idx:04d}_{file_hash}.parquet"
+                            print(f"\n    [Saving chunk {current_chunk_idx}: {len(new_results):,} docs...]", end="", flush=True)
+                            chunk_df = pd.DataFrame({'text': new_results})
+                            chunk_df.to_parquet(chunk_path, index=False)
+                            print(f" done]")
+                            current_chunk_idx += 1
+                            last_saved_count = count
 
-            # Combine partial + new results
-            all_cleaned = partial_results + new_results
+                # Clean remaining texts
+                texts_to_clean = df['text'].tolist()[start_idx:]
+                new_results = parallel_clean_texts(
+                    texts_to_clean,
+                    n_workers=n_workers,
+                    checkpoint_callback=save_chunk if checkpoint else None,
+                    checkpoint_interval=500000  # Save every 500K docs
+                )
+
+                # Combine partial + new results
+                all_cleaned = partial_results + new_results
+
             df['text'] = all_cleaned
 
-            # Save final checkpoint and cleanup partial
+            # Save final checkpoint and cleanup chunk files
             if checkpoint:
                 checkpoint.save_checkpoint(df, filename, 'clean', file_hash)
                 checkpoint.save_state(filename, file_hash, {'completed': ['clean'], 'original_count': original_count})
-                if partial_path and partial_path.exists():
-                    partial_path.unlink()  # Remove partial checkpoint
+                # Remove chunk files after successful merge
+                chunk_files = list(chunk_dir.glob(chunk_pattern))
+                for chunk_path in chunk_files:
+                    chunk_path.unlink()
+                if chunk_files:
+                    print(f"    Cleaned up {len(chunk_files)} chunk files")
 
         # Step 2: Quality filtering
         if 'quality' in completed_steps and checkpoint:
