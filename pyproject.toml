@@ -22,7 +22,7 @@ dependencies = [
     # Data cleaning dependencies
     "pandas>=2.0",
     "datasketch>=1.6",
-    "ftfy>=6.1",
+    "plsfix>=0.1",
     "detoxify>=0.5",
     # Evaluation dependencies
     "evaluate>=0.4",

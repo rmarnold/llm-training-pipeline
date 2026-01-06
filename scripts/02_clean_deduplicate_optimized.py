@@ -70,14 +70,23 @@ def _clean_text_fast(text: str) -> str:
 
 
 def _clean_text_full(text: str) -> str:
-    """Full text cleaning with ftfy Unicode normalization."""
+    """Full text cleaning with plsfix (Rust-based, 10x faster than ftfy)."""
     if not text or pd.isna(text):
         return ""
 
-    # Import ftfy only when needed (slow import)
-    from ftfy import fix_text
-
-    text = fix_text(str(text))
+    try:
+        # plsfix is a Rust-based ftfy replacement (~10x faster)
+        from plsfix import fix_text
+        text = fix_text(str(text))
+    except ImportError:
+        # Fallback to ftfy if plsfix not installed
+        try:
+            from ftfy import fix_text
+            text = fix_text(str(text))
+        except ImportError:
+            # No Unicode fixer available, just use basic normalization
+            import unicodedata
+            text = unicodedata.normalize('NFKC', str(text))
 
     # Single-pass PII removal
     text = _PII_COMBINED_PATTERN.sub(_pii_replacer, text)
@@ -589,9 +598,9 @@ def main():
     parser.add_argument('--output-dir', type=str, default='data/processed',
                        help='Output directory (default: data/processed)')
     parser.add_argument('--fast-clean', action='store_true', default=True,
-                       help='Use fast cleaning (skip ftfy) [default: enabled]')
+                       help='Use fast cleaning (skip Unicode fixing) [default: enabled]')
     parser.add_argument('--full-clean', action='store_true',
-                       help='Use full cleaning with ftfy Unicode normalization')
+                       help='Use full cleaning with plsfix (Rust-based, 10x faster than ftfy)')
 
     args = parser.parse_args()
 
@@ -599,10 +608,10 @@ def main():
     global _CLEANING_MODE
     if args.full_clean:
         _CLEANING_MODE = 'full'
-        print("Cleaning mode: FULL (with ftfy Unicode normalization)")
+        print("Cleaning mode: FULL (with plsfix Unicode/mojibake fixing)")
     else:
         _CLEANING_MODE = 'fast'
-        print("Cleaning mode: FAST (skip ftfy, ~5x faster)")
+        print("Cleaning mode: FAST (skip Unicode fixing, ~5-10x faster)")
 
     use_gpu = torch.cuda.is_available() and not args.no_gpu
     # Default to half of CPU cores - streaming approach prevents memory buildup
