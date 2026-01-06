@@ -25,9 +25,22 @@ try:
         FineWebQualityFilter,
         LanguageFilter,
     )
+    from datatrove.pipeline.filters.base_filter import BaseFilter
+    from datatrove.executor import LocalPipelineExecutor
+    from datatrove.pipeline.readers import ParquetReader
+    from datatrove.pipeline.writers import ParquetWriter
+    from datatrove.pipeline.dedup import (
+        MinhashDedupSignature,
+        MinhashDedupBuckets,
+        MinhashDedupCluster,
+        MinhashDedupFilter,
+    )
+    from datatrove.pipeline.dedup.minhash import MinhashConfig, HashConfig
     DATATROVE_AVAILABLE = True
+    DATATROVE_PIPELINE_AVAILABLE = True
 except ImportError:
     DATATROVE_AVAILABLE = False
+    DATATROVE_PIPELINE_AVAILABLE = False
     print("Warning: datatrove not installed, using basic quality filters")
 
 # =============================================================================
@@ -626,6 +639,335 @@ def apply_quality_filter_parallel(
     return results
 
 
+# =============================================================================
+# NATIVE DATATROVE PIPELINE - Optimized execution using datatrove's executors
+# =============================================================================
+
+if DATATROVE_PIPELINE_AVAILABLE:
+    class PIICleanerFilter(BaseFilter):
+        """Custom datatrove filter for PII removal and text normalization.
+
+        This filter modifies text in-place (removes PII, normalizes whitespace)
+        and always returns True (keeps the document).
+        """
+        name = "pii_cleaner"
+
+        def __init__(self, use_full_clean: bool = False):
+            super().__init__()
+            self.use_full_clean = use_full_clean
+
+        def filter(self, doc: Document) -> bool:
+            """Clean PII from document text."""
+            if self.use_full_clean:
+                doc.text = _clean_text_full(doc.text)
+            else:
+                doc.text = _clean_text_fast(doc.text)
+            return True  # Always keep, just modifies text
+
+
+def process_with_datatrove_pipeline(
+    input_dir: str = "data/raw",
+    output_dir: str = "data/processed",
+    file_pattern: str = "pretraining_",
+    n_workers: int = None,
+    use_gopher_quality: bool = True,
+    use_fineweb: bool = True,
+    use_gopher_rep: bool = True,
+    use_full_clean: bool = False,
+    use_gpu: bool = True,
+    toxicity_batch_size: int = None,
+) -> dict:
+    """Process data using datatrove's native pipeline architecture.
+
+    This is significantly faster than the legacy approach because:
+    1. Native parallel execution without Pool overhead
+    2. Streaming through pipeline (lower memory)
+    3. Optimized MinhashDedup instead of custom LSH
+    4. Built-in task tracking and resumption
+
+    Pipeline stages:
+    1. ParquetReader -> PIICleaner -> QualityFilters -> ParquetWriter (temp)
+    2. Load temp -> ToxicityFilter (GPU) -> ParquetWriter (temp2)
+    3. MinhashDedup 4-stage pipeline -> Final output
+
+    Args:
+        input_dir: Directory containing input parquet files
+        output_dir: Directory for output files
+        file_pattern: Pattern to match input files
+        n_workers: Number of parallel workers (default: 80% of CPU cores)
+        use_gopher_quality: Enable GopherQualityFilter
+        use_fineweb: Enable FineWebQualityFilter
+        use_gopher_rep: Enable GopherRepetitionFilter
+        use_full_clean: Use full Unicode cleaning (slower but fixes mojibake)
+        use_gpu: Use GPU for toxicity detection
+        toxicity_batch_size: Batch size for toxicity (auto-tuned if None)
+
+    Returns:
+        Dict with processing statistics
+    """
+    if not DATATROVE_PIPELINE_AVAILABLE:
+        raise ImportError("datatrove pipeline components not available. Install with: pip install 'datatrove[io,processing]'")
+
+    n_workers = n_workers or max(1, int(cpu_count() * 0.8))
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Find input files
+    input_files = sorted([
+        f for f in os.listdir(input_dir)
+        if f.startswith(file_pattern) and f.endswith('.parquet')
+    ])
+
+    if not input_files:
+        print(f"No files matching '{file_pattern}*.parquet' in {input_dir}")
+        return {'files_processed': 0}
+
+    print(f"\n{'='*60}")
+    print(f"DATATROVE NATIVE PIPELINE")
+    print(f"{'='*60}")
+    print(f"Input files: {len(input_files)}")
+    print(f"Workers: {n_workers}")
+    print(f"Filters: GopherQuality={use_gopher_quality}, FineWeb={use_fineweb}, GopherRep={use_gopher_rep}")
+    print(f"{'='*60}\n")
+
+    # Temp directories for intermediate results
+    temp_dir = Path(output_dir) / ".datatrove_temp"
+    stage1_dir = temp_dir / "stage1_filtered"
+    stage2_dir = temp_dir / "stage2_toxicity"
+    dedup_sig_dir = temp_dir / "dedup_signatures"
+    dedup_buckets_dir = temp_dir / "dedup_buckets"
+    dedup_clusters_dir = temp_dir / "dedup_clusters"
+
+    for d in [stage1_dir, stage2_dir, dedup_sig_dir, dedup_buckets_dir, dedup_clusters_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    stats = {
+        'files_processed': len(input_files),
+        'original_docs': 0,
+        'after_quality': 0,
+        'after_toxicity': 0,
+        'after_dedup': 0,
+    }
+
+    # =========================================================================
+    # STAGE 1: Quality Filtering with Native Pipeline
+    # =========================================================================
+    print("STAGE 1: Quality Filtering (native datatrove pipeline)")
+    print("-" * 50)
+
+    # Build filter pipeline
+    filters = [PIICleanerFilter(use_full_clean=use_full_clean)]
+
+    if use_gopher_quality:
+        filters.append(GopherQualityFilter(
+            min_doc_words=50,
+            max_doc_words=100000,
+            min_avg_word_length=3,
+            max_avg_word_length=10,
+            min_stop_words=2,
+            max_symbol_word_ratio=0.1,
+        ))
+
+    if use_fineweb:
+        filters.append(FineWebQualityFilter())
+
+    if use_gopher_rep:
+        filters.append(GopherRepetitionFilter())
+
+    # Count tasks = number of input files for optimal parallelization
+    n_tasks = len(input_files)
+
+    pipeline_stage1 = [
+        ParquetReader(
+            data_folder=input_dir,
+            glob_pattern=f"{file_pattern}*.parquet",
+            text_key="text",
+        ),
+        *filters,
+        ParquetWriter(
+            output_folder=str(stage1_dir),
+            output_filename="${rank}.parquet",
+        ),
+    ]
+
+    executor1 = LocalPipelineExecutor(
+        pipeline=pipeline_stage1,
+        logging_dir=str(temp_dir / "logs_stage1"),
+        tasks=n_tasks,
+        workers=n_workers,
+    )
+
+    print(f"  Running with {n_tasks} tasks, {n_workers} workers...")
+    executor1.run()
+
+    # Count results from stage 1
+    stage1_files = list(stage1_dir.glob("*.parquet"))
+    for f in stage1_files:
+        import pyarrow.parquet as pq
+        pf = pq.ParquetFile(f)
+        stats['after_quality'] += pf.metadata.num_rows
+    print(f"  After quality filtering: {stats['after_quality']:,} docs")
+
+    # =========================================================================
+    # STAGE 2: Toxicity Filtering (GPU - can't be in datatrove pipeline)
+    # =========================================================================
+    print("\nSTAGE 2: Toxicity Filtering (GPU)")
+    print("-" * 50)
+
+    # Initialize toxicity model
+    cleaner = DataCleaner(use_gpu=use_gpu, batch_size=toxicity_batch_size)
+
+    import pyarrow.parquet as pq
+    import pyarrow as pa
+
+    toxicity_kept = 0
+    for stage1_file in tqdm(stage1_files, desc="  Processing files"):
+        df = pd.read_parquet(stage1_file)
+        if len(df) == 0:
+            continue
+
+        # Run toxicity detection
+        toxic_mask = cleaner.is_toxic_batch(df['text'].tolist(), show_progress=False)
+        df = df[~np.array(toxic_mask)].reset_index(drop=True)
+
+        if len(df) > 0:
+            output_file = stage2_dir / stage1_file.name
+            df.to_parquet(output_file, index=False)
+            toxicity_kept += len(df)
+
+    stats['after_toxicity'] = toxicity_kept
+    print(f"  After toxicity filtering: {toxicity_kept:,} docs")
+
+    # =========================================================================
+    # STAGE 3: Deduplication with Native MinhashDedup
+    # =========================================================================
+    print("\nSTAGE 3: Deduplication (native MinhashDedup)")
+    print("-" * 50)
+
+    # MinhashDedup configuration (similar to FineWeb)
+    minhash_config = MinhashConfig(
+        hash_config=HashConfig(precision=64),
+        num_buckets=14,
+        hashes_per_bucket=8,
+    )
+
+    stage2_files = list(stage2_dir.glob("*.parquet"))
+    n_dedup_tasks = max(1, len(stage2_files))
+
+    # Stage 3a: Compute signatures
+    print("  3a: Computing MinHash signatures...")
+    sig_pipeline = [
+        ParquetReader(
+            data_folder=str(stage2_dir),
+            glob_pattern="*.parquet",
+            text_key="text",
+        ),
+        MinhashDedupSignature(
+            output_folder=str(dedup_sig_dir),
+            config=minhash_config,
+        ),
+    ]
+
+    executor_sig = LocalPipelineExecutor(
+        pipeline=sig_pipeline,
+        logging_dir=str(temp_dir / "logs_dedup_sig"),
+        tasks=n_dedup_tasks,
+        workers=n_workers,
+    )
+    executor_sig.run()
+
+    # Stage 3b: Find duplicate pairs in buckets
+    print("  3b: Finding duplicate pairs...")
+    bucket_pipeline = [
+        MinhashDedupBuckets(
+            input_folder=str(dedup_sig_dir),
+            output_folder=str(dedup_buckets_dir),
+            config=minhash_config,
+        ),
+    ]
+
+    executor_buckets = LocalPipelineExecutor(
+        pipeline=bucket_pipeline,
+        logging_dir=str(temp_dir / "logs_dedup_buckets"),
+        tasks=minhash_config.num_buckets,  # One task per bucket
+        workers=min(n_workers, minhash_config.num_buckets),
+    )
+    executor_buckets.run()
+
+    # Stage 3c: Cluster duplicates
+    print("  3c: Clustering duplicates...")
+    cluster_pipeline = [
+        MinhashDedupCluster(
+            input_folder=str(dedup_buckets_dir),
+            output_folder=str(dedup_clusters_dir),
+        ),
+    ]
+
+    executor_cluster = LocalPipelineExecutor(
+        pipeline=cluster_pipeline,
+        logging_dir=str(temp_dir / "logs_dedup_cluster"),
+        tasks=1,  # Clustering is single-task
+        workers=1,
+    )
+    executor_cluster.run()
+
+    # Stage 3d: Filter out duplicates and write final output
+    print("  3d: Filtering duplicates and writing output...")
+    final_output_dir = Path(output_dir) / "final"
+    final_output_dir.mkdir(parents=True, exist_ok=True)
+
+    filter_pipeline = [
+        ParquetReader(
+            data_folder=str(stage2_dir),
+            glob_pattern="*.parquet",
+            text_key="text",
+        ),
+        MinhashDedupFilter(
+            input_folder=str(dedup_clusters_dir),
+        ),
+        ParquetWriter(
+            output_folder=str(final_output_dir),
+            output_filename="${rank}.parquet",
+        ),
+    ]
+
+    executor_filter = LocalPipelineExecutor(
+        pipeline=filter_pipeline,
+        logging_dir=str(temp_dir / "logs_dedup_filter"),
+        tasks=n_dedup_tasks,
+        workers=n_workers,
+    )
+    executor_filter.run()
+
+    # Count final results
+    final_files = list(final_output_dir.glob("*.parquet"))
+    for f in final_files:
+        pf = pq.ParquetFile(f)
+        stats['after_dedup'] += pf.metadata.num_rows
+
+    print(f"  After deduplication: {stats['after_dedup']:,} docs")
+
+    # =========================================================================
+    # Cleanup temp files
+    # =========================================================================
+    print("\nCleaning up temporary files...")
+    import shutil
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # =========================================================================
+    # Summary
+    # =========================================================================
+    print(f"\n{'='*60}")
+    print("PIPELINE COMPLETE")
+    print(f"{'='*60}")
+    print(f"  After quality filtering: {stats['after_quality']:,}")
+    print(f"  After toxicity filtering: {stats['after_toxicity']:,}")
+    print(f"  After deduplication: {stats['after_dedup']:,}")
+    print(f"  Final output: {final_output_dir}")
+    print(f"{'='*60}\n")
+
+    return stats
+
+
 class CheckpointManager:
     """Manage intermediate checkpoints for resumable processing."""
 
@@ -1070,6 +1412,10 @@ def main():
                        help='Skip FineWebQualityFilter (15% faster, less strict)')
     parser.add_argument('--fast-quality', action='store_true',
                        help='Only use GopherQualityFilter (fastest, basic filtering)')
+    parser.add_argument('--native-pipeline', action='store_true',
+                       help='Use native datatrove pipeline (faster, uses MinhashDedup)')
+    parser.add_argument('--legacy', action='store_true',
+                       help='Force legacy pipeline mode (default if --native-pipeline not specified)')
 
     args = parser.parse_args()
 
@@ -1109,23 +1455,62 @@ def main():
     # Default to 80% of CPU cores - streaming approach prevents memory buildup
     n_workers = args.workers if args.workers else max(1, int(cpu_count() * 0.8))
 
-    print(f"Starting optimized data cleaning:")
-    print(f"  - GPU acceleration: {use_gpu}")
-    print(f"  - Checkpoint caching: {not args.no_cache}")
-    print(f"  - Batch size: {args.batch_size}")
-    print(f"  - CPU workers: {n_workers}")
-    print(f"  - File pattern: {args.pattern}")
-    print()
+    # Determine which pipeline to use
+    use_native = args.native_pipeline and DATATROVE_PIPELINE_AVAILABLE and not args.legacy
 
-    process_all_files(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        file_pattern=args.pattern,
-        use_gpu=use_gpu,
-        use_cache=not args.no_cache,
-        batch_size=args.batch_size,
-        n_workers=n_workers,
-    )
+    if use_native:
+        print("Pipeline mode: NATIVE DATATROVE (optimized)")
+        print(f"Starting native datatrove pipeline:")
+        print(f"  - GPU acceleration: {use_gpu}")
+        print(f"  - CPU workers: {n_workers}")
+        print(f"  - File pattern: {args.pattern}")
+        print()
+
+        # Determine filter settings
+        if args.fast_quality:
+            use_gopher_quality = True
+            use_fineweb = False
+            use_gopher_rep = False
+        else:
+            use_gopher_quality = True
+            use_fineweb = not args.no_fineweb_filter
+            use_gopher_rep = not args.no_repetition_filter
+
+        process_with_datatrove_pipeline(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            file_pattern=args.pattern,
+            n_workers=n_workers,
+            use_gopher_quality=use_gopher_quality,
+            use_fineweb=use_fineweb,
+            use_gopher_rep=use_gopher_rep,
+            use_full_clean=args.full_clean,
+            use_gpu=use_gpu,
+            toxicity_batch_size=args.batch_size,
+        )
+    else:
+        if args.native_pipeline and not DATATROVE_PIPELINE_AVAILABLE:
+            print("Warning: --native-pipeline requested but datatrove pipeline not available")
+            print("Falling back to legacy pipeline. Install with: pip install 'datatrove[io,processing]'")
+
+        print("Pipeline mode: LEGACY (with multiprocessing)")
+        print(f"Starting optimized data cleaning:")
+        print(f"  - GPU acceleration: {use_gpu}")
+        print(f"  - Checkpoint caching: {not args.no_cache}")
+        print(f"  - Batch size: {args.batch_size}")
+        print(f"  - CPU workers: {n_workers}")
+        print(f"  - File pattern: {args.pattern}")
+        print()
+
+        process_all_files(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            file_pattern=args.pattern,
+            use_gpu=use_gpu,
+            use_cache=not args.no_cache,
+            batch_size=args.batch_size,
+            n_workers=n_workers,
+        )
 
 
 if __name__ == "__main__":

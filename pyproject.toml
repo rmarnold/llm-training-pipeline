@@ -24,7 +24,7 @@ dependencies = [
     "datasketch>=1.6",
     "plsfix>=0.1",
     "detoxify>=0.5",
-    "datatrove>=0.2",  # Production quality filters (Gopher, FineWeb, C4)
+    "datatrove[io,processing]>=0.2",  # Production quality filters + native pipeline
     # Evaluation dependencies
     "evaluate>=0.4",
     "nvidia-ml-py3>=7.352",
