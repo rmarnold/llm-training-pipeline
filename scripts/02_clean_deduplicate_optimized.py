@@ -142,7 +142,7 @@ def parallel_clean_texts_streaming(
     if n_workers is None:
         # With streaming, we can use more workers since results don't accumulate
         # Each worker adds ~500MB-1GB overhead, but that's manageable
-        n_workers = max(1, cpu_count() // 2)
+        n_workers = max(1, int(cpu_count() * 0.8))
 
     n_workers = min(n_workers, cpu_count())
     n_texts = len(texts)
@@ -189,8 +189,8 @@ def parallel_clean_texts(
     to avoid memory issues.
     """
     if n_workers is None:
-        # Default to quarter of CPU cores to avoid memory issues
-        n_workers = max(1, cpu_count() // 4)
+        # Default to 80% of CPU cores for optimal throughput
+        n_workers = max(1, int(cpu_count() * 0.8))
 
     n_workers = min(n_workers, cpu_count())
     n_texts = len(texts)
@@ -379,7 +379,7 @@ class DatatroveQualityFilter:
         if not DATATROVE_AVAILABLE:
             raise ImportError("datatrove not installed. Run: pip install datatrove")
 
-        self.n_workers = n_workers or max(1, cpu_count() // 2)
+        self.n_workers = n_workers or max(1, int(cpu_count() * 0.8))
         # Initialize filters in main process too (for small batches)
         _init_datatrove_filters()
 
@@ -425,7 +425,7 @@ def apply_quality_filter_parallel(
     Returns:
         List of booleans (True = keep, False = filter out)
     """
-    n_workers = n_workers or max(1, cpu_count() // 2)
+    n_workers = n_workers or max(1, int(cpu_count() * 0.8))
     n_texts = len(texts)
 
     if use_datatrove and DATATROVE_AVAILABLE:
@@ -796,7 +796,7 @@ def process_all_files(
     ])
 
     if n_workers is None:
-        n_workers = max(1, cpu_count() // 2)
+        n_workers = max(1, int(cpu_count() * 0.8))
 
     print(f"\n{'='*60}")
     print(f"Found {len(files_to_process)} files to process")
@@ -865,7 +865,7 @@ def main():
 
     use_gpu = torch.cuda.is_available() and not args.no_gpu
     # Default to half of CPU cores - streaming approach prevents memory buildup
-    n_workers = args.workers if args.workers else max(1, cpu_count() // 2)
+    n_workers = args.workers if args.workers else max(1, int(cpu_count() * 0.8))
 
     print(f"Starting optimized data cleaning:")
     print(f"  - GPU acceleration: {use_gpu}")
