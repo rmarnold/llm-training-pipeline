@@ -273,19 +273,23 @@ def process_single_file(
             print(f"  Cleaning {remaining:,} documents (of {original_count:,} total)...")
 
             # Checkpoint callback for incremental saves
+            # Only save checkpoints if we're starting fresh (not resuming from partial)
+            # This avoids the slow re-save of already checkpointed data
+            checkpoint_enabled = checkpoint and start_idx == 0
+
             def save_partial(results, count):
-                if checkpoint:
-                    all_results = partial_results + results
-                    partial_df = pd.DataFrame({'text': all_results})
+                if checkpoint_enabled:
+                    print(f"\n    [Saving checkpoint: {count:,}/{remaining:,} cleaned...]", end="", flush=True)
+                    partial_df = pd.DataFrame({'text': results})
                     partial_df.to_parquet(partial_path, index=False)
-                    print(f"\n    [Checkpoint saved: {len(all_results):,}/{original_count:,} cleaned]")
+                    print(f" done]")
 
             # Clean remaining texts
             texts_to_clean = df['text'].tolist()[start_idx:]
             new_results = parallel_clean_texts(
                 texts_to_clean,
                 n_workers=n_workers,
-                checkpoint_callback=save_partial if checkpoint else None,
+                checkpoint_callback=save_partial if checkpoint_enabled else None,
                 checkpoint_interval=500000  # Save every 500K docs
             )
 
