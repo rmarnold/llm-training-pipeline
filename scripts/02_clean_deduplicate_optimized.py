@@ -827,8 +827,10 @@ def process_with_datatrove_pipeline(
     # Add progress tracker after filters to show how many passed
     filters.append(ProgressTracker(log_every=50000, stage_name="Passed"))
 
-    # Count tasks = number of input files for optimal parallelization
-    n_tasks = len(input_files)
+    # Set tasks higher than file count to enable intra-file parallelization
+    # Datatrove will shard each file across multiple tasks for better CPU utilization
+    n_tasks = max(len(input_files), n_workers * 2)  # At least 2x workers for good load balancing
+    print(f"  Tasks: {n_tasks} (2x workers for load balancing)")
 
     pipeline_stage1 = [
         ParquetReader(
@@ -913,7 +915,8 @@ def process_with_datatrove_pipeline(
     )
 
     stage2_files = list(stage2_dir.glob("*.parquet"))
-    n_dedup_tasks = max(1, len(stage2_files))
+    # Use more tasks for better parallelization
+    n_dedup_tasks = max(len(stage2_files), n_workers)
 
     # Stage 3a: Compute signatures
     print("  3a: Computing MinHash signatures...")
