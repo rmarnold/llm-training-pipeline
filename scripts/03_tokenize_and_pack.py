@@ -151,6 +151,20 @@ def pack_sequences(context_lengths=[2048], input_dir="data/processed", output_di
     Uses streaming approach to avoid OOM with large datasets.
     Output format: HuggingFace Dataset (compatible with Trainer)
     """
+    # Check if input directory exists and has data
+    if not os.path.exists(input_dir):
+        print(f"\n✗ ERROR: Input directory not found: {input_dir}")
+        print("  Run the data cleaning step first (02_clean_deduplicate_optimized.py)")
+        return
+
+    parquet_files = [f for f in os.listdir(input_dir) if f.endswith('.parquet')]
+    if not parquet_files:
+        print(f"\n✗ ERROR: No parquet files found in {input_dir}")
+        print("  Run the data cleaning step first (02_clean_deduplicate_optimized.py)")
+        return
+
+    print(f"Found {len(parquet_files)} parquet files in {input_dir}")
+
     tokenizer = AutoTokenizer.from_pretrained("configs/tokenizer")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -171,13 +185,23 @@ def pack_sequences(context_lengths=[2048], input_dir="data/processed", output_di
             output_dir=output_dir
         )
 
+        # Check if any sequences were created
+        if total_seqs == 0:
+            print(f"  ✗ No sequences created. Check if input data is valid.")
+            continue
+
         # Merge into final dataset
-        merge_chunks_to_dataset(chunk_dir, train_path, ctx_len)
+        dataset = merge_chunks_to_dataset(chunk_dir, train_path, ctx_len)
+
+        # Check if merge was successful
+        if dataset is None:
+            print(f"  ✗ Failed to merge chunks. Check the errors above.")
+            continue
 
         # Create small validation set (last 1% or 1000 sequences)
         print(f"  Creating validation split...")
         full_dataset = Dataset.load_from_disk(train_path)
-        val_size = min(1000, len(full_dataset) // 100)
+        val_size = max(1, min(1000, len(full_dataset) // 100))
         splits = full_dataset.train_test_split(test_size=val_size, seed=42)
 
         # Save to temp paths first (can't overwrite loaded dataset)
