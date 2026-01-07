@@ -861,6 +861,7 @@ def process_with_datatrove_pipeline(
     use_full_clean: bool = False,
     use_gpu: bool = True,
     toxicity_batch_size: int = None,
+    keep_temp_files: bool = False,
 ) -> dict:
     """Process data using datatrove's native pipeline architecture.
 
@@ -886,6 +887,7 @@ def process_with_datatrove_pipeline(
         use_full_clean: Use full Unicode cleaning (slower but fixes mojibake)
         use_gpu: Use GPU for toxicity detection
         toxicity_batch_size: Batch size for toxicity (auto-tuned if None)
+        keep_temp_files: Keep intermediate files for recovery (default: False)
 
     Returns:
         Dict with processing statistics
@@ -895,6 +897,32 @@ def process_with_datatrove_pipeline(
 
     n_workers = n_workers or max(1, int(cpu_count() * 0.8))
     os.makedirs(output_dir, exist_ok=True)
+
+    # Check if output already exists (skip if already processed)
+    existing_output = [f for f in os.listdir(output_dir) if f.endswith('.parquet') and not f.startswith('.')]
+    if existing_output:
+        print(f"\n{'='*60}")
+        print(f"SKIPPING - Cleaned data already exists")
+        print(f"{'='*60}")
+        print(f"Found {len(existing_output)} parquet files in {output_dir}")
+        print(f"Delete these files to re-run cleaning pipeline.")
+        print(f"{'='*60}\n")
+
+        # Count existing documents for stats
+        import pyarrow.parquet as pq
+        total_docs = 0
+        for f in existing_output:
+            pf = pq.ParquetFile(os.path.join(output_dir, f))
+            total_docs += pf.metadata.num_rows
+
+        return {
+            'files_processed': len(existing_output),
+            'original_docs': total_docs,
+            'after_quality': total_docs,
+            'after_toxicity': total_docs,
+            'after_dedup': total_docs,
+            'skipped': True,
+        }
 
     # Find input files
     input_files = sorted([
@@ -941,107 +969,143 @@ def process_with_datatrove_pipeline(
         stats['original_docs'] += pf.metadata.num_rows
     print(f"  Total input documents: {stats['original_docs']:,}")
 
+    # Check for resume from existing temp files
+    stage1_files = list(stage1_dir.glob("*.parquet"))
+    stage2_files = list(stage2_dir.glob("*.parquet"))
+    resume_from_stage = None
+
+    if stage2_files:
+        print(f"\n  RESUMING: Found {len(stage2_files)} files from Stage 2 (toxicity)")
+        resume_from_stage = 3  # Skip to deduplication
+        # Count docs from stage 2
+        for f in stage2_files:
+            pf = pq.ParquetFile(f)
+            stats['after_toxicity'] += pf.metadata.num_rows
+        stats['after_quality'] = stats['after_toxicity']  # Approximate
+        print(f"  Skipping to Stage 3 (deduplication)")
+    elif stage1_files:
+        print(f"\n  RESUMING: Found {len(stage1_files)} files from Stage 1 (quality)")
+        resume_from_stage = 2  # Skip to toxicity
+        # Count docs from stage 1
+        for f in stage1_files:
+            pf = pq.ParquetFile(f)
+            stats['after_quality'] += pf.metadata.num_rows
+        print(f"  Skipping to Stage 2 (toxicity)")
+
     # =========================================================================
     # STAGE 1: Quality Filtering with Native Pipeline
     # =========================================================================
-    print("\nSTAGE 1: Quality Filtering (native datatrove pipeline)")
-    print("-" * 50)
+    if resume_from_stage and resume_from_stage > 1:
+        print("\nSTAGE 1: Quality Filtering - SKIPPED (using cached results)")
+        print("-" * 50)
+        print(f"  Documents from cache: {stats['after_quality']:,}")
+    else:
+        print("\nSTAGE 1: Quality Filtering (native datatrove pipeline)")
+        print("-" * 50)
 
-    # Build filter pipeline with progress tracking
-    filters = [
-        PIICleanerFilter(use_full_clean=use_full_clean),
-        ProgressTracker(log_every=50000, stage_name="Quality"),  # Log every 50K docs
-    ]
+    # Only run Stage 1 if not resuming from a later stage
+    if not resume_from_stage or resume_from_stage <= 1:
+        # Build filter pipeline with progress tracking
+        filters = [
+            PIICleanerFilter(use_full_clean=use_full_clean),
+            ProgressTracker(log_every=50000, stage_name="Quality"),  # Log every 50K docs
+        ]
 
-    if use_gopher_quality:
-        filters.append(GopherQualityFilter(
-            min_doc_words=50,
-            max_doc_words=100000,
-            min_avg_word_length=3,
-            max_avg_word_length=10,
-            min_stop_words=2,
-            max_symbol_word_ratio=0.1,
-        ))
+        if use_gopher_quality:
+            filters.append(GopherQualityFilter(
+                min_doc_words=50,
+                max_doc_words=100000,
+                min_avg_word_length=3,
+                max_avg_word_length=10,
+                min_stop_words=2,
+                max_symbol_word_ratio=0.1,
+            ))
 
-    if use_fineweb:
-        filters.append(FineWebQualityFilter())
+        if use_fineweb:
+            filters.append(FineWebQualityFilter())
 
-    if use_gopher_rep:
-        filters.append(GopherRepetitionFilter())
+        if use_gopher_rep:
+            filters.append(GopherRepetitionFilter())
 
-    # Add progress tracker after filters to show how many passed
-    filters.append(ProgressTracker(log_every=50000, stage_name="Passed"))
+        # Add progress tracker after filters to show how many passed
+        filters.append(ProgressTracker(log_every=50000, stage_name="Passed"))
 
-    # Set tasks higher than file count to enable intra-file parallelization
-    # Datatrove will shard each file across multiple tasks for better CPU utilization
-    n_tasks = max(len(input_files), n_workers * 2)  # At least 2x workers for good load balancing
-    print(f"  Tasks: {n_tasks} (2x workers for load balancing)")
+        # Set tasks higher than file count to enable intra-file parallelization
+        # Datatrove will shard each file across multiple tasks for better CPU utilization
+        n_tasks = max(len(input_files), n_workers * 2)  # At least 2x workers for good load balancing
+        print(f"  Tasks: {n_tasks} (2x workers for load balancing)")
 
-    pipeline_stage1 = [
-        ParquetReader(
-            data_folder=input_dir,
-            glob_pattern=f"{file_pattern}*.parquet",
-            text_key="text",
-        ),
-        *filters,
-        ParquetWriter(
-            output_folder=str(stage1_dir),
-            output_filename="${rank}.parquet",
-        ),
-    ]
+        pipeline_stage1 = [
+            ParquetReader(
+                data_folder=input_dir,
+                glob_pattern=f"{file_pattern}*.parquet",
+                text_key="text",
+            ),
+            *filters,
+            ParquetWriter(
+                output_folder=str(stage1_dir),
+                output_filename="${rank}.parquet",
+            ),
+        ]
 
-    executor1 = LocalPipelineExecutor(
-        pipeline=pipeline_stage1,
-        logging_dir=str(temp_dir / "logs_stage1"),
-        tasks=n_tasks,
-        workers=n_workers,
-    )
+        executor1 = LocalPipelineExecutor(
+            pipeline=pipeline_stage1,
+            logging_dir=str(temp_dir / "logs_stage1"),
+            tasks=n_tasks,
+            workers=n_workers,
+        )
 
-    import time as _time
-    start_time = _time.time()
-    print(f"  Running with {n_tasks} tasks, {n_workers} workers...")
-    print(f"  Processing {stats['original_docs']:,} documents...")
-    executor1.run()
-    elapsed = _time.time() - start_time
-    print(f"  Stage 1 completed in {elapsed:.1f}s")
+        import time as _time
+        start_time = _time.time()
+        print(f"  Running with {n_tasks} tasks, {n_workers} workers...")
+        print(f"  Processing {stats['original_docs']:,} documents...")
+        executor1.run()
+        elapsed = _time.time() - start_time
+        print(f"  Stage 1 completed in {elapsed:.1f}s")
 
-    # Count results from stage 1
-    stage1_files = list(stage1_dir.glob("*.parquet"))
-    for f in stage1_files:
-        import pyarrow.parquet as pq
-        pf = pq.ParquetFile(f)
-        stats['after_quality'] += pf.metadata.num_rows
-    print(f"  After quality filtering: {stats['after_quality']:,} docs")
+        # Count results from stage 1
+        stage1_files = list(stage1_dir.glob("*.parquet"))
+        for f in stage1_files:
+            pf = pq.ParquetFile(f)
+            stats['after_quality'] += pf.metadata.num_rows
+        print(f"  After quality filtering: {stats['after_quality']:,} docs")
 
     # =========================================================================
     # STAGE 2: Toxicity Filtering (GPU - can't be in datatrove pipeline)
     # =========================================================================
-    print("\nSTAGE 2: Toxicity Filtering (GPU)")
-    print("-" * 50)
+    if resume_from_stage and resume_from_stage > 2:
+        print("\nSTAGE 2: Toxicity Filtering - SKIPPED (using cached results)")
+        print("-" * 50)
+        print(f"  Documents from cache: {stats['after_toxicity']:,}")
+    else:
+        print("\nSTAGE 2: Toxicity Filtering (GPU)")
+        print("-" * 50)
 
-    # Initialize toxicity model
-    cleaner = DataCleaner(use_gpu=use_gpu, batch_size=toxicity_batch_size)
+    # Only run Stage 2 if not resuming from a later stage
+    if not resume_from_stage or resume_from_stage <= 2:
+        # Initialize toxicity model
+        cleaner = DataCleaner(use_gpu=use_gpu, batch_size=toxicity_batch_size)
 
-    import pyarrow.parquet as pq
-    import pyarrow as pa
+        import pyarrow.parquet as pq
+        import pyarrow as pa
 
-    toxicity_kept = 0
-    for stage1_file in tqdm(stage1_files, desc="  Processing files"):
-        df = pd.read_parquet(stage1_file)
-        if len(df) == 0:
-            continue
+        toxicity_kept = 0
+        for stage1_file in tqdm(stage1_files, desc="  Processing files"):
+            df = pd.read_parquet(stage1_file)
+            if len(df) == 0:
+                continue
 
-        # Run toxicity detection
-        toxic_mask = cleaner.is_toxic_batch(df['text'].tolist(), show_progress=False)
-        df = df[~np.array(toxic_mask)].reset_index(drop=True)
+            # Run toxicity detection
+            toxic_mask = cleaner.is_toxic_batch(df['text'].tolist(), show_progress=False)
+            df = df[~np.array(toxic_mask)].reset_index(drop=True)
 
-        if len(df) > 0:
-            output_file = stage2_dir / stage1_file.name
-            df.to_parquet(output_file, index=False)
-            toxicity_kept += len(df)
+            if len(df) > 0:
+                output_file = stage2_dir / stage1_file.name
+                df.to_parquet(output_file, index=False)
+                toxicity_kept += len(df)
 
-    stats['after_toxicity'] = toxicity_kept
-    print(f"  After toxicity filtering: {toxicity_kept:,} docs")
+        stats['after_toxicity'] = toxicity_kept
+        print(f"  After toxicity filtering: {toxicity_kept:,} docs")
 
     # =========================================================================
     # STAGE 3: Deduplication with Native MinhashDedup
@@ -1128,10 +1192,10 @@ def process_with_datatrove_pipeline(
     print(f"      Completed in {_time.time() - step_start:.1f}s")
 
     # Stage 3d: Filter out duplicates and write final output
+    # Output directly to output_dir (not a subdirectory) for compatibility with tokenize script
     print("  3d: Filtering duplicates and writing output...")
     step_start = _time.time()
-    final_output_dir = Path(output_dir) / "final"
-    final_output_dir.mkdir(parents=True, exist_ok=True)
+    final_output_dir = Path(output_dir)  # Write directly to output_dir
 
     filter_pipeline = [
         ParquetReader(
@@ -1145,7 +1209,7 @@ def process_with_datatrove_pipeline(
         ProgressTracker(log_every=50000, stage_name="Dedup"),
         ParquetWriter(
             output_folder=str(final_output_dir),
-            output_filename="${rank}.parquet",
+            output_filename="cleaned_${rank}.parquet",  # Prefix to identify native pipeline output
         ),
     ]
 
@@ -1169,11 +1233,15 @@ def process_with_datatrove_pipeline(
     print(f"  After deduplication: {stats['after_dedup']:,} docs ({stats['after_dedup']/stats['after_toxicity']*100:.1f}% kept)")
 
     # =========================================================================
-    # Cleanup temp files
+    # Cleanup temp files (optional - keep for recovery if requested)
     # =========================================================================
-    print("\nCleaning up temporary files...")
-    import shutil
-    shutil.rmtree(temp_dir, ignore_errors=True)
+    if keep_temp_files:
+        print(f"\nKeeping temporary files for recovery: {temp_dir}")
+        print("  To clean up manually: rm -rf " + str(temp_dir))
+    else:
+        print("\nCleaning up temporary files...")
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     # =========================================================================
     # Summary
@@ -1642,6 +1710,8 @@ def main():
                        help='Use native datatrove pipeline (faster, uses MinhashDedup)')
     parser.add_argument('--legacy', action='store_true',
                        help='Force legacy pipeline mode (default if --native-pipeline not specified)')
+    parser.add_argument('--keep-temp-files', action='store_true',
+                       help='Keep intermediate temp files for recovery (native pipeline only)')
 
     args = parser.parse_args()
 
@@ -1713,6 +1783,7 @@ def main():
             use_full_clean=args.full_clean,
             use_gpu=use_gpu,
             toxicity_batch_size=args.batch_size,
+            keep_temp_files=args.keep_temp_files,
         )
     else:
         if args.native_pipeline and not DATATROVE_PIPELINE_AVAILABLE:
