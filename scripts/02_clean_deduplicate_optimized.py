@@ -301,12 +301,11 @@ def parallel_tokenize(
         desc="    Tokenizing" if show_progress else None,
     )
 
-    # Convert to PyTorch tensors
-    tokenized.set_format("torch")
-
+    # Convert to PyTorch tensors efficiently via numpy
+    # set_format("torch") returns Column objects, so we use numpy conversion instead
     return {
-        "input_ids": tokenized["input_ids"],
-        "attention_mask": tokenized["attention_mask"],
+        "input_ids": torch.tensor(tokenized["input_ids"]),
+        "attention_mask": torch.tensor(tokenized["attention_mask"]),
     }
 
 
