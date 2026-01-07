@@ -1397,6 +1397,15 @@ class StageManager:
         # State file to track progress
         self.state_file = self.output_dir / ".stage_state.json"
 
+        # CRITICAL: Restore state from Drive if local doesn't exist
+        # This handles Colab session restarts where local SSD is wiped
+        if self.drive_dir and not self.state_file.exists():
+            drive_state_file = self.drive_dir / ".stage_state.json"
+            if drive_state_file.exists():
+                import shutil
+                shutil.copy2(drive_state_file, self.state_file)
+                print(f"  [Restored stage state from Google Drive]")
+
     def get_stage_dir(self, stage: str) -> Path:
         """Get directory for a stage."""
         return self.stage_dirs.get(stage, self.output_dir)
