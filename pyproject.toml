@@ -43,6 +43,7 @@ kernels = [
 ]
 colab = [
     "pyfastcopy>=1.0",  # Faster file copy using sendfile syscall
+    "ipywidgets>=8.0",  # Better tqdm progress bars in notebooks
 ]
 dev = [
     "pytest>=7.4",
