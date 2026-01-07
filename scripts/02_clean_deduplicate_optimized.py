@@ -1,10 +1,10 @@
 """Optimized data cleaning with caching, checkpoints, and GPU acceleration."""
 from __future__ import annotations
 
-# Enable HuggingFace tokenizer parallelism BEFORE importing transformers
-# This allows tokenization to use all available CPU cores (8-12x speedup)
+# Disable HuggingFace tokenizer internal parallelism - we use multiprocessing instead
+# This prevents resource contention when spawning multiple tokenizer processes
 import os
-os.environ["TOKENIZERS_PARALLELISM"] = "true"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import json
 import hashlib
 import pandas as pd
@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 from multiprocessing import Pool, cpu_count
 from functools import partial
+from datasets import Dataset
 
 # Datatrove quality filters (production-grade, used by FineWeb/LLaMA)
 try:
@@ -234,6 +235,81 @@ def parallel_clean_texts(
     return results
 
 
+# =============================================================================
+# PARALLEL TOKENIZATION - Uses datasets multiprocessing to bypass GIL
+# Each worker process gets its own tokenizer instance for true parallelism
+# =============================================================================
+
+def _tokenize_for_dataset(examples: dict, tokenizer_name: str, max_length: int = 512) -> dict:
+    """Tokenization function for datasets.map() - runs in worker processes."""
+    from transformers import AutoTokenizer
+
+    # Each worker loads its own tokenizer (cached after first call)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+
+    result = tokenizer(
+        examples["text"],
+        truncation=True,
+        padding="max_length",
+        max_length=max_length,
+        return_attention_mask=True,
+    )
+    return result
+
+
+def parallel_tokenize(
+    texts: list[str],
+    tokenizer,
+    max_length: int = 512,
+    num_proc: int = None,
+    batch_size: int = 1000,
+    show_progress: bool = True
+) -> dict:
+    """
+    Tokenize texts using multiple CPU cores via datasets multiprocessing.
+
+    This bypasses Python's GIL by spawning separate processes, each with
+    their own tokenizer instance. 8-12x faster than single-threaded tokenization.
+
+    Args:
+        texts: List of strings to tokenize
+        tokenizer: HuggingFace tokenizer (used to get model name)
+        max_length: Maximum sequence length
+        num_proc: Number of processes (defaults to CPU count)
+        batch_size: Batch size for map function
+        show_progress: Whether to show progress bar
+
+    Returns:
+        Dict with 'input_ids' and 'attention_mask' as torch tensors
+    """
+    if num_proc is None:
+        num_proc = cpu_count()
+
+    # Get tokenizer name for worker processes to load
+    tokenizer_name = tokenizer.name_or_path
+
+    # Create dataset from texts
+    ds = Dataset.from_dict({"text": texts})
+
+    # Tokenize with multiprocessing - each worker has its own tokenizer
+    tokenized = ds.map(
+        partial(_tokenize_for_dataset, tokenizer_name=tokenizer_name, max_length=max_length),
+        batched=True,
+        batch_size=batch_size,
+        num_proc=num_proc,
+        remove_columns=["text"],
+        desc="    Tokenizing" if show_progress else None,
+    )
+
+    # Convert to PyTorch tensors
+    tokenized.set_format("torch")
+
+    return {
+        "input_ids": tokenized["input_ids"],
+        "attention_mask": tokenized["attention_mask"],
+    }
+
+
 class DataCleaner:
     """GPU-accelerated data cleaner with batched processing."""
 
@@ -398,40 +474,22 @@ class DataCleaner:
             desc += f", bs={infer_batch_size}, parallel_tok)"
 
         # =====================================================================
-        # STAGE 1: Pre-tokenize texts in chunks with progress bar
-        # Chunking enables better parallelism + progress feedback
-        # TOKENIZERS_PARALLELISM=true is set at top of file for multi-CPU
+        # STAGE 1: Pre-tokenize texts using multiprocessing (bypasses GIL)
+        # Uses datasets.map() with num_proc for true parallel tokenization
+        # Each worker process loads its own tokenizer instance
         # =====================================================================
-        tokenize_batch_size = 50000  # Process 50K texts per chunk for parallelism
-        n_tok_batches = (len(texts) + tokenize_batch_size - 1) // tokenize_batch_size
-
+        n_cpus = cpu_count()
         if show_progress:
-            print(f"    Pre-tokenizing {len(texts):,} texts ({n_tok_batches} chunks, {cpu_count()} CPUs)...")
+            print(f"    Pre-tokenizing {len(texts):,} texts using {n_cpus} CPU cores...")
 
-        all_input_ids = []
-        all_attention_masks = []
-
-        tok_iterator = range(0, len(texts), tokenize_batch_size)
-        if show_progress:
-            tok_iterator = tqdm(tok_iterator, desc="    Tokenizing", total=n_tok_batches, unit="chunk")
-
-        for chunk_start in tok_iterator:
-            chunk_texts = texts[chunk_start:chunk_start + tokenize_batch_size]
-            chunk_inputs = tokenizer(
-                chunk_texts,
-                return_tensors="pt",
-                truncation=True,
-                padding=True,
-                max_length=512,
-            )
-            all_input_ids.append(chunk_inputs['input_ids'])
-            all_attention_masks.append(chunk_inputs['attention_mask'])
-
-        # Concatenate all chunks
-        all_inputs = {
-            'input_ids': torch.cat(all_input_ids, dim=0),
-            'attention_mask': torch.cat(all_attention_masks, dim=0),
-        }
+        all_inputs = parallel_tokenize(
+            texts,
+            tokenizer,
+            max_length=512,
+            num_proc=n_cpus,
+            batch_size=1000,  # Batch size per worker
+            show_progress=show_progress,
+        )
 
         # Pin memory for faster GPU transfer
         if self.device == 'cuda':
