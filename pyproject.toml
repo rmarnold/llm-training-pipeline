@@ -41,6 +41,9 @@ kernels = [
     "liger-kernel>=0.4",
     "cut-cross-entropy>=24.11",
 ]
+colab = [
+    "pyfastcopy>=1.0",  # Faster file copy using sendfile syscall
+]
 dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
