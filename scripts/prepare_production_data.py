@@ -58,8 +58,10 @@ def download_and_prepare_production_data(
     # Pack into sequences
     print(f"\nPacking into {seq_length}-token sequences...")
     sequences = []
+    total_possible = min(max_samples, (len(all_tokens) - seq_length) // seq_length)
 
-    for i in range(0, len(all_tokens) - seq_length, seq_length):
+    for i in tqdm(range(0, len(all_tokens) - seq_length, seq_length),
+                  desc="Packing sequences", total=total_possible, unit="seq"):
         seq = all_tokens[i:i+seq_length]
         if len(seq) == seq_length:
             sequences.append(seq)

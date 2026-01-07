@@ -11,6 +11,7 @@ Usage:
 import os
 import argparse
 from datasets import load_dataset, Dataset, concatenate_datasets
+from tqdm import tqdm
 
 
 def prepare_coding_data(output_dir="data/domain/coding", max_samples=50000):
@@ -30,7 +31,7 @@ def prepare_coding_data(output_dir="data/domain/coding", max_samples=50000):
     print("  Loading Code Alpaca dataset...")
     try:
         code_alpaca = load_dataset("sahil2801/CodeAlpaca-20k", split="train")
-        for sample in code_alpaca:
+        for sample in tqdm(code_alpaca, desc="    Code Alpaca", unit="sample", leave=False):
             text = f"### Instruction:\n{sample['instruction']}\n\n"
             if sample.get('input'):
                 text += f"### Input:\n{sample['input']}\n\n"
@@ -44,7 +45,7 @@ def prepare_coding_data(output_dir="data/domain/coding", max_samples=50000):
     print("  Loading Python code instructions...")
     try:
         python_code = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train")
-        for sample in python_code:
+        for sample in tqdm(python_code, desc="    Python code", unit="sample", leave=False):
             text = f"### Instruction:\n{sample['instruction']}\n\n"
             if sample.get('input'):
                 text += f"### Input:\n{sample['input']}\n\n"
@@ -58,11 +59,12 @@ def prepare_coding_data(output_dir="data/domain/coding", max_samples=50000):
     print("  Loading Evol-Instruct-Code...")
     try:
         evol_code = load_dataset("nickrosh/Evol-Instruct-Code-80k-v1", split="train")
-        for sample in list(evol_code)[:20000]:  # Limit to 20k
+        evol_samples = list(evol_code)[:20000]  # Limit to 20k
+        for sample in tqdm(evol_samples, desc="    Evol-Instruct", unit="sample", leave=False):
             text = f"### Instruction:\n{sample['instruction']}\n\n"
             text += f"### Response:\n{sample['output']}"
             all_samples.append({"text": text, "source": "evol_instruct_code"})
-        print(f"    Added samples from Evol-Instruct-Code")
+        print(f"    Added {len(evol_samples)} samples from Evol-Instruct-Code")
     except Exception as e:
         print(f"    Warning: Could not load Evol-Instruct-Code: {e}")
 
@@ -114,7 +116,8 @@ def prepare_medical_data(output_dir="data/domain/medical", max_samples=50000):
     try:
         # Medical Q&A dataset
         med_qa = load_dataset("medalpaca/medical_meadow_medical_flashcards", split="train")
-        for sample in list(med_qa)[:max_samples]:
+        med_samples = list(med_qa)[:max_samples]
+        for sample in tqdm(med_samples, desc="    Medical flashcards", unit="sample", leave=False):
             text = f"### Question:\n{sample['input']}\n\n### Answer:\n{sample['output']}"
             all_samples.append({"text": text, "source": "medical_flashcards"})
         print(f"    Added {len(all_samples)} samples from medical flashcards")
@@ -144,7 +147,8 @@ def prepare_legal_data(output_dir="data/domain/legal", max_samples=50000):
     try:
         # Legal Q&A or contract analysis datasets
         legal_ds = load_dataset("nguha/legalbench", "contract_qa", split="train")
-        for sample in list(legal_ds)[:max_samples]:
+        legal_samples = list(legal_ds)[:max_samples]
+        for sample in tqdm(legal_samples, desc="    LegalBench", unit="sample", leave=False):
             text = f"### Contract Clause:\n{sample.get('text', sample.get('input', ''))}\n\n"
             text += f"### Question:\n{sample.get('question', 'Analyze this clause.')}\n\n"
             text += f"### Answer:\n{sample.get('answer', sample.get('output', ''))}"

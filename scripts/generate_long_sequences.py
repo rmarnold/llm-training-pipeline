@@ -2,6 +2,7 @@
 import numpy as np
 from transformers import AutoTokenizer
 import random
+from tqdm import tqdm
 
 def generate_long_sequences(seq_length=512, num_sequences=200):
     """Generate synthetic long sequences for GPU stress testing"""
@@ -15,7 +16,7 @@ def generate_long_sequences(seq_length=512, num_sequences=200):
     # Use a mix of common tokens and varied content
     sequences = []
 
-    for i in range(num_sequences):
+    for i in tqdm(range(num_sequences), desc="Generating sequences", unit="seq"):
         # Create varied sequences to simulate real text
         seq = []
         for _ in range(seq_length):
