@@ -1315,6 +1315,216 @@ class CheckpointManager:
             state_path.unlink()
 
 
+class StageManager:
+    """Manage stage-based recovery with Google Drive sync.
+
+    Stages:
+        1. TEXT_CLEAN - Raw text cleaning (PII removal, Unicode fixing)
+        2. QUALITY_FILTER - Quality filtering (Gopher, FineWeb)
+        3. TOXICITY_FILTER - Toxicity detection and removal
+        4. DEDUP - MinHash deduplication
+        5. FINAL - Final output ready
+
+    Each stage saves to a separate directory. After each stage completes:
+    1. Rsync to Google Drive (if configured)
+    2. Previous stage's temp files are deleted
+    """
+
+    STAGES = ['text_clean', 'quality_filter', 'toxicity_filter', 'dedup', 'final']
+
+    def __init__(self, output_dir: str, drive_dir: str = None):
+        """Initialize stage manager.
+
+        Args:
+            output_dir: Local output directory (e.g., data/processed)
+            drive_dir: Google Drive directory for sync (e.g., /content/drive/MyDrive/llm-training-pipeline/data/processed)
+        """
+        self.output_dir = Path(output_dir)
+        self.drive_dir = Path(drive_dir) if drive_dir else None
+        self.stage_dirs = {}
+
+        # Create stage directories
+        for stage in self.STAGES[:-1]:  # All except 'final'
+            stage_dir = self.output_dir / f".stage_{stage}"
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            self.stage_dirs[stage] = stage_dir
+
+        # Final stage uses output_dir directly
+        self.stage_dirs['final'] = self.output_dir
+
+        # State file to track progress
+        self.state_file = self.output_dir / ".stage_state.json"
+
+    def get_stage_dir(self, stage: str) -> Path:
+        """Get directory for a stage."""
+        return self.stage_dirs.get(stage, self.output_dir)
+
+    def get_completed_stages(self) -> list[str]:
+        """Get list of completed stages from state file."""
+        if self.state_file.exists():
+            with open(self.state_file) as f:
+                state = json.load(f)
+                return state.get('completed_stages', [])
+        return []
+
+    def mark_stage_complete(self, stage: str, stats: dict = None) -> None:
+        """Mark a stage as complete and save state."""
+        completed = self.get_completed_stages()
+        if stage not in completed:
+            completed.append(stage)
+
+        state = {
+            'completed_stages': completed,
+            'last_stage': stage,
+            'stats': stats or {},
+        }
+
+        with open(self.state_file, 'w') as f:
+            json.dump(state, f, indent=2)
+
+        print(f"\n  [Stage '{stage}' marked complete]")
+
+    def get_resume_stage(self) -> str:
+        """Determine which stage to resume from.
+
+        Returns the first incomplete stage.
+        """
+        completed = self.get_completed_stages()
+        for stage in self.STAGES:
+            if stage not in completed:
+                return stage
+        return 'final'  # All complete
+
+    def sync_to_drive(self, stage: str, max_workers: int = 10) -> int:
+        """Rsync stage output to Google Drive.
+
+        Args:
+            stage: Stage name to sync
+            max_workers: Number of parallel copy threads
+
+        Returns:
+            Number of files synced
+        """
+        if not self.drive_dir:
+            print(f"  [No Drive configured - skipping sync]")
+            return 0
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import shutil
+
+        # Try to use pyfastcopy for faster copy
+        try:
+            import pyfastcopy
+        except ImportError:
+            pass  # Will use regular shutil
+
+        src_dir = self.get_stage_dir(stage)
+        dst_dir = self.drive_dir / f".stage_{stage}" if stage != 'final' else self.drive_dir
+        dst_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find files to sync
+        files = list(src_dir.glob("*.parquet"))
+        if not files:
+            print(f"  [No files to sync for stage '{stage}']")
+            return 0
+
+        # Build sync list (only newer files)
+        to_sync = []
+        total_size = 0
+        for f in files:
+            dst = dst_dir / f.name
+            src_mtime = f.stat().st_mtime
+            dst_mtime = dst.stat().st_mtime if dst.exists() else 0
+            if src_mtime > dst_mtime:
+                size = f.stat().st_size
+                to_sync.append((f, dst, size))
+                total_size += size
+
+        if not to_sync:
+            print(f"  [Stage '{stage}' already synced to Drive]")
+            return 0
+
+        print(f"\n  Syncing stage '{stage}' to Google Drive...")
+        print(f"    {len(to_sync)} files, {total_size / (1024**2):.1f} MB, {max_workers} threads")
+
+        def copy_file(args):
+            src, dst, size = args
+            shutil.copy2(src, dst)
+            return src.name, size
+
+        synced = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(copy_file, args): args for args in to_sync}
+            for future in as_completed(futures):
+                try:
+                    name, size = future.result()
+                    synced += 1
+                except Exception as e:
+                    args = futures[future]
+                    print(f"    Error syncing {args[0].name}: {e}")
+
+        print(f"    Synced {synced}/{len(to_sync)} files to Drive")
+
+        # Also sync state file
+        if self.state_file.exists():
+            drive_state = self.drive_dir / ".stage_state.json"
+            shutil.copy2(self.state_file, drive_state)
+
+        return synced
+
+    def cleanup_previous_stage(self, current_stage: str) -> None:
+        """Delete previous stage's temp files after current stage completes.
+
+        Args:
+            current_stage: The stage that just completed
+        """
+        stage_idx = self.STAGES.index(current_stage) if current_stage in self.STAGES else -1
+        if stage_idx <= 0:
+            return  # No previous stage
+
+        prev_stage = self.STAGES[stage_idx - 1]
+        if prev_stage == 'final':
+            return  # Don't delete final output
+
+        prev_dir = self.get_stage_dir(prev_stage)
+        if prev_dir.exists() and prev_dir != self.output_dir:
+            import shutil
+            file_count = len(list(prev_dir.glob("*")))
+            if file_count > 0:
+                print(f"  [Cleaning up stage '{prev_stage}' temp files ({file_count} files)]")
+                shutil.rmtree(prev_dir, ignore_errors=True)
+                prev_dir.mkdir(parents=True, exist_ok=True)  # Recreate empty dir
+
+    def stage_complete_callback(self, stage: str, stats: dict = None,
+                                 sync_threads: int = 10, cleanup: bool = True) -> None:
+        """Called when a stage completes. Handles sync and cleanup.
+
+        Args:
+            stage: Stage that completed
+            stats: Optional statistics dict
+            sync_threads: Threads for Drive sync
+            cleanup: Whether to cleanup previous stage
+        """
+        self.mark_stage_complete(stage, stats)
+        self.sync_to_drive(stage, max_workers=sync_threads)
+        if cleanup:
+            self.cleanup_previous_stage(stage)
+
+    def print_status(self) -> None:
+        """Print current stage status."""
+        completed = self.get_completed_stages()
+        resume_stage = self.get_resume_stage()
+
+        print(f"\n{'='*50}")
+        print("STAGE RECOVERY STATUS")
+        print(f"{'='*50}")
+        for stage in self.STAGES:
+            status = "COMPLETE" if stage in completed else "PENDING"
+            marker = " <-- resume from here" if stage == resume_stage and status == "PENDING" else ""
+            print(f"  {stage}: {status}{marker}")
+        print(f"{'='*50}\n")
+
+
 def process_single_file(
     filename: str,
     input_dir: str = "data/raw",
@@ -1323,8 +1533,28 @@ def process_single_file(
     use_cache: bool = True,
     batch_size: int = 128,
     n_workers: int = None,
+    drive_dir: str = None,
+    sync_threads: int = 10,
+    auto_sync: bool = True,
 ) -> tuple[str, int, int]:
-    """Process a single file with checkpointing support."""
+    """Process a single file with checkpointing and stage-based recovery.
+
+    Args:
+        filename: Input filename
+        input_dir: Directory containing input files
+        output_dir: Directory for output files
+        use_gpu: Use GPU for toxicity detection
+        use_cache: Enable checkpoint caching
+        batch_size: Batch size for toxicity detection
+        n_workers: Number of CPU workers
+        drive_dir: Google Drive directory for sync (None to disable)
+        sync_threads: Number of threads for Drive sync
+        auto_sync: Auto-sync to Drive after each stage
+    """
+    # Initialize stage manager for recovery
+    stage_mgr = StageManager(output_dir, drive_dir) if auto_sync else None
+    if stage_mgr:
+        stage_mgr.print_status()
 
     input_path = os.path.join(input_dir, filename)
     output_filename = filename.replace('.parquet', '_clean.parquet')
@@ -1443,6 +1673,15 @@ def process_single_file(
 
             current_chunk_idx += chunks_generated
 
+        # Stage 1 complete: Text cleaning done
+        if stage_mgr:
+            stage_mgr.stage_complete_callback(
+                'text_clean',
+                stats={'chunks': current_chunk_idx, 'docs_cleaned': original_count},
+                sync_threads=sync_threads,
+                cleanup=False  # Don't cleanup - need chunks for next stage
+            )
+
         # Process each chunk through quality + toxicity filters (memory-efficient)
         # Instead of combining all chunks then filtering, we filter each chunk
         print(f"  Processing {current_chunk_idx} chunks through quality/toxicity filters...")
@@ -1542,6 +1781,21 @@ def process_single_file(
                 print(f"        - Errors: {total_quality_stats['failed_error']:,} ({total_quality_stats['failed_error']/total_filtered*100:.1f}%)")
         print(f"    After toxicity filter: {total_after_toxicity:,}/{original_count:,} ({total_after_toxicity/original_count*100:.1f}%)")
 
+        # Stage 2 & 3 complete: Quality + Toxicity filtering done
+        if stage_mgr:
+            stage_mgr.stage_complete_callback(
+                'quality_filter',
+                stats={'after_quality': total_after_quality, 'quality_stats': total_quality_stats},
+                sync_threads=sync_threads,
+                cleanup=True  # Cleanup text_clean stage
+            )
+            stage_mgr.stage_complete_callback(
+                'toxicity_filter',
+                stats={'after_toxicity': total_after_toxicity},
+                sync_threads=sync_threads,
+                cleanup=True  # Cleanup quality_filter stage
+            )
+
         # Stream deduplication - process chunks one at a time, write output incrementally
         # This avoids loading all filtered data into memory at once
         print(f"  Streaming deduplication across {len(filtered_chunks)} filtered chunks...")
@@ -1612,6 +1866,21 @@ def process_single_file(
         # Ensure output directory exists (for cases where streaming wrote the file)
         os.makedirs(output_dir, exist_ok=True)
 
+        # Stage 4 & 5 complete: Deduplication done, final output ready
+        if stage_mgr:
+            stage_mgr.stage_complete_callback(
+                'dedup',
+                stats={'after_dedup': final_count, 'dedup_ratio': final_count/original_count if original_count > 0 else 0},
+                sync_threads=sync_threads,
+                cleanup=True  # Cleanup toxicity_filter stage
+            )
+            stage_mgr.stage_complete_callback(
+                'final',
+                stats={'final_count': final_count, 'original_count': original_count},
+                sync_threads=sync_threads,
+                cleanup=True  # Cleanup dedup stage
+            )
+
         # Cleanup checkpoints on success
         if checkpoint:
             checkpoint.cleanup(filename, file_hash)
@@ -1633,9 +1902,24 @@ def process_all_files(
     use_cache: bool = True,
     batch_size: int = 128,
     n_workers: int = None,
+    drive_dir: str = None,
+    sync_threads: int = 10,
+    auto_sync: bool = True,
 ) -> None:
-    """Process all matching files sequentially (best for GPU)."""
+    """Process all matching files sequentially (best for GPU).
 
+    Args:
+        input_dir: Directory containing input files
+        output_dir: Directory for output files
+        file_pattern: Pattern to match input files
+        use_gpu: Use GPU for toxicity detection
+        use_cache: Enable checkpoint caching
+        batch_size: Batch size for toxicity detection
+        n_workers: Number of CPU workers
+        drive_dir: Google Drive directory for sync (None to disable)
+        sync_threads: Number of threads for Drive sync
+        auto_sync: Auto-sync to Drive after each stage
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     files_to_process = sorted([
@@ -1652,6 +1936,11 @@ def process_all_files(
     print(f"Caching enabled: {use_cache}")
     print(f"Batch size: {batch_size}")
     print(f"CPU workers: {n_workers}")
+    if drive_dir and auto_sync:
+        print(f"Drive sync: ENABLED ({sync_threads} threads)")
+        print(f"Drive path: {drive_dir}")
+    else:
+        print(f"Drive sync: DISABLED")
     print(f"{'='*60}\n")
 
     results = []
@@ -1659,7 +1948,8 @@ def process_all_files(
         result = process_single_file(
             filename, input_dir, output_dir,
             use_gpu=use_gpu, use_cache=use_cache, batch_size=batch_size,
-            n_workers=n_workers
+            n_workers=n_workers, drive_dir=drive_dir, sync_threads=sync_threads,
+            auto_sync=auto_sync
         )
         results.append(result)
 
@@ -1712,6 +2002,13 @@ def main():
                        help='Force legacy pipeline mode (default if --native-pipeline not specified)')
     parser.add_argument('--keep-temp-files', action='store_true',
                        help='Keep intermediate temp files for recovery (native pipeline only)')
+    # Google Drive sync options (for Colab)
+    parser.add_argument('--drive-dir', type=str, default=None,
+                       help='Google Drive directory for sync (e.g., /content/drive/MyDrive/llm-training-pipeline/data/processed)')
+    parser.add_argument('--sync-threads', type=int, default=10,
+                       help='Number of threads for Drive sync (default: 10)')
+    parser.add_argument('--no-auto-sync', action='store_true',
+                       help='Disable automatic sync to Drive after each stage')
 
     args = parser.parse_args()
 
@@ -1797,6 +2094,11 @@ def main():
         print(f"  - Batch size: {args.batch_size}")
         print(f"  - CPU workers: {n_workers}")
         print(f"  - File pattern: {args.pattern}")
+        if args.drive_dir and not args.no_auto_sync:
+            print(f"  - Drive sync: ENABLED ({args.sync_threads} threads)")
+            print(f"  - Drive path: {args.drive_dir}")
+        else:
+            print(f"  - Drive sync: DISABLED")
         print()
 
         process_all_files(
@@ -1807,6 +2109,9 @@ def main():
             use_cache=not args.no_cache,
             batch_size=args.batch_size,
             n_workers=n_workers,
+            drive_dir=args.drive_dir,
+            sync_threads=args.sync_threads,
+            auto_sync=not args.no_auto_sync,
         )
 
 
