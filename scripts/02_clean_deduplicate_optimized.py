@@ -1438,15 +1438,26 @@ class StageManager:
 
     STAGES = ['text_clean', 'quality_filter', 'toxicity_filter', 'dedup', 'final']
 
-    def __init__(self, output_dir: str, drive_dir: str = None):
+    # File patterns for each stage (used for syncing checkpoint files)
+    STAGE_PATTERNS = {
+        'text_clean': '*_clean_chunk_*.parquet',
+        'quality_filter': '*_filtered_chunk_*.parquet',
+        'toxicity_filter': '*_filtered_chunk_*.parquet',  # Same files as quality_filter
+        'dedup': '*_clean.parquet',  # Final deduplicated output
+        'final': '*.parquet',
+    }
+
+    def __init__(self, output_dir: str, drive_dir: str = None, checkpoint_dir: str = None):
         """Initialize stage manager.
 
         Args:
             output_dir: Local output directory (e.g., data/processed)
             drive_dir: Google Drive directory for sync (e.g., /content/drive/MyDrive/llm-training-pipeline/data/processed)
+            checkpoint_dir: Checkpoint cache directory (e.g., data/.cache) where intermediate files are stored
         """
         self.output_dir = Path(output_dir)
         self.drive_dir = Path(drive_dir) if drive_dir else None
+        self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else Path("data/.cache")
         self.stage_dirs = {}
 
         # Create stage directories
@@ -1533,12 +1544,25 @@ class StageManager:
         except ImportError:
             pass  # Will use regular shutil
 
-        src_dir = self.get_stage_dir(stage)
+        # Determine source directory and file pattern based on stage
+        # Intermediate stages store files in checkpoint_dir, final stage in output_dir
+        if stage == 'final':
+            src_dir = self.output_dir
+            pattern = self.STAGE_PATTERNS.get(stage, '*.parquet')
+        elif stage in ['text_clean', 'quality_filter', 'toxicity_filter']:
+            # Intermediate checkpoint files are in checkpoint_dir
+            src_dir = self.checkpoint_dir
+            pattern = self.STAGE_PATTERNS.get(stage, '*.parquet')
+        else:
+            # dedup stage - final output files in output_dir
+            src_dir = self.output_dir
+            pattern = self.STAGE_PATTERNS.get(stage, '*.parquet')
+
         dst_dir = self.drive_dir / f".stage_{stage}" if stage != 'final' else self.drive_dir
         dst_dir.mkdir(parents=True, exist_ok=True)
 
-        # Find files to sync
-        files = list(src_dir.glob("*.parquet"))
+        # Find files to sync using stage-specific pattern
+        files = list(src_dir.glob(pattern)) if src_dir.exists() else []
         if not files:
             print(f"  [No files to sync for stage '{stage}']")
             return 0
@@ -1666,8 +1690,12 @@ def process_single_file(
         sync_threads: Number of threads for Drive sync
         auto_sync: Auto-sync to Drive after each stage
     """
-    # Initialize stage manager for recovery
-    stage_mgr = StageManager(output_dir, drive_dir) if auto_sync else None
+    # Initialize checkpoint manager first (needed for stage manager)
+    checkpoint = CheckpointManager() if use_cache else None
+    checkpoint_dir = str(checkpoint.cache_dir) if checkpoint else "data/.cache"
+
+    # Initialize stage manager for recovery (pass checkpoint_dir for proper file syncing)
+    stage_mgr = StageManager(output_dir, drive_dir, checkpoint_dir=checkpoint_dir) if auto_sync else None
     if stage_mgr:
         stage_mgr.print_status()
 
@@ -1683,9 +1711,6 @@ def process_single_file(
         return filename, len(df), len(df)
 
     print(f"\nProcessing {filename}...")
-
-    # Initialize checkpoint manager
-    checkpoint = CheckpointManager() if use_cache else None
     file_hash = checkpoint.get_file_hash(input_path) if checkpoint else ""
 
     try:
