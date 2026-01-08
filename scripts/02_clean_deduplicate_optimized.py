@@ -12,6 +12,15 @@ import multiprocessing as mp
 if mp.get_start_method(allow_none=True) is None:
     mp.set_start_method('spawn')
 
+# CRITICAL: Also set spawn for 'multiprocess' library (used by HuggingFace datasets)
+# datasets.map(num_proc>1) uses multiprocess internally, not multiprocessing
+try:
+    import multiprocess
+    if multiprocess.get_start_method(allow_none=True) is None:
+        multiprocess.set_start_method('spawn')
+except ImportError:
+    pass  # multiprocess not installed, datasets will use default
+
 import json
 import hashlib
 import pandas as pd
@@ -291,6 +300,14 @@ def parallel_tokenize(
     """
     if num_proc is None:
         num_proc = cpu_count()
+
+    # CRITICAL: If CUDA is initialized, spawned workers can crash with
+    # "CUDA error: initialization error" even with spawn start method.
+    # Fall back to single-process tokenization in this case.
+    if torch.cuda.is_initialized():
+        if show_progress:
+            print("    [CUDA initialized - using single-process tokenization to avoid worker crashes]")
+        num_proc = 1
 
     # Get tokenizer name for worker processes to load
     tokenizer_name = tokenizer.name_or_path
