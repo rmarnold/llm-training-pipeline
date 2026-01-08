@@ -5,6 +5,13 @@ from __future__ import annotations
 # This prevents resource contention when spawning multiple tokenizer processes
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# CRITICAL FIX: Use 'spawn' to avoid CUDA context inheritance in forked workers
+# This prevents "CUDA error: initialization error" when using multiprocessing Pool
+import multiprocessing as mp
+if mp.get_start_method(allow_none=True) is None:
+    mp.set_start_method('spawn')
+
 import json
 import hashlib
 import pandas as pd
