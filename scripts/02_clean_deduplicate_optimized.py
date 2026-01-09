@@ -1497,6 +1497,37 @@ class StageManager:
                 import shutil
                 shutil.copy2(drive_state_file, self.state_file)
                 print(f"  [Restored stage state from Google Drive]")
+                # Also restore final output files if 'final' stage is complete
+                self._restore_final_outputs_from_drive()
+
+    def _restore_final_outputs_from_drive(self) -> int:
+        """Restore final output parquet files from Drive after state restoration.
+
+        Returns:
+            Number of files restored
+        """
+        if not self.drive_dir:
+            return 0
+
+        completed = self.get_completed_stages()
+        if 'final' not in completed:
+            return 0
+
+        import shutil
+        restored = 0
+
+        # Look for *_clean.parquet files in Drive (final outputs)
+        for drive_file in self.drive_dir.glob('*_clean.parquet'):
+            local_file = self.output_dir / drive_file.name
+            if not local_file.exists():
+                shutil.copy2(drive_file, local_file)
+                restored += 1
+                print(f"  [Restored {drive_file.name} from Drive]")
+
+        if restored:
+            print(f"  [Restored {restored} completed output file(s) from Drive]")
+
+        return restored
 
     def get_stage_dir(self, stage: str) -> Path:
         """Get directory for a stage."""
