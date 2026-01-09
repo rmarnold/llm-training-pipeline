@@ -1504,7 +1504,7 @@ class StageManager:
         """Restore final output parquet files from Drive after state restoration.
 
         Returns:
-            Number of files restored
+            Number of files restored, or -1 if state was reset due to missing files
         """
         if not self.drive_dir:
             return 0
@@ -1515,19 +1515,54 @@ class StageManager:
 
         import shutil
         restored = 0
+        failed = 0
 
         # Look for *_clean.parquet files in Drive (final outputs)
-        for drive_file in self.drive_dir.glob('*_clean.parquet'):
+        drive_files = list(self.drive_dir.glob('*_clean.parquet'))
+
+        # VALIDATION: If state says 'final' complete but no files on Drive, reset state
+        if not drive_files:
+            print(f"  [WARNING: State shows 'final' complete but no output files found on Drive]")
+            print(f"  [Resetting stage state - pipeline will reprocess from beginning]")
+            self._reset_state()
+            return -1
+
+        for drive_file in drive_files:
             local_file = self.output_dir / drive_file.name
             if not local_file.exists():
-                shutil.copy2(drive_file, local_file)
-                restored += 1
-                print(f"  [Restored {drive_file.name} from Drive]")
+                try:
+                    shutil.copy2(drive_file, local_file)
+                    # Validate the copy succeeded and file is readable
+                    if local_file.exists() and local_file.stat().st_size > 0:
+                        restored += 1
+                        print(f"  [Restored {drive_file.name} from Drive]")
+                    else:
+                        raise IOError(f"Copied file is empty or missing")
+                except Exception as e:
+                    failed += 1
+                    print(f"  [ERROR: Failed to restore {drive_file.name}: {e}]")
+                    # Clean up partial copy
+                    if local_file.exists():
+                        local_file.unlink()
+
+        if failed > 0:
+            print(f"  [WARNING: {failed} file(s) failed to restore - resetting state]")
+            self._reset_state()
+            return -1
 
         if restored:
             print(f"  [Restored {restored} completed output file(s) from Drive]")
 
         return restored
+
+    def _reset_state(self) -> None:
+        """Reset stage state file when data doesn't match state."""
+        if self.state_file.exists():
+            self.state_file.unlink()
+        # Also remove any partially restored files
+        for local_file in self.output_dir.glob('*_clean.parquet'):
+            local_file.unlink()
+            print(f"  [Removed inconsistent file: {local_file.name}]")
 
     def get_stage_dir(self, stage: str) -> Path:
         """Get directory for a stage."""
