@@ -2074,10 +2074,16 @@ def process_single_file(
                 if checkpoint:
                     actual_idx = current_chunk_idx + idx
                     chunk_path = chunk_dir / f"{filename}_clean_chunk_{actual_idx:04d}_{file_hash}.parquet"
-                    print(f"\n    [Saving chunk {actual_idx}: {len(chunk_data):,} docs...]", end="", flush=True)
+                    # DEBUG: Clear line and show chunk save progress clearly
+                    print(f"")  # Force newline to escape tqdm
+                    print(f"    [Saving chunk {actual_idx}: {len(chunk_data):,} docs to {chunk_path.name}...]", end="", flush=True)
                     chunk_df = pd.DataFrame({'text': chunk_data})
                     chunk_df.to_parquet(chunk_path, index=False)
-                    print(f" done]", end="")
+                    # Verify file was created
+                    if chunk_path.exists():
+                        print(f" done ({chunk_path.stat().st_size / 1024 / 1024:.1f} MB)]")
+                    else:
+                        print(f" FAILED - file not created!]")
 
                     # Periodic sync to Drive to preserve progress
                     chunks_since_sync = actual_idx - last_sync_chunk[0]
@@ -2110,26 +2116,34 @@ def process_single_file(
 
                 # When buffer is large enough, process it through cleaning
                 if len(texts_buffer) >= 500000:
+                    print(f"\n    [DEBUG: Processing buffer of {len(texts_buffer):,} texts, current_chunk_idx={current_chunk_idx}]")
+                    batch_chunks = 0
                     for chunk in parallel_clean_texts_streaming(
                         texts_buffer,
                         n_workers=n_workers,
                         chunk_callback=save_chunk_streaming if checkpoint else None,
                         chunk_size=500000
                     ):
-                        chunks_generated += 1
+                        batch_chunks += 1
+                    # CRITICAL: Update current_chunk_idx AFTER each streaming call
+                    # so the next call uses correct chunk indices (fixes overwrite bug)
+                    print(f"    [DEBUG: Streaming call produced {batch_chunks} chunk(s), updating current_chunk_idx {current_chunk_idx} -> {current_chunk_idx + batch_chunks}]")
+                    current_chunk_idx += batch_chunks
+                    chunks_generated += batch_chunks
                     texts_buffer = []
 
             # Process remaining texts in buffer
             if texts_buffer:
+                batch_chunks = 0
                 for chunk in parallel_clean_texts_streaming(
                     texts_buffer,
                     n_workers=n_workers,
                     chunk_callback=save_chunk_streaming if checkpoint else None,
                     chunk_size=500000
                 ):
-                    chunks_generated += 1
-
-            current_chunk_idx += chunks_generated
+                    batch_chunks += 1
+                current_chunk_idx += batch_chunks
+                chunks_generated += batch_chunks
 
         # Stage 1 complete: Text cleaning done
         if stage_mgr:
@@ -2144,6 +2158,17 @@ def process_single_file(
         # Instead of combining all chunks then filtering, we filter each chunk
         print(f"  Processing {current_chunk_idx} chunks through quality/toxicity filters...")
         all_chunk_files = sorted(chunk_dir.glob(chunk_pattern)) if chunk_dir else []
+
+        # DEBUG: Verify chunk files exist
+        print(f"    [DEBUG: Looking for pattern '{chunk_pattern}' in {chunk_dir}]")
+        print(f"    [DEBUG: Found {len(all_chunk_files)} chunk files]")
+        if all_chunk_files:
+            for cf in all_chunk_files[:5]:  # Show first 5
+                print(f"      - {cf.name} ({cf.stat().st_size / 1024 / 1024:.1f} MB)")
+            if len(all_chunk_files) > 5:
+                print(f"      ... and {len(all_chunk_files) - 5} more")
+        if len(all_chunk_files) != current_chunk_idx:
+            print(f"    [DEBUG: WARNING! Expected {current_chunk_idx} chunks but found {len(all_chunk_files)}!]")
 
         # Initialize toxicity model once
         cleaner = DataCleaner(use_gpu=use_gpu, batch_size=batch_size)
