@@ -2018,6 +2018,10 @@ def process_single_file(
             chunks_generated = 0
 
             # Streaming chunk callback - saves each chunk to disk immediately
+            # Also syncs to Drive periodically (every SYNC_EVERY_N_CHUNKS chunks)
+            SYNC_EVERY_N_CHUNKS = 5  # Sync every 5 chunks (~2.5M docs) to avoid data loss
+            last_sync_chunk = [0]  # Use list to allow mutation in nested function
+
             def save_chunk_streaming(chunk_data, idx):
                 nonlocal current_chunk_idx
                 if checkpoint:
@@ -2026,7 +2030,16 @@ def process_single_file(
                     print(f"\n    [Saving chunk {actual_idx}: {len(chunk_data):,} docs...]", end="", flush=True)
                     chunk_df = pd.DataFrame({'text': chunk_data})
                     chunk_df.to_parquet(chunk_path, index=False)
-                    print(f" done]")
+                    print(f" done]", end="")
+
+                    # Periodic sync to Drive to preserve progress
+                    chunks_since_sync = actual_idx - last_sync_chunk[0]
+                    if stage_mgr and chunks_since_sync >= SYNC_EVERY_N_CHUNKS:
+                        print(f" [syncing to Drive...]", end="", flush=True)
+                        synced = stage_mgr.sync_to_drive('text_clean', max_workers=sync_threads)
+                        last_sync_chunk[0] = actual_idx
+                        if synced > 0:
+                            print(f" {synced} files]", end="")
 
             print(f"    Streaming from parquet (batch_size={BATCH_SIZE:,})...")
 
@@ -2156,6 +2169,15 @@ def process_single_file(
                 filtered_path = chunk_dir / f"{filename}_filtered_chunk_{i:04d}_{file_hash}.parquet"
                 chunk_df.to_parquet(filtered_path, index=False)
                 filtered_chunks.append(filtered_path)
+
+                # Periodic sync to Drive (every 5 chunks) to preserve filter progress
+                if stage_mgr and (i + 1) % 5 == 0:
+                    print(f"      [Syncing filtered chunks to Drive...]", end="", flush=True)
+                    synced = stage_mgr.sync_to_drive('quality_filter', max_workers=sync_threads)
+                    if synced > 0:
+                        print(f" {synced} files synced]")
+                    else:
+                        print(f" up to date]")
 
             # Delete original chunk to free disk space
             chunk_path.unlink()
