@@ -1489,10 +1489,63 @@ class StageManager:
         # State file to track progress
         self.state_file = self.output_dir / ".stage_state.json"
 
-        # CRITICAL: Smart restore from Drive if local state doesn't exist
+        # CRITICAL: Validate state and restore from Drive if needed
         # This handles Colab session restarts where local SSD is wiped
-        if self.drive_dir and not self.state_file.exists():
+        if self.drive_dir:
+            self._validate_and_restore_from_drive()
+
+    def _validate_and_restore_from_drive(self) -> None:
+        """Validate local state matches actual files, restore from Drive if needed.
+
+        This is called whenever Drive is configured to ensure consistency:
+        1. If no local state exists → restore from Drive
+        2. If state says 'final' complete but no output files → restore from Drive
+        3. If state says intermediate stages complete but no chunks → restore from Drive
+        """
+        if not self.drive_dir or not self.drive_dir.exists():
+            return
+
+        # Case 1: No local state file - need full restore
+        if not self.state_file.exists():
+            print(f"  [No local state found - checking Drive for recovery...]")
             self._smart_restore_from_drive()
+            return
+
+        # Case 2: State file exists - validate it matches actual files
+        completed = self.get_completed_stages()
+
+        if 'final' in completed:
+            # State says all done - verify final output files exist locally
+            local_final = list(self.output_dir.glob('*_clean.parquet'))
+            if not local_final:
+                print(f"  [State shows 'final' complete but no output files found locally]")
+                print(f"  [Triggering Drive recovery...]")
+                # Delete stale state file so smart_restore rebuilds it
+                self.state_file.unlink()
+                self._smart_restore_from_drive()
+                return
+
+        elif 'toxicity_filter' in completed or 'quality_filter' in completed:
+            # State says intermediate stages done - verify chunk files exist
+            local_filtered = list(self.checkpoint_dir.glob('*_filtered_chunk_*.parquet'))
+            if not local_filtered:
+                print(f"  [State shows filters complete but no chunk files found locally]")
+                print(f"  [Triggering Drive recovery...]")
+                self.state_file.unlink()
+                self._smart_restore_from_drive()
+                return
+
+        elif 'text_clean' in completed:
+            # State says text_clean done - verify clean chunks exist
+            local_clean = list(self.checkpoint_dir.glob('*_clean_chunk_*.parquet'))
+            if not local_clean:
+                print(f"  [State shows text_clean complete but no chunk files found locally]")
+                print(f"  [Triggering Drive recovery...]")
+                self.state_file.unlink()
+                self._smart_restore_from_drive()
+                return
+
+        # State matches actual files - no recovery needed
 
     def _smart_restore_from_drive(self) -> dict:
         """Intelligently restore state and data files from Drive.
