@@ -339,11 +339,22 @@ class DataCleaner:
     # Class-level model cache to avoid reloading
     _model_cache: dict = {}
     _model_warmed_up: set = set()
+    _tokenizer_cache: dict = {}  # Separate tokenizer cache (no CUDA needed)
 
-    def __init__(self, toxicity_threshold: float = 0.7, use_gpu: bool = True, batch_size: int = None):
+    def __init__(self, toxicity_threshold: float = 0.7, use_gpu: bool = True, batch_size: int = None, lazy_load: bool = True):
+        """Initialize DataCleaner.
+
+        Args:
+            toxicity_threshold: Threshold for toxicity detection
+            use_gpu: Use GPU for inference
+            batch_size: Batch size for inference (auto-tuned if None)
+            lazy_load: If True, defer model loading until first inference (allows parallel tokenization)
+        """
         self.device = 'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
         self.toxicity_threshold = toxicity_threshold
         self.use_fp16 = False  # Will be set based on GPU capabilities
+        self.toxicity_model = None  # Will be loaded lazily
+        self._model_loaded = False
 
         # Auto-tune batch size based on GPU memory
         # A100 (40GB/80GB) can handle much larger batches than default 128
@@ -376,6 +387,15 @@ class DataCleaner:
         self.batch_size = batch_size
         self.lsh = MinHashLSH(threshold=0.85, num_perm=128)
 
+        # Load model immediately if not lazy loading
+        if not lazy_load:
+            self._load_model()
+
+    def _load_model(self):
+        """Load the toxicity model (call this after tokenization to allow parallel tokenization)."""
+        if self._model_loaded:
+            return
+
         # Use cached model if available (avoid re-downloading)
         cache_key = f"detoxify_{self.device}"
         if cache_key not in DataCleaner._model_cache:
@@ -406,11 +426,24 @@ class DataCleaner:
             DataCleaner._model_cache[cache_key] = model
 
         self.toxicity_model = DataCleaner._model_cache[cache_key]
+        self._model_loaded = True
 
         # Warmup GPU with a small batch (compiles CUDA kernels)
         if self.device == 'cuda' and cache_key not in DataCleaner._model_warmed_up:
             self._warmup_gpu()
             DataCleaner._model_warmed_up.add(cache_key)
+
+    @classmethod
+    def get_tokenizer(cls):
+        """Get the tokenizer without loading the full model (no CUDA initialization).
+
+        This allows parallel tokenization before CUDA is initialized.
+        """
+        if 'tokenizer' not in cls._tokenizer_cache:
+            from transformers import AutoTokenizer
+            # Detoxify uses bert-base-uncased tokenizer
+            cls._tokenizer_cache['tokenizer'] = AutoTokenizer.from_pretrained('bert-base-uncased')
+        return cls._tokenizer_cache['tokenizer']
 
     def _warmup_gpu(self):
         """Warmup GPU by running a small batch through the model."""
@@ -475,32 +508,20 @@ class DataCleaner:
 
         Optimizations for A100/H100:
         - Pre-tokenize ALL texts first using parallel workers (10-50x faster)
-        - Pipeline: tokenize next batch while GPU processes current batch
+        - Lazy model loading: tokenization runs BEFORE CUDA initialization
         - Uses fp16 (half precision) for 2-3x faster inference
         - Non-blocking data transfer with pin_memory + non_blocking=True
         """
         if not texts:
             return []
 
-        # Access the underlying model and tokenizer
-        model = self.toxicity_model.model
-        tokenizer = self.toxicity_model.tokenizer
-
-        # Optimal batch sizes
-        infer_batch_size = min(self.batch_size, 256)  # Cap inference batch at 256
-        n_batches = (len(texts) + infer_batch_size - 1) // infer_batch_size
-
-        if show_progress:
-            desc = f"    Toxicity ({self.device}"
-            if self.use_fp16:
-                desc += ", fp16"
-            desc += f", bs={infer_batch_size}, parallel_tok)"
-
         # =====================================================================
         # STAGE 1: Pre-tokenize texts using multiprocessing (bypasses GIL)
-        # Uses datasets.map() with num_proc for true parallel tokenization
-        # Each worker process loads its own tokenizer instance
+        # CRITICAL: Use standalone tokenizer BEFORE loading CUDA model
+        # This allows parallel tokenization with multiple CPU processes
         # =====================================================================
+        tokenizer = DataCleaner.get_tokenizer()  # No CUDA initialization
+
         n_cpus = cpu_count()
         if show_progress:
             print(f"    Pre-tokenizing {len(texts):,} texts using {n_cpus} CPU cores...")
@@ -514,12 +535,28 @@ class DataCleaner:
             show_progress=show_progress,
         )
 
+        if show_progress:
+            print(f"    Tokenization complete. Loading model and running GPU inference...")
+
+        # =====================================================================
+        # STAGE 2: Load model AFTER tokenization (this initializes CUDA)
+        # =====================================================================
+        self._load_model()
+        model = self.toxicity_model.model
+
         # Pin memory for faster GPU transfer
         if self.device == 'cuda':
             all_inputs = {k: v.pin_memory() for k, v in all_inputs.items()}
 
+        # Optimal batch sizes
+        infer_batch_size = min(self.batch_size, 256)  # Cap inference batch at 256
+        n_batches = (len(texts) + infer_batch_size - 1) // infer_batch_size
+
         if show_progress:
-            print(f"    Tokenization complete. Running GPU inference...")
+            desc = f"    Toxicity ({self.device}"
+            if self.use_fp16:
+                desc += ", fp16"
+            desc += f", bs={infer_batch_size}, parallel_tok)"
 
         # =====================================================================
         # STAGE 2: GPU inference on pre-tokenized batches
