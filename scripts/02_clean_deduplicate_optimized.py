@@ -1619,38 +1619,48 @@ class StageManager:
               f"{len(drive_inventory['filtered'])} filtered chunks, "
               f"{len(drive_inventory['clean'])} clean chunks]")
 
-        # Determine actual state based on files (priority: final > filtered > clean)
-        # and prepare restoration plan
+        # Restore ALL file types that exist on Drive (not just highest priority)
+        # This handles mixed states: e.g., fileA complete, fileB partially cleaned
         files_to_restore = []
 
+        # Always restore final outputs (completed files)
         if drive_inventory['final']:
-            # Have final outputs - all stages complete
-            result['inferred_stages'] = ['text_clean', 'quality_filter', 'toxicity_filter', 'dedup', 'final']
-            result['resume_from'] = None  # All done
-            # Restore final outputs to output_dir
             for f in drive_inventory['final']:
                 files_to_restore.append((f, self.output_dir / f.name))
+            print(f"  [Will restore {len(drive_inventory['final'])} final output(s)]")
 
-        elif drive_inventory['filtered']:
-            # Have filtered chunks - completed through toxicity_filter
-            result['inferred_stages'] = ['text_clean', 'quality_filter', 'toxicity_filter']
-            result['resume_from'] = 'dedup'
-            # Restore filtered chunks to checkpoint_dir
+        # Also restore filtered chunks (for files in filter stage)
+        if drive_inventory['filtered']:
             for f in drive_inventory['filtered']:
                 files_to_restore.append((f, self.checkpoint_dir / f.name))
+            print(f"  [Will restore {len(drive_inventory['filtered'])} filtered chunk(s)]")
 
-        elif drive_inventory['clean']:
-            # Have clean chunks - completed text_clean only
-            result['inferred_stages'] = ['text_clean']
-            result['resume_from'] = 'quality_filter'
-            # Restore clean chunks to checkpoint_dir
+        # Also restore clean chunks (for files in text_clean stage)
+        if drive_inventory['clean']:
             for f in drive_inventory['clean']:
                 files_to_restore.append((f, self.checkpoint_dir / f.name))
+            print(f"  [Will restore {len(drive_inventory['clean'])} clean chunk(s)]")
 
-        else:
+        if not files_to_restore:
             # No usable files on Drive - start fresh
             print(f"  [No recoverable files found - starting fresh]")
             return result
+
+        # Determine inferred stages based on what we found
+        # (use highest completed stage for state file, but restore ALL files)
+        if drive_inventory['final']:
+            result['inferred_stages'] = ['text_clean', 'quality_filter', 'toxicity_filter', 'dedup', 'final']
+            # If we also have chunks, some files are partial - will resume at text_clean for those
+            if drive_inventory['filtered'] or drive_inventory['clean']:
+                result['resume_from'] = 'text_clean'  # Some files still need processing
+            else:
+                result['resume_from'] = None  # All files complete
+        elif drive_inventory['filtered']:
+            result['inferred_stages'] = ['text_clean', 'quality_filter', 'toxicity_filter']
+            result['resume_from'] = 'dedup'
+        elif drive_inventory['clean']:
+            result['inferred_stages'] = ['text_clean']
+            result['resume_from'] = 'quality_filter'
 
         # Restore files in parallel with error handling
         def restore_file(src_dest):
