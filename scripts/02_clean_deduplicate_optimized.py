@@ -2417,9 +2417,8 @@ def main():
                        help='Input directory (default: data/raw)')
     parser.add_argument('--output-dir', type=str, default='data/processed',
                        help='Output directory (default: data/processed)')
-    parser.add_argument('--cache-dir', type=str, default='data/.cache',
-                       help='Cache directory for intermediate chunks (default: data/.cache). '
-                            'For local SSD performance, use /content/data_local/.cache')
+    parser.add_argument('--cache-dir', type=str, default=None,
+                       help='Cache directory for intermediate chunks (default: auto - uses .cache sibling to output-dir)')
     parser.add_argument('--fast-clean', action='store_true', default=True,
                        help='Use fast cleaning (skip Unicode fixing) [default: enabled]')
     parser.add_argument('--full-clean', action='store_true',
@@ -2446,6 +2445,13 @@ def main():
                        help='Disable automatic sync to Drive after each stage')
 
     args = parser.parse_args()
+
+    # Auto-derive cache-dir from output-dir if not specified
+    # This ensures cache is on same storage as output (e.g., local SSD)
+    if args.cache_dir is None:
+        from pathlib import Path
+        output_parent = Path(args.output_dir).parent
+        args.cache_dir = str(output_parent / '.cache')
 
     # Set cleaning mode globally
     global _CLEANING_MODE
@@ -2526,6 +2532,7 @@ def main():
         print(f"Starting optimized data cleaning:")
         print(f"  - GPU acceleration: {use_gpu}")
         print(f"  - Checkpoint caching: {not args.no_cache}")
+        print(f"  - Cache dir: {args.cache_dir}")
         print(f"  - Batch size: {args.batch_size}")
         print(f"  - CPU workers: {n_workers}")
         print(f"  - File pattern: {args.pattern}")
