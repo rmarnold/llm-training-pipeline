@@ -1489,80 +1489,187 @@ class StageManager:
         # State file to track progress
         self.state_file = self.output_dir / ".stage_state.json"
 
-        # CRITICAL: Restore state from Drive if local doesn't exist
+        # CRITICAL: Smart restore from Drive if local state doesn't exist
         # This handles Colab session restarts where local SSD is wiped
         if self.drive_dir and not self.state_file.exists():
-            drive_state_file = self.drive_dir / ".stage_state.json"
-            if drive_state_file.exists():
-                import shutil
-                shutil.copy2(drive_state_file, self.state_file)
-                print(f"  [Restored stage state from Google Drive]")
-                # Also restore final output files if 'final' stage is complete
-                self._restore_final_outputs_from_drive()
+            self._smart_restore_from_drive()
 
-    def _restore_final_outputs_from_drive(self) -> int:
-        """Restore final output parquet files from Drive after state restoration.
+    def _smart_restore_from_drive(self) -> dict:
+        """Intelligently restore state and data files from Drive.
+
+        Instead of blindly trusting the state file, this analyzes what files
+        actually exist on Drive and infers the correct state from them.
+
+        File hierarchy (later stages imply earlier stages complete):
+        - *_clean.parquet (no chunk/hash) → Final output, all stages complete
+        - *_filtered_chunk_*.parquet → Through toxicity_filter, resume at dedup
+        - *_clean_chunk_*.parquet → Through text_clean, resume at quality_filter
 
         Returns:
-            Number of files restored, or -1 if state was reset due to missing files
+            dict with 'restored_files', 'inferred_stages', 'resume_from'
         """
-        if not self.drive_dir:
-            return 0
-
-        completed = self.get_completed_stages()
-        if 'final' not in completed:
-            return 0
-
         import shutil
-        restored = 0
-        failed = 0
+        import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # Look for *_clean.parquet files in Drive (final outputs)
-        drive_files = list(self.drive_dir.glob('*_clean.parquet'))
+        result = {
+            'restored_files': 0,
+            'failed_files': 0,
+            'inferred_stages': [],
+            'resume_from': 'text_clean',
+        }
 
-        # VALIDATION: If state says 'final' complete but no files on Drive, reset state
-        if not drive_files:
-            print(f"  [WARNING: State shows 'final' complete but no output files found on Drive]")
-            print(f"  [Resetting stage state - pipeline will reprocess from beginning]")
-            self._reset_state()
-            return -1
+        if not self.drive_dir or not self.drive_dir.exists():
+            print(f"  [No Drive backup found - starting fresh]")
+            return result
 
-        for drive_file in drive_files:
-            local_file = self.output_dir / drive_file.name
-            if not local_file.exists():
-                try:
-                    shutil.copy2(drive_file, local_file)
-                    # Validate the copy succeeded and file is readable
-                    if local_file.exists() and local_file.stat().st_size > 0:
-                        restored += 1
-                        print(f"  [Restored {drive_file.name} from Drive]")
+        print(f"\n  [Analyzing Drive backup for recovery...]")
+
+        # Categorize files on Drive by type
+        drive_inventory = {
+            'final': [],       # *_clean.parquet (final deduplicated outputs)
+            'filtered': [],    # *_filtered_chunk_*.parquet (quality/toxicity outputs)
+            'clean': [],       # *_clean_chunk_*.parquet (text_clean outputs)
+        }
+
+        try:
+            for f in self.drive_dir.iterdir():
+                if not f.suffix == '.parquet':
+                    continue
+                name = f.name
+                # Order matters: check most specific patterns first
+                if '_filtered_chunk_' in name:
+                    drive_inventory['filtered'].append(f)
+                elif '_clean_chunk_' in name:
+                    drive_inventory['clean'].append(f)
+                elif name.endswith('_clean.parquet'):
+                    # Final output (no chunk in name)
+                    drive_inventory['final'].append(f)
+        except Exception as e:
+            print(f"  [ERROR scanning Drive: {e}]")
+            return result
+
+        print(f"  [Drive inventory: {len(drive_inventory['final'])} final, "
+              f"{len(drive_inventory['filtered'])} filtered chunks, "
+              f"{len(drive_inventory['clean'])} clean chunks]")
+
+        # Determine actual state based on files (priority: final > filtered > clean)
+        # and prepare restoration plan
+        files_to_restore = []
+
+        if drive_inventory['final']:
+            # Have final outputs - all stages complete
+            result['inferred_stages'] = ['text_clean', 'quality_filter', 'toxicity_filter', 'dedup', 'final']
+            result['resume_from'] = None  # All done
+            # Restore final outputs to output_dir
+            for f in drive_inventory['final']:
+                files_to_restore.append((f, self.output_dir / f.name))
+
+        elif drive_inventory['filtered']:
+            # Have filtered chunks - completed through toxicity_filter
+            result['inferred_stages'] = ['text_clean', 'quality_filter', 'toxicity_filter']
+            result['resume_from'] = 'dedup'
+            # Restore filtered chunks to checkpoint_dir
+            for f in drive_inventory['filtered']:
+                files_to_restore.append((f, self.checkpoint_dir / f.name))
+
+        elif drive_inventory['clean']:
+            # Have clean chunks - completed text_clean only
+            result['inferred_stages'] = ['text_clean']
+            result['resume_from'] = 'quality_filter'
+            # Restore clean chunks to checkpoint_dir
+            for f in drive_inventory['clean']:
+                files_to_restore.append((f, self.checkpoint_dir / f.name))
+
+        else:
+            # No usable files on Drive - start fresh
+            print(f"  [No recoverable files found - starting fresh]")
+            return result
+
+        # Restore files in parallel with error handling
+        def restore_file(src_dest):
+            src, dest = src_dest
+            if dest.exists() and dest.stat().st_size > 0:
+                return ('exists', src.name, dest)
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                if dest.exists() and dest.stat().st_size > 0:
+                    return ('restored', src.name, dest)
+                else:
+                    if dest.exists():
+                        dest.unlink()
+                    return ('failed', src.name, 'Empty after copy')
+            except Exception as e:
+                if dest.exists():
+                    try:
+                        dest.unlink()
+                    except:
+                        pass
+                return ('failed', src.name, str(e))
+
+        if files_to_restore:
+            print(f"  [Restoring {len(files_to_restore)} file(s) to local storage...]")
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(restore_file, fd) for fd in files_to_restore]
+                for future in as_completed(futures):
+                    status, name, detail = future.result()
+                    if status == 'restored':
+                        result['restored_files'] += 1
+                    elif status == 'exists':
+                        pass  # Already there, count as success
                     else:
-                        raise IOError(f"Copied file is empty or missing")
-                except Exception as e:
-                    failed += 1
-                    print(f"  [ERROR: Failed to restore {drive_file.name}: {e}]")
-                    # Clean up partial copy
-                    if local_file.exists():
-                        local_file.unlink()
+                        result['failed_files'] += 1
+                        print(f"    [ERROR: {name}: {detail}]")
 
-        if failed > 0:
-            print(f"  [WARNING: {failed} file(s) failed to restore - resetting state]")
-            self._reset_state()
-            return -1
+        # Handle restoration failures
+        if result['failed_files'] > 0:
+            # Some files failed - fall back to latest complete stage
+            print(f"  [WARNING: {result['failed_files']} file(s) failed to restore]")
 
-        if restored:
-            print(f"  [Restored {restored} completed output file(s) from Drive]")
+            # Re-analyze what we actually have locally now
+            local_final = list(self.output_dir.glob('*_clean.parquet'))
+            local_filtered = list(self.checkpoint_dir.glob('*_filtered_chunk_*.parquet'))
+            local_clean = list(self.checkpoint_dir.glob('*_clean_chunk_*.parquet'))
 
-        return restored
+            if local_final:
+                result['inferred_stages'] = ['text_clean', 'quality_filter', 'toxicity_filter', 'dedup', 'final']
+                result['resume_from'] = None
+            elif local_filtered:
+                result['inferred_stages'] = ['text_clean', 'quality_filter', 'toxicity_filter']
+                result['resume_from'] = 'dedup'
+            elif local_clean:
+                result['inferred_stages'] = ['text_clean']
+                result['resume_from'] = 'quality_filter'
+            else:
+                result['inferred_stages'] = []
+                result['resume_from'] = 'text_clean'
+                print(f"  [All restorations failed - starting fresh]")
 
-    def _reset_state(self) -> None:
-        """Reset stage state file when data doesn't match state."""
-        if self.state_file.exists():
-            self.state_file.unlink()
-        # Also remove any partially restored files
-        for local_file in self.output_dir.glob('*_clean.parquet'):
-            local_file.unlink()
-            print(f"  [Removed inconsistent file: {local_file.name}]")
+        # Write state file based on what we actually restored
+        state = {
+            'completed_stages': result['inferred_stages'],
+            'stats': {},
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'restored_from_drive': True,
+            'restored_files': result['restored_files'],
+            'failed_files': result['failed_files'],
+        }
+
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.state_file, 'w') as f:
+            json.dump(state, f, indent=2)
+
+        # Summary
+        if result['resume_from']:
+            print(f"  [Recovery complete: {result['restored_files']} files restored, "
+                  f"will resume from '{result['resume_from']}']")
+        else:
+            print(f"  [Recovery complete: {result['restored_files']} files restored, "
+                  f"all stages already done]")
+
+        return result
 
     def get_stage_dir(self, stage: str) -> Path:
         """Get directory for a stage."""
