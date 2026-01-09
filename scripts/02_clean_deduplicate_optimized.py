@@ -1579,25 +1579,38 @@ class StageManager:
         print(f"\n  [Analyzing Drive backup for recovery...]")
 
         # Categorize files on Drive by type
+        # Note: Intermediate chunks are stored in .stage_* subdirectories
         drive_inventory = {
-            'final': [],       # *_clean.parquet (final deduplicated outputs)
-            'filtered': [],    # *_filtered_chunk_*.parquet (quality/toxicity outputs)
-            'clean': [],       # *_clean_chunk_*.parquet (text_clean outputs)
+            'final': [],       # *_clean.parquet (final deduplicated outputs) - in drive_dir
+            'filtered': [],    # *_filtered_chunk_*.parquet - in .stage_quality_filter/ or .stage_toxicity_filter/
+            'clean': [],       # *_clean_chunk_*.parquet - in .stage_text_clean/
         }
 
         try:
+            # Check top-level directory for final outputs
             for f in self.drive_dir.iterdir():
-                if not f.suffix == '.parquet':
-                    continue
-                name = f.name
-                # Order matters: check most specific patterns first
-                if '_filtered_chunk_' in name:
-                    drive_inventory['filtered'].append(f)
-                elif '_clean_chunk_' in name:
-                    drive_inventory['clean'].append(f)
-                elif name.endswith('_clean.parquet'):
-                    # Final output (no chunk in name)
-                    drive_inventory['final'].append(f)
+                if f.is_file() and f.suffix == '.parquet':
+                    name = f.name
+                    if name.endswith('_clean.parquet') and '_chunk_' not in name:
+                        drive_inventory['final'].append(f)
+
+            # Check .stage_text_clean/ for clean chunks
+            stage_text_clean = self.drive_dir / '.stage_text_clean'
+            if stage_text_clean.exists():
+                for f in stage_text_clean.iterdir():
+                    if f.is_file() and '_clean_chunk_' in f.name:
+                        drive_inventory['clean'].append(f)
+
+            # Check .stage_quality_filter/ and .stage_toxicity_filter/ for filtered chunks
+            for stage_dir_name in ['.stage_quality_filter', '.stage_toxicity_filter']:
+                stage_dir = self.drive_dir / stage_dir_name
+                if stage_dir.exists():
+                    for f in stage_dir.iterdir():
+                        if f.is_file() and '_filtered_chunk_' in f.name:
+                            # Avoid duplicates (same files may be in both dirs)
+                            if f not in drive_inventory['filtered']:
+                                drive_inventory['filtered'].append(f)
+
         except Exception as e:
             print(f"  [ERROR scanning Drive: {e}]")
             return result
@@ -1911,6 +1924,7 @@ def process_single_file(
     filename: str,
     input_dir: str = "data/raw",
     output_dir: str = "data/processed",
+    cache_dir: str = "data/.cache",
     use_gpu: bool = True,
     use_cache: bool = True,
     batch_size: int = 128,
@@ -1925,6 +1939,7 @@ def process_single_file(
         filename: Input filename
         input_dir: Directory containing input files
         output_dir: Directory for output files
+        cache_dir: Directory for intermediate checkpoint chunks
         use_gpu: Use GPU for toxicity detection
         use_cache: Enable checkpoint caching
         batch_size: Batch size for toxicity detection
@@ -1934,8 +1949,8 @@ def process_single_file(
         auto_sync: Auto-sync to Drive after each stage
     """
     # Initialize checkpoint manager first (needed for stage manager)
-    checkpoint = CheckpointManager() if use_cache else None
-    checkpoint_dir = str(checkpoint.cache_dir) if checkpoint else "data/.cache"
+    checkpoint = CheckpointManager(cache_dir) if use_cache else None
+    checkpoint_dir = str(checkpoint.cache_dir) if checkpoint else cache_dir
 
     # Initialize stage manager for recovery (pass checkpoint_dir for proper file syncing)
     stage_mgr = StageManager(output_dir, drive_dir, checkpoint_dir=checkpoint_dir) if auto_sync else None
@@ -2280,6 +2295,7 @@ def process_single_file(
 def process_all_files(
     input_dir: str = "data/raw",
     output_dir: str = "data/processed",
+    cache_dir: str = "data/.cache",
     file_pattern: str = "pretraining_",
     use_gpu: bool = True,
     use_cache: bool = True,
@@ -2294,6 +2310,7 @@ def process_all_files(
     Args:
         input_dir: Directory containing input files
         output_dir: Directory for output files
+        cache_dir: Directory for intermediate checkpoint chunks
         file_pattern: Pattern to match input files
         use_gpu: Use GPU for toxicity detection
         use_cache: Enable checkpoint caching
@@ -2329,7 +2346,7 @@ def process_all_files(
     results = []
     for filename in files_to_process:
         result = process_single_file(
-            filename, input_dir, output_dir,
+            filename, input_dir, output_dir, cache_dir=cache_dir,
             use_gpu=use_gpu, use_cache=use_cache, batch_size=batch_size,
             n_workers=n_workers, drive_dir=drive_dir, sync_threads=sync_threads,
             auto_sync=auto_sync
@@ -2368,6 +2385,9 @@ def main():
                        help='Input directory (default: data/raw)')
     parser.add_argument('--output-dir', type=str, default='data/processed',
                        help='Output directory (default: data/processed)')
+    parser.add_argument('--cache-dir', type=str, default='data/.cache',
+                       help='Cache directory for intermediate chunks (default: data/.cache). '
+                            'For local SSD performance, use /content/data_local/.cache')
     parser.add_argument('--fast-clean', action='store_true', default=True,
                        help='Use fast cleaning (skip Unicode fixing) [default: enabled]')
     parser.add_argument('--full-clean', action='store_true',
@@ -2487,6 +2507,7 @@ def main():
         process_all_files(
             input_dir=args.input_dir,
             output_dir=args.output_dir,
+            cache_dir=args.cache_dir,
             file_pattern=args.pattern,
             use_gpu=use_gpu,
             use_cache=not args.no_cache,
