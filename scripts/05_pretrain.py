@@ -57,26 +57,27 @@ def setup_kernel_optimizations(
 
     # Liger Kernel must be applied BEFORE model loading (patches model classes)
     # Liger is Triton-based and works with torch.compile
+    # NOTE: fused_linear_cross_entropy=False because it uses .item() which breaks torch.compile
     if use_liger_kernel:
         try:
             if model_type == "llama":
                 from liger_kernel.transformers import apply_liger_kernel_to_llama
                 apply_liger_kernel_to_llama(
-                    rope=True,
-                    swiglu=True,
-                    rms_norm=True,
-                    cross_entropy=False,  # Disabled - using fused version instead
-                    fused_linear_cross_entropy=True,  # Major memory saver (~95% CE reduction)
+                    rope=True,              # Fused RoPE (~5% speedup)
+                    swiglu=True,            # Fused SwiGLU (~10% speedup)
+                    rms_norm=True,          # Fused RMSNorm (~5% speedup)
+                    cross_entropy=True,     # Triton CE kernel (compatible with torch.compile)
+                    fused_linear_cross_entropy=False,  # Disabled: uses .item() breaking compile
                 )
             elif model_type == "mistral":
                 from liger_kernel.transformers import apply_liger_kernel_to_mistral
-                apply_liger_kernel_to_mistral()
+                apply_liger_kernel_to_mistral(fused_linear_cross_entropy=False)
             elif model_type == "gemma":
                 from liger_kernel.transformers import apply_liger_kernel_to_gemma
-                apply_liger_kernel_to_gemma()
+                apply_liger_kernel_to_gemma(fused_linear_cross_entropy=False)
             elif model_type == "qwen2":
                 from liger_kernel.transformers import apply_liger_kernel_to_qwen2
-                apply_liger_kernel_to_qwen2()
+                apply_liger_kernel_to_qwen2(fused_linear_cross_entropy=False)
             else:
                 print(f"Warning: Liger Kernel not available for model type '{model_type}'")
                 use_liger_kernel = False
@@ -84,17 +85,18 @@ def setup_kernel_optimizations(
             if use_liger_kernel:
                 enabled["liger_kernel"] = True
                 print(f"[Kernel Optimization] Liger Kernel enabled for {model_type}")
+                print(f"  - Fused RoPE, SwiGLU, RMSNorm, CrossEntropy")
                 print(f"  - ~20% throughput improvement")
                 print(f"  - ~60% memory reduction")
-                print(f"  - FusedLinearCrossEntropy: ~95% CE memory reduction")
+                print(f"  - Compatible with torch.compile")
         except ImportError:
             print("Warning: liger-kernel not installed. Install with:")
             print("  pip install liger-kernel")
         except Exception as e:
             print(f"Warning: Failed to enable Liger Kernel: {e}")
 
-    # Cut Cross-Entropy - only if Liger's FusedLinearCrossEntropy not enabled
-    # (they're mutually exclusive - both optimize cross-entropy)
+    # Cut Cross-Entropy - only if Liger Kernel not enabled
+    # (they're mutually exclusive - both optimize cross-entropy computation)
     if use_cce and not enabled["liger_kernel"] and not _CCE_PATCHED:
         try:
             from cut_cross_entropy.transformers import cce_patch
@@ -111,7 +113,7 @@ def setup_kernel_optimizations(
     elif use_cce and _CCE_PATCHED:
         enabled["cce"] = True
     elif use_cce and enabled["liger_kernel"]:
-        print("Note: CCE skipped - Liger's FusedLinearCrossEntropy provides same benefit")
+        print("Note: CCE skipped - Liger's CrossEntropy kernel already optimizes CE")
 
     return enabled
 
