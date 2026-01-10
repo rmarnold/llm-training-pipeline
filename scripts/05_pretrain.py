@@ -407,6 +407,8 @@ def setup_training(
         dataloader_num_workers=config['data'].get('num_workers', 8),
         dataloader_pin_memory=config['data'].get('pin_memory', True),
         dataloader_persistent_workers=config['data'].get('persistent_workers', True),
+        # Required for torch.compile - compiled model has different signature
+        remove_unused_columns=False,
 
         # Kernel optimizations (Liger Kernel)
         use_liger_kernel=kernel_status.get("liger_kernel", False),
