@@ -4,6 +4,11 @@ import os
 import sys
 from typing import Any, Dict, Optional, Tuple
 
+# Default wandb to offline mode (avoids interactive prompt)
+# Set WANDB_MODE=online explicitly to enable cloud sync
+if 'WANDB_MODE' not in os.environ:
+    os.environ['WANDB_MODE'] = 'offline'
+
 import torch
 import yaml
 import wandb
@@ -340,6 +345,12 @@ def setup_training(
     print(f"Compiling model with torch.compile (mode={compile_mode})...")
     model = torch.compile(model, mode=compile_mode)
 
+    # Check distributed training mode for FSDP
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    use_fsdp = world_size > 1
+    if config['training'].get('fsdp') and not use_fsdp:
+        print("Note: FSDP disabled (single GPU detected). Use torchrun for multi-GPU training.")
+
     # Training arguments (with CLI overrides)
     training_args = TrainingArguments(
         output_dir=cli_overrides.get('output_dir', config['checkpointing']['output_dir']),
@@ -368,8 +379,9 @@ def setup_training(
 
         # Optimization
         optim=config['training']['optim'],
-        fsdp=config['training']['fsdp'],
-        fsdp_transformer_layer_cls_to_wrap=config['training']['fsdp_transformer_layer_cls_to_wrap'],
+        # FSDP only works in distributed mode (world_size > 1)
+        fsdp=config['training']['fsdp'] if use_fsdp else "",
+        fsdp_transformer_layer_cls_to_wrap=config['training']['fsdp_transformer_layer_cls_to_wrap'] if use_fsdp else None,
 
         # Logging
         logging_dir=config['logging']['logging_dir'],
