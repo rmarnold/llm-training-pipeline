@@ -35,11 +35,15 @@ def setup_kernel_optimizations(
 ) -> Dict[str, bool]:
     """Setup kernel optimizations before model loading.
 
+    IMPORTANT: Must be called BEFORE loading the model, as these optimizations
+    patch the model classes.
+
     Args:
         use_liger_kernel: Enable Liger Kernel (LinkedIn's Triton kernels)
             - ~20% throughput improvement
             - ~60% memory reduction
             - Fused RMSNorm, RoPE, SwiGLU, CrossEntropy
+            - Compatible with torch.compile (Liger uses Triton)
         use_cce: Enable Cut Cross-Entropy (Apple's memory-efficient CE)
             - ~95% memory reduction on loss computation
             - Especially useful for large vocab/seq lengths
@@ -51,8 +55,47 @@ def setup_kernel_optimizations(
     global _CCE_PATCHED
     enabled = {"liger_kernel": False, "cce": False}
 
-    # Cut Cross-Entropy must be applied BEFORE model loading
-    if use_cce and not _CCE_PATCHED:
+    # Liger Kernel must be applied BEFORE model loading (patches model classes)
+    # Liger is Triton-based and works with torch.compile
+    if use_liger_kernel:
+        try:
+            if model_type == "llama":
+                from liger_kernel.transformers import apply_liger_kernel_to_llama
+                apply_liger_kernel_to_llama(
+                    rope=True,
+                    swiglu=True,
+                    rms_norm=True,
+                    cross_entropy=True,
+                    fused_linear_cross_entropy=True,  # Major memory saver
+                )
+            elif model_type == "mistral":
+                from liger_kernel.transformers import apply_liger_kernel_to_mistral
+                apply_liger_kernel_to_mistral()
+            elif model_type == "gemma":
+                from liger_kernel.transformers import apply_liger_kernel_to_gemma
+                apply_liger_kernel_to_gemma()
+            elif model_type == "qwen2":
+                from liger_kernel.transformers import apply_liger_kernel_to_qwen2
+                apply_liger_kernel_to_qwen2()
+            else:
+                print(f"Warning: Liger Kernel not available for model type '{model_type}'")
+                use_liger_kernel = False
+
+            if use_liger_kernel:
+                enabled["liger_kernel"] = True
+                print(f"[Kernel Optimization] Liger Kernel enabled for {model_type}")
+                print(f"  - ~20% throughput improvement")
+                print(f"  - ~60% memory reduction")
+                print(f"  - FusedLinearCrossEntropy: ~95% CE memory reduction")
+        except ImportError:
+            print("Warning: liger-kernel not installed. Install with:")
+            print("  pip install liger-kernel")
+        except Exception as e:
+            print(f"Warning: Failed to enable Liger Kernel: {e}")
+
+    # Cut Cross-Entropy - only if Liger's FusedLinearCrossEntropy not enabled
+    # (they're mutually exclusive - both optimize cross-entropy)
+    if use_cce and not enabled["liger_kernel"] and not _CCE_PATCHED:
         try:
             from cut_cross_entropy.transformers import cce_patch
             cce_patch(model_type)
@@ -67,20 +110,32 @@ def setup_kernel_optimizations(
             print(f"Warning: Failed to enable Cut Cross-Entropy: {e}")
     elif use_cce and _CCE_PATCHED:
         enabled["cce"] = True
-
-    # Liger Kernel is enabled via TrainingArguments (handled separately)
-    if use_liger_kernel:
-        try:
-            import liger_kernel
-            enabled["liger_kernel"] = True
-            print(f"[Kernel Optimization] Liger Kernel will be enabled")
-            print(f"  - ~20% throughput improvement")
-            print(f"  - ~60% memory reduction")
-        except ImportError:
-            print("Warning: liger-kernel not installed. Install with:")
-            print("  pip install liger-kernel")
+    elif use_cce and enabled["liger_kernel"]:
+        print("Note: CCE skipped - Liger's FusedLinearCrossEntropy provides same benefit")
 
     return enabled
+
+
+def get_optimizer_name(config_optim: str) -> str:
+    """Get optimizer name with fallback for unavailable optimizers.
+
+    Args:
+        config_optim: Optimizer name from config (e.g., "adamw_bnb_8bit")
+
+    Returns:
+        Actual optimizer name to use (may fallback if dependency missing)
+    """
+    if config_optim == "adamw_bnb_8bit":
+        try:
+            import bitsandbytes
+            print("[Optimizer] Using 8-bit AdamW (bitsandbytes)")
+            print("  - ~4x optimizer memory reduction (~30GB saved for 7B model)")
+            return "adamw_bnb_8bit"
+        except ImportError:
+            print("Warning: bitsandbytes not installed, falling back to adamw_torch_fused")
+            print("  Install for 4x memory reduction: pip install bitsandbytes")
+            return "adamw_torch_fused"
+    return config_optim
 
 # Import GPU utilities
 from gpu_utils import (
@@ -378,7 +433,8 @@ def setup_training(
         adam_beta2=config['training']['adam_beta2'],
 
         # Optimization
-        optim=config['training']['optim'],
+        # Use get_optimizer_name for 8-bit Adam fallback
+        optim=get_optimizer_name(config['training']['optim']),
         # FSDP only works in distributed mode (world_size > 1)
         fsdp=config['training']['fsdp'] if use_fsdp else "",
         fsdp_transformer_layer_cls_to_wrap=config['training']['fsdp_transformer_layer_cls_to_wrap'] if use_fsdp else None,
@@ -409,9 +465,8 @@ def setup_training(
         dataloader_persistent_workers=config['data'].get('persistent_workers', True),
         # Required for torch.compile - compiled model has different signature
         remove_unused_columns=False,
-
-        # Kernel optimizations (Liger Kernel)
-        use_liger_kernel=kernel_status.get("liger_kernel", False),
+        # Note: Liger Kernel is applied via setup_kernel_optimizations() BEFORE model loading
+        # Do NOT use use_liger_kernel=True here as it would cause redundant patching
     )
 
     # Load dataset (curriculum-aware paths)
