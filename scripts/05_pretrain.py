@@ -65,8 +65,8 @@ def setup_kernel_optimizations(
                     rope=True,
                     swiglu=True,
                     rms_norm=True,
-                    cross_entropy=True,
-                    fused_linear_cross_entropy=True,  # Major memory saver
+                    cross_entropy=False,  # Disabled - using fused version instead
+                    fused_linear_cross_entropy=True,  # Major memory saver (~95% CE reduction)
                 )
             elif model_type == "mistral":
                 from liger_kernel.transformers import apply_liger_kernel_to_mistral
