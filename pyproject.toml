@@ -40,6 +40,7 @@ fp8 = [
 kernels = [
     "liger-kernel>=0.4",
     "cut-cross-entropy>=24.11",
+    "bitsandbytes>=0.42",  # 8-bit Adam optimizer (~4x memory reduction)
 ]
 colab = [
     "pyfastcopy>=1.0",  # Faster file copy using sendfile syscall

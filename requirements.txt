@@ -1,0 +1,56 @@
+# LLM Training Pipeline Requirements
+# Production training for 7B models on A100/H100 GPUs
+
+# Core ML dependencies
+torch>=2.0
+transformers>=4.36
+trl>=0.7
+accelerate>=0.25
+datasets>=2.14
+peft>=0.7
+
+# Data processing
+numpy>=1.24
+pandas>=2.0
+pyyaml>=6.0
+tqdm>=4.66
+
+# Data cleaning pipeline
+datasketch>=1.6           # MinHash deduplication
+plsfix>=0.1               # Unicode/mojibake fixing
+detoxify>=0.5             # Toxicity filtering
+datatrove[io,processing]>=0.2  # Production quality filters
+
+# Logging & monitoring
+wandb>=0.16
+tensorboard>=2.14
+nvidia-ml-py3>=7.352
+
+# Evaluation
+evaluate>=0.4
+
+# ============================================
+# GPU Kernel Optimizations (RECOMMENDED)
+# ============================================
+# These provide significant speedups and memory savings
+liger-kernel>=0.4         # ~20% speedup, ~60% memory reduction
+bitsandbytes>=0.42        # 8-bit Adam (~4x optimizer memory reduction)
+
+# Optional: cut-cross-entropy (alternative to Liger's fused CE)
+# pip install cut-cross-entropy
+
+# ============================================
+# Flash Attention (RECOMMENDED)
+# ============================================
+# Requires separate install due to CUDA compilation
+# pip install flash-attn --no-build-isolation
+
+# ============================================
+# FP8 Training (H100 only)
+# ============================================
+# pip install transformer-engine[pytorch]
+
+# ============================================
+# Colab/Notebook extras
+# ============================================
+# pip install pyfastcopy ipywidgets
