@@ -197,13 +197,13 @@ def train_sft(
         eval_steps=cli_overrides.get('eval_steps', config['eval']['eval_steps']),
         save_steps=cli_overrides.get('save_steps', config['logging']['save_steps']),
         eval_strategy=config['eval']['evaluation_strategy'],
-        load_best_model_at_end=config['eval']['load_best_model_at_end'],
-        metric_for_best_model=config['eval']['metric_for_best_model'],
+        # Note: TRL's SFTTrainer doesn't compute eval_loss with pre-formatted text datasets
+        # We disable load_best_model_at_end and rely on training loss monitoring
+        # For SFT (short training on curated data), this is standard practice
+        load_best_model_at_end=False,
 
         # Sequence packing - up to 6x speedup by eliminating padding waste
-        # Use packing for training, but disable for eval to get proper eval_loss
         packing=True,
-        eval_packing=False,  # Disable packing during eval for accurate loss computation
         max_length=max_seq_len,  # TRL uses max_length, not max_seq_length
 
         # Memory optimization
