@@ -113,6 +113,17 @@ def setup_torch_backends() -> None:
         # Enable cudnn benchmark for consistent input sizes
         torch.backends.cudnn.benchmark = True
 
+    # Configure torch.compile/dynamo for better compatibility with custom kernels
+    import torch._dynamo
+    # Capture scalar outputs like .item() to avoid graph breaks from Liger kernels
+    torch._dynamo.config.capture_scalar_outputs = True
+    # Treat layer_idx as dynamic to avoid recompilation per layer (32 layers = 32 recompiles)
+    torch._dynamo.config.assume_static_by_default = False
+    # Suppress excessive recompilation warnings
+    torch._dynamo.config.suppress_errors = False
+    # Increase cache size limit to handle more graph variations
+    torch._dynamo.config.cache_size_limit = 64
+
 
 def check_tokenizer_exists(tokenizer_path: str = "configs/tokenizer") -> bool:
     """Check if tokenizer exists and provide helpful message if not.

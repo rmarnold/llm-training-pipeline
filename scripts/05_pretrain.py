@@ -384,10 +384,13 @@ def setup_training(
 
     # Load model and tokenizer
     attn_impl = "flash_attention_2" if config['model']['use_flash_attention'] else "eager"
+    # Set use_cache=False when using gradient checkpointing (they're incompatible)
+    use_cache = not config['model']['gradient_checkpointing']
     model = AutoModelForCausalLM.from_pretrained(
         config['model']['checkpoint'],
         torch_dtype=torch.bfloat16,
-        attn_implementation=attn_impl
+        attn_implementation=attn_impl,
+        use_cache=use_cache,
     )
     tokenizer = AutoTokenizer.from_pretrained("configs/tokenizer")
 
