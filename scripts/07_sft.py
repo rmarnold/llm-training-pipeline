@@ -114,6 +114,135 @@ class OOMRecoveryCallback(TrainerCallback):
             logs["oom_recovery/total_events"] = self.handler.oom_count
 
 
+class EvalLossCallback(TrainerCallback):
+    """Callback to compute eval_loss for SFTTrainer since it doesn't with packing.
+
+    TRL's SFTTrainer doesn't compute eval_loss when using pre-formatted text
+    datasets. This callback manually computes it during evaluation and tracks
+    the best checkpoint for optional model selection.
+    """
+
+    def __init__(
+        self,
+        eval_dataset,
+        tokenizer,
+        max_length: int,
+        eval_batch_size: int = 2,
+        num_eval_samples: int = 500,
+        output_dir: str = "checkpoints/sft",
+    ) -> None:
+        self.eval_dataset = eval_dataset
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.eval_batch_size = eval_batch_size
+        self.num_eval_samples = min(num_eval_samples, len(eval_dataset))
+        self.output_dir = output_dir
+        self.best_eval_loss = float('inf')
+        self.best_step = 0
+
+    def _get_base_model(self, model: torch.nn.Module) -> torch.nn.Module:
+        """Unwrap compiled/distributed model wrappers to get base model."""
+        # Handle torch.compile wrapper
+        if hasattr(model, '_orig_mod'):
+            model = model._orig_mod
+        # Handle DDP/FSDP wrapper
+        if hasattr(model, 'module'):
+            model = model.module
+        return model
+
+    def on_evaluate(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        model: torch.nn.Module,
+        **kwargs: Any
+    ) -> None:
+        """Compute eval_loss manually after each evaluation."""
+        from torch.utils.data import DataLoader
+
+        base_model = self._get_base_model(model)
+        base_model.eval()
+        device = next(base_model.parameters()).device
+
+        # Sample subset for efficiency
+        eval_indices = list(range(self.num_eval_samples))
+        eval_subset = self.eval_dataset.select(eval_indices)
+
+        total_loss = 0.0
+        total_tokens = 0
+
+        with torch.no_grad():
+            for i in range(0, len(eval_subset), self.eval_batch_size):
+                batch_end = min(i + self.eval_batch_size, len(eval_subset))
+                batch_texts = [eval_subset[j]["text"] for j in range(i, batch_end)]
+
+                # Tokenize batch
+                encodings = self.tokenizer(
+                    batch_texts,
+                    truncation=True,
+                    max_length=self.max_length,
+                    padding=True,
+                    return_tensors="pt"
+                )
+
+                input_ids = encodings["input_ids"].to(device)
+                attention_mask = encodings["attention_mask"].to(device)
+
+                # Create labels (same as input_ids, with padding masked)
+                labels = input_ids.clone()
+                labels[attention_mask == 0] = -100  # Ignore padding tokens in loss
+
+                # Forward pass
+                outputs = base_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels
+                )
+
+                # Accumulate loss weighted by token count
+                num_tokens = (labels != -100).sum().item()
+                total_loss += outputs.loss.item() * num_tokens
+                total_tokens += num_tokens
+
+        # Compute average loss
+        eval_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
+
+        # Log results
+        if state.is_world_process_zero:
+            print(f"\n  📊 eval_loss: {eval_loss:.4f} (computed on {self.num_eval_samples} samples)")
+
+            # Track best model
+            if eval_loss < self.best_eval_loss:
+                improvement = self.best_eval_loss - eval_loss
+                self.best_eval_loss = eval_loss
+                self.best_step = state.global_step
+                print(f"  ✓ New best! (improved by {improvement:.4f})")
+
+                # Save best checkpoint marker
+                best_marker_path = os.path.join(self.output_dir, "best_checkpoint.txt")
+                os.makedirs(self.output_dir, exist_ok=True)
+                with open(best_marker_path, "w") as f:
+                    f.write(f"step={self.best_step}\n")
+                    f.write(f"eval_loss={self.best_eval_loss:.6f}\n")
+
+    def on_train_end(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs: Any
+    ) -> None:
+        """Print summary of best model at end of training."""
+        if state.is_world_process_zero:
+            print(f"\n{'='*60}")
+            print(f"TRAINING COMPLETE")
+            print(f"{'='*60}")
+            print(f"Best eval_loss: {self.best_eval_loss:.4f} at step {self.best_step}")
+            print(f"Best checkpoint: {self.output_dir}/checkpoint-{self.best_step}")
+            print(f"{'='*60}\n")
+
+
 def train_sft(
     use_fp8: Optional[bool] = None,
     config_path: str = "configs/sft.yaml",
@@ -234,6 +363,19 @@ def train_sft(
         processing_class=tokenizer,
     )
 
+    # Add eval_loss callback (computes eval_loss since SFTTrainer doesn't with packing)
+    output_dir = cli_overrides.get('output_dir', config['checkpointing']['output_dir'])
+    eval_callback = EvalLossCallback(
+        eval_dataset=eval_dataset,
+        tokenizer=tokenizer,
+        max_length=max_seq_len,
+        eval_batch_size=config['training']['per_device_train_batch_size'],
+        num_eval_samples=min(500, len(eval_dataset)),
+        output_dir=output_dir,
+    )
+    trainer.add_callback(eval_callback)
+    print("Eval loss tracking: ENABLED (custom callback)")
+
     # Add OOM recovery callback if enabled
     if cli_overrides.get('enable_oom_recovery', False):
         print("OOM recovery: ENABLED")
@@ -241,7 +383,29 @@ def train_sft(
 
     print("\n🚀 Starting SFT training with sequence packing...")
     trainer.train(resume_from_checkpoint=cli_overrides.get('resume_from_checkpoint'))
-    trainer.save_model(cli_overrides.get('output_dir', "checkpoints/sft_final"))
+
+    # Save final model
+    final_output_dir = cli_overrides.get('output_dir', "checkpoints/sft_final")
+    trainer.save_model(final_output_dir)
+
+    # Check if we should use the best checkpoint instead
+    best_checkpoint_file = os.path.join(output_dir, "best_checkpoint.txt")
+    if os.path.exists(best_checkpoint_file) and config['eval'].get('load_best_model_at_end', True):
+        with open(best_checkpoint_file) as f:
+            lines = f.read().strip().split('\n')
+            best_info = dict(line.split('=') for line in lines)
+            best_step = int(best_info['step'])
+            best_loss = float(best_info['eval_loss'])
+
+        best_checkpoint_path = os.path.join(output_dir, f"checkpoint-{best_step}")
+        if os.path.exists(best_checkpoint_path):
+            print(f"\n📦 Copying best checkpoint (step {best_step}, loss {best_loss:.4f}) to final output...")
+            import shutil
+            # Copy best checkpoint to final location
+            if os.path.exists(final_output_dir):
+                shutil.rmtree(final_output_dir)
+            shutil.copytree(best_checkpoint_path, final_output_dir)
+            print(f"  Best model saved to: {final_output_dir}")
 
     print("✓ SFT training complete!")
 
