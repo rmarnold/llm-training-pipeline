@@ -147,6 +147,24 @@ from gpu_utils import (
 )
 
 
+def unwrap_compiled_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Unwrap a torch.compile() wrapped model.
+
+    When a model is wrapped with torch.compile(), the original model is stored
+    in the _orig_mod attribute. This function returns the original model if
+    compiled, or the same model if not.
+
+    Args:
+        model: A potentially compiled model
+
+    Returns:
+        The unwrapped model (or the same model if not compiled)
+    """
+    if hasattr(model, '_orig_mod'):
+        return model._orig_mod
+    return model
+
+
 class OOMRecoveryCallback(TrainerCallback):
     """Callback for automatic OOM recovery during training.
 
@@ -808,8 +826,12 @@ def main() -> None:
         )
         print("🚀 Starting pretraining...")
         trainer.train(resume_from_checkpoint=cli_overrides.get('resume_from_checkpoint'))
-        trainer.save_model(cli_overrides.get('output_dir', "checkpoints/pretrain_final"))
-        print("✓ Pretraining complete!")
+
+        # Unwrap the compiled model before saving to avoid _orig_mod. prefix in state dict
+        output_dir = cli_overrides.get('output_dir', "checkpoints/pretrain_final")
+        unwrapped_model = unwrap_compiled_model(trainer.model)
+        unwrapped_model.save_pretrained(output_dir)
+        print(f"✓ Pretraining complete! Model saved to {output_dir}")
 
 if __name__ == "__main__":
     main()

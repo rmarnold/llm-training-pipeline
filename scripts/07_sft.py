@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 import sys
 from typing import Any, Dict, Optional
+from collections import OrderedDict
 
 import torch
 import yaml
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from trl import SFTTrainer, SFTConfig
 from datasets import load_from_disk
+from safetensors.torch import load_file as load_safetensors
 
 # Import GPU utilities
 from gpu_utils import (
@@ -16,6 +18,63 @@ from gpu_utils import (
     check_tokenizer_exists, check_checkpoint_exists, OOMHandler
 )
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
+
+
+def load_compiled_checkpoint(checkpoint_path: str, device_map: str = "auto") -> AutoModelForCausalLM:
+    """Load a checkpoint that may have been saved with torch.compile wrapper.
+
+    When a model is saved after torch.compile(), the state dict keys have
+    '_orig_mod.' prefix. This function handles both compiled and non-compiled
+    checkpoints transparently.
+
+    Args:
+        checkpoint_path: Path to the model checkpoint
+        device_map: Device mapping strategy
+
+    Returns:
+        Loaded model with correct weights
+    """
+    # Load config
+    config = AutoConfig.from_pretrained(checkpoint_path)
+
+    # Check for safetensors or pytorch format
+    safetensors_path = os.path.join(checkpoint_path, "model.safetensors")
+    pytorch_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+
+    if os.path.exists(safetensors_path):
+        state_dict = load_safetensors(safetensors_path)
+    elif os.path.exists(pytorch_path):
+        state_dict = torch.load(pytorch_path, map_location="cpu")
+    else:
+        # Try sharded safetensors
+        import glob
+        shard_files = sorted(glob.glob(os.path.join(checkpoint_path, "model-*.safetensors")))
+        if shard_files:
+            state_dict = {}
+            for shard in shard_files:
+                state_dict.update(load_safetensors(shard))
+        else:
+            raise FileNotFoundError(f"No model weights found in {checkpoint_path}")
+
+    # Check if state dict has _orig_mod. prefix (from torch.compile)
+    has_orig_mod = any(k.startswith("_orig_mod.") for k in state_dict.keys())
+
+    if has_orig_mod:
+        print("  Detected torch.compile checkpoint, stripping _orig_mod. prefix...")
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            if k.startswith("_orig_mod."):
+                new_key = k[len("_orig_mod."):]
+                new_state_dict[new_key] = v
+            else:
+                new_state_dict[k] = v
+        state_dict = new_state_dict
+
+    # Create model and load weights
+    model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+    model.load_state_dict(state_dict, strict=True)
+
+    return model
 
 
 class OOMRecoveryCallback(TrainerCallback):
@@ -69,12 +128,15 @@ def train_sft(
     else:
         print("  Using BF16 precision for SFT")
 
-    # Load model with Flash Attention
-    model = AutoModelForCausalLM.from_pretrained(
-        config['model']['checkpoint'],
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
-    )
+    # Load model (handles torch.compile checkpoints with _orig_mod. prefix)
+    checkpoint_path = config['model']['checkpoint']
+    print(f"Loading checkpoint from {checkpoint_path}...")
+    model = load_compiled_checkpoint(checkpoint_path)
+
+    # Enable Flash Attention
+    if hasattr(model.config, 'attn_implementation'):
+        model.config.attn_implementation = "flash_attention_2"
+
     tokenizer = AutoTokenizer.from_pretrained("configs/tokenizer")
 
     # Enable gradient checkpointing with non-reentrant mode
@@ -106,6 +168,7 @@ def train_sft(
     eval_dataset = load_from_disk(eval_data_path)
 
     # Use SFTConfig for packing support (up to 6x speedup)
+    max_seq_len = config['data']['max_seq_length']
     training_args = SFTConfig(
         output_dir=cli_overrides.get('output_dir', config['checkpointing']['output_dir']),
         run_name=config['run_name'],
@@ -124,7 +187,7 @@ def train_sft(
 
         # Sequence packing - up to 6x speedup by eliminating padding waste
         packing=True,
-        max_seq_length=config['data']['max_seq_length'],
+        max_length=max_seq_len,  # TRL uses max_length, not max_seq_length
 
         # Memory optimization
         gradient_checkpointing=True,
@@ -136,10 +199,8 @@ def train_sft(
         dataloader_prefetch_factor=4,
         dataloader_persistent_workers=True,
 
-        # PyTorch 2.x compilation
-        torch_compile=True,
-        torch_compile_backend="inductor",
-        torch_compile_mode=gpu_info['compile_mode'],
+        # PyTorch 2.x compilation - disabled for SFT (compile after loading weights)
+        torch_compile=False,  # We compile manually after loading
     )
 
     print(f"\nSFT Configuration:")
