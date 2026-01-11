@@ -159,51 +159,78 @@ class EvalLossCallback(TrainerCallback):
         **kwargs: Any
     ) -> None:
         """Compute eval_loss manually after each evaluation."""
-        from torch.utils.data import DataLoader
-
         base_model = self._get_base_model(model)
+        was_training = base_model.training
         base_model.eval()
         device = next(base_model.parameters()).device
 
-        # Sample subset for efficiency
-        eval_indices = list(range(self.num_eval_samples))
-        eval_subset = self.eval_dataset.select(eval_indices)
+        # Sample subset for efficiency - get all texts upfront
+        eval_subset = self.eval_dataset.select(range(self.num_eval_samples))
+        all_texts = eval_subset["text"]
+
+        # Filter out empty texts
+        all_texts = [t for t in all_texts if t and isinstance(t, str) and len(t.strip()) > 10]
+
+        if not all_texts:
+            if state.is_world_process_zero:
+                print(f"\n  ⚠️  No valid eval texts found, skipping eval_loss computation")
+            return
 
         total_loss = 0.0
         total_tokens = 0
+        num_batches = 0
 
         with torch.no_grad():
-            for i in range(0, len(eval_subset), self.eval_batch_size):
-                batch_end = min(i + self.eval_batch_size, len(eval_subset))
-                batch_texts = [eval_subset[j]["text"] for j in range(i, batch_end)]
+            for i in range(0, len(all_texts), self.eval_batch_size):
+                batch_texts = all_texts[i:i + self.eval_batch_size]
 
-                # Tokenize batch
-                encodings = self.tokenizer(
-                    batch_texts,
-                    truncation=True,
-                    max_length=self.max_length,
-                    padding=True,
-                    return_tensors="pt"
-                )
+                if not batch_texts:
+                    continue
 
-                input_ids = encodings["input_ids"].to(device)
-                attention_mask = encodings["attention_mask"].to(device)
+                try:
+                    # Tokenize batch
+                    encodings = self.tokenizer(
+                        batch_texts,
+                        truncation=True,
+                        max_length=self.max_length,
+                        padding=True,
+                        return_tensors="pt"
+                    )
 
-                # Create labels (same as input_ids, with padding masked)
-                labels = input_ids.clone()
-                labels[attention_mask == 0] = -100  # Ignore padding tokens in loss
+                    input_ids = encodings["input_ids"].to(device)
+                    attention_mask = encodings["attention_mask"].to(device)
 
-                # Forward pass
-                outputs = base_model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels
-                )
+                    # Skip if no tokens
+                    if input_ids.numel() == 0 or input_ids.shape[1] == 0:
+                        continue
 
-                # Accumulate loss weighted by token count
-                num_tokens = (labels != -100).sum().item()
-                total_loss += outputs.loss.item() * num_tokens
-                total_tokens += num_tokens
+                    # Create labels (same as input_ids, with padding masked)
+                    labels = input_ids.clone()
+                    labels[attention_mask == 0] = -100  # Ignore padding tokens in loss
+
+                    # Forward pass
+                    outputs = base_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels
+                    )
+
+                    # Accumulate loss weighted by token count
+                    num_tokens = (labels != -100).sum().item()
+                    if num_tokens > 0:
+                        total_loss += outputs.loss.item() * num_tokens
+                        total_tokens += num_tokens
+                        num_batches += 1
+
+                except Exception as e:
+                    # Skip problematic batches but continue evaluation
+                    if state.is_world_process_zero and num_batches == 0:
+                        print(f"  Warning: Skipping batch due to error: {e}")
+                    continue
+
+        # Restore training mode if needed
+        if was_training:
+            base_model.train()
 
         # Compute average loss
         eval_loss = total_loss / total_tokens if total_tokens > 0 else float('inf')
