@@ -3,7 +3,14 @@ from transformers import AutoTokenizer
 import yaml
 
 def format_conversation(example, tokenizer):
-    """Format multi-turn conversations with special tokens"""
+    """Format multi-turn conversations with special tokens.
+
+    Supports multiple dataset formats:
+    - ShareGPT: {"messages": [{"role": "user", "content": "..."}, ...]}
+    - Alpaca: {"instruction": "...", "input": "...", "output": "..."}
+    - Dolly: {"instruction": "...", "context": "...", "response": "..."}
+    - OASST: {"instruction": "...", "response": "..."}
+    """
     conversation = []
 
     if "messages" in example:
@@ -18,12 +25,16 @@ def format_conversation(example, tokenizer):
                 conversation.append(f"<|assistant|>\n{content}<|endoftext|>")
 
     elif "instruction" in example:
-        # Alpaca format
+        # Alpaca/Dolly/OASST format
         instruction = example["instruction"]
-        response = example["output"]
 
-        if example.get("input"):
-            instruction = f"{instruction}\n{example['input']}"
+        # Handle different response field names
+        response = example.get("output") or example.get("response") or ""
+
+        # Handle different input/context field names
+        context = example.get("input") or example.get("context") or ""
+        if context:
+            instruction = f"{instruction}\n\nContext: {context}"
 
         conversation.append(f"<|user|>\n{instruction}\n")
         conversation.append(f"<|assistant|>\n{response}<|endoftext|>")
