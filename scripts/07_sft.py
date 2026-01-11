@@ -5,6 +5,14 @@ import sys
 from typing import Any, Dict, Optional
 from collections import OrderedDict
 
+# Default wandb to offline mode (avoids interactive prompt)
+# Set WANDB_MODE=online explicitly to enable cloud sync
+if 'WANDB_MODE' not in os.environ:
+    os.environ['WANDB_MODE'] = 'offline'
+
+# Disable tokenizers parallelism warning when using dataloader workers
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 import torch
 import yaml
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
@@ -20,7 +28,10 @@ from gpu_utils import (
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 
 
-def load_compiled_checkpoint(checkpoint_path: str, device_map: str = "auto") -> AutoModelForCausalLM:
+def load_compiled_checkpoint(
+    checkpoint_path: str,
+    use_flash_attention: bool = True
+) -> AutoModelForCausalLM:
     """Load a checkpoint that may have been saved with torch.compile wrapper.
 
     When a model is saved after torch.compile(), the state dict keys have
@@ -29,7 +40,7 @@ def load_compiled_checkpoint(checkpoint_path: str, device_map: str = "auto") -> 
 
     Args:
         checkpoint_path: Path to the model checkpoint
-        device_map: Device mapping strategy
+        use_flash_attention: Enable Flash Attention 2 (required for packing)
 
     Returns:
         Loaded model with correct weights
@@ -70,9 +81,17 @@ def load_compiled_checkpoint(checkpoint_path: str, device_map: str = "auto") -> 
                 new_state_dict[k] = v
         state_dict = new_state_dict
 
-    # Create model and load weights
-    model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+    # Create model with flash attention (required for packing to avoid cross-contamination)
+    attn_impl = "flash_attention_2" if use_flash_attention else "eager"
+    model = AutoModelForCausalLM.from_config(
+        config,
+        torch_dtype=torch.bfloat16,
+        attn_implementation=attn_impl,
+    )
     model.load_state_dict(state_dict, strict=True)
+
+    if use_flash_attention:
+        print(f"  Flash Attention 2: ENABLED (required for packing)")
 
     return model
 
@@ -131,11 +150,7 @@ def train_sft(
     # Load model (handles torch.compile checkpoints with _orig_mod. prefix)
     checkpoint_path = config['model']['checkpoint']
     print(f"Loading checkpoint from {checkpoint_path}...")
-    model = load_compiled_checkpoint(checkpoint_path)
-
-    # Enable Flash Attention
-    if hasattr(model.config, 'attn_implementation'):
-        model.config.attn_implementation = "flash_attention_2"
+    model = load_compiled_checkpoint(checkpoint_path, use_flash_attention=True)
 
     tokenizer = AutoTokenizer.from_pretrained("configs/tokenizer")
 
