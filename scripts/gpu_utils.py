@@ -107,9 +107,17 @@ def get_fp8_accelerator(gradient_accumulation_steps: int = 4):
 def setup_torch_backends() -> None:
     """Configure PyTorch backends for optimal performance."""
     if torch.cuda.is_available():
-        # Enable TF32 for faster matmul on Ampere+
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        # Enable TF32 for faster matmul on Ampere+ (new API for PyTorch 2.9+)
+        # 'tf32' = use TensorFloat-32 for faster computation
+        # 'ieee' = use full IEEE fp32 precision
+        try:
+            # New API (PyTorch 2.9+)
+            torch.backends.cuda.matmul.fp32_precision = 'tf32'
+            torch.backends.cudnn.conv.fp32_precision = 'tf32'
+        except AttributeError:
+            # Fallback for older PyTorch versions
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         # Enable cudnn benchmark for consistent input sizes
         torch.backends.cudnn.benchmark = True
 
