@@ -28,6 +28,24 @@ from gpu_utils import (
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 
 
+def unwrap_compiled_model(model: torch.nn.Module) -> torch.nn.Module:
+    """Unwrap a torch.compile() wrapped model.
+
+    When a model is wrapped with torch.compile(), the original model is stored
+    in the _orig_mod attribute. This function returns the original model if
+    compiled, or the same model if not.
+
+    Args:
+        model: A potentially compiled model
+
+    Returns:
+        The unwrapped model (or the same model if not compiled)
+    """
+    if hasattr(model, '_orig_mod'):
+        return model._orig_mod
+    return model
+
+
 def load_compiled_checkpoint(
     checkpoint_path: str,
     use_flash_attention: bool = True
@@ -411,9 +429,12 @@ def train_sft(
     print("\n🚀 Starting SFT training with sequence packing...")
     trainer.train(resume_from_checkpoint=cli_overrides.get('resume_from_checkpoint'))
 
-    # Save final model
+    # Save final model - unwrap compiled model to avoid _orig_mod. prefix in state dict
     final_output_dir = cli_overrides.get('output_dir', "checkpoints/sft_final")
-    trainer.save_model(final_output_dir)
+    print(f"\nSaving model to {final_output_dir}...")
+    unwrapped_model = unwrap_compiled_model(trainer.model)
+    unwrapped_model.save_pretrained(final_output_dir)
+    tokenizer.save_pretrained(final_output_dir)
 
     # Check if we should use the best checkpoint instead
     best_checkpoint_file = os.path.join(output_dir, "best_checkpoint.txt")
