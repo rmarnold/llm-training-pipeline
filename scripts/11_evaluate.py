@@ -1,15 +1,88 @@
 """Evaluation suite for trained LLM models."""
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from datasets import load_dataset
 import json
 import os
 import signal
 import functools
+import glob
+from collections import OrderedDict
 from contextlib import contextmanager
 
 # Create evals directory if it doesn't exist
 os.makedirs("evals", exist_ok=True)
+
+
+def load_compiled_checkpoint(checkpoint_path, use_flash_attention=True):
+    """Load a checkpoint that may have been saved with torch.compile wrapper.
+
+    When a model is saved after torch.compile(), the state dict keys have
+    '_orig_mod.' prefix. This function handles both compiled and non-compiled
+    checkpoints transparently.
+
+    Args:
+        checkpoint_path: Path to the model checkpoint
+        use_flash_attention: Enable Flash Attention 2
+
+    Returns:
+        Loaded model with correct weights
+    """
+    from safetensors.torch import load_file as load_safetensors
+
+    # Load config
+    config = AutoConfig.from_pretrained(checkpoint_path, local_files_only=True)
+
+    # Check for safetensors or pytorch format
+    safetensors_path = os.path.join(checkpoint_path, "model.safetensors")
+    pytorch_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+
+    if os.path.exists(safetensors_path):
+        state_dict = load_safetensors(safetensors_path)
+    elif os.path.exists(pytorch_path):
+        state_dict = torch.load(pytorch_path, map_location="cpu")
+    else:
+        # Try sharded safetensors
+        shard_files = sorted(glob.glob(os.path.join(checkpoint_path, "model-*.safetensors")))
+        if shard_files:
+            state_dict = {}
+            for shard in shard_files:
+                state_dict.update(load_safetensors(shard))
+        else:
+            raise FileNotFoundError(f"No model weights found in {checkpoint_path}")
+
+    # Check if state dict has _orig_mod. prefix (from torch.compile)
+    has_orig_mod = any(k.startswith("_orig_mod.") for k in state_dict.keys())
+
+    if has_orig_mod:
+        print("  Detected torch.compile checkpoint, stripping _orig_mod. prefix...")
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            if k.startswith("_orig_mod."):
+                new_key = k[len("_orig_mod."):]
+                new_state_dict[new_key] = v
+            else:
+                new_state_dict[k] = v
+        state_dict = new_state_dict
+
+    # Create model with optional flash attention
+    attn_impl = "flash_attention_2" if use_flash_attention else "eager"
+    try:
+        model = AutoModelForCausalLM.from_config(
+            config,
+            torch_dtype=torch.bfloat16,
+            attn_implementation=attn_impl,
+        )
+    except Exception:
+        # Fall back to eager attention if flash attention fails
+        model = AutoModelForCausalLM.from_config(
+            config,
+            torch_dtype=torch.bfloat16,
+            attn_implementation="eager",
+        )
+
+    model.load_state_dict(state_dict, strict=True)
+    return model.to("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class TimeoutError(Exception):
@@ -98,12 +171,9 @@ class EvaluationSuite:
                 f"Please ensure the model has been trained and saved to this location."
             )
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            local_files_only=True
-        )
+        # Use load_compiled_checkpoint to handle _orig_mod. prefix from torch.compile
+        print(f"Loading model from {model_path}...")
+        self.model = load_compiled_checkpoint(model_path, use_flash_attention=True)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
         self.model.eval()
         self.timeouts = {**self.DEFAULT_TIMEOUTS, **(timeouts or {})}
