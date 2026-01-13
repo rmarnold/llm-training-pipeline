@@ -430,7 +430,12 @@ def train_sft(
     trainer.train(resume_from_checkpoint=cli_overrides.get('resume_from_checkpoint'))
 
     # Save final model - unwrap compiled model to avoid _orig_mod. prefix in state dict
-    final_output_dir = cli_overrides.get('output_dir', "checkpoints/sft_final")
+    # Always derive final_output_dir from output_dir by appending _final
+    # This ensures sft_final is created even if --output_dir is specified
+    if output_dir.endswith('_final'):
+        final_output_dir = output_dir
+    else:
+        final_output_dir = f"{output_dir.rstrip('/')}_final"
     print(f"\nSaving model to {final_output_dir}...")
     unwrapped_model = unwrap_compiled_model(trainer.model)
     unwrapped_model.save_pretrained(final_output_dir)
