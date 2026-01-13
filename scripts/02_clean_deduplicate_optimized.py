@@ -2008,12 +2008,26 @@ def process_single_file(
     output_filename = filename.replace('.parquet', '_clean.parquet')
     output_path = os.path.join(output_dir, output_filename)
 
-    # Skip if already fully processed
+    # Skip if already fully processed (check local first, then Drive)
     if os.path.exists(output_path):
         print(f"Skipping {filename} (already processed)")
         # Read to get stats
         df = pd.read_parquet(output_path)
         return filename, len(df), len(df)
+
+    # Check Drive for completed output if local doesn't exist
+    # This handles Colab restarts where local SSD is wiped but Drive has the data
+    if drive_dir and not os.path.exists(output_path):
+        drive_output_path = os.path.join(drive_dir, output_filename)
+        if os.path.exists(drive_output_path):
+            import shutil
+            print(f"Restoring {output_filename} from Google Drive...")
+            os.makedirs(output_dir, exist_ok=True)
+            shutil.copy2(drive_output_path, output_path)
+            if os.path.exists(output_path):
+                print(f"Skipping {filename} (restored from Drive)")
+                df = pd.read_parquet(output_path)
+                return filename, len(df), len(df)
 
     print(f"\nProcessing {filename}...")
     file_hash = checkpoint.get_file_hash(input_path) if checkpoint else ""
