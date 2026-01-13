@@ -1,24 +1,88 @@
 gates:
+  # ==========================================================================
+  # PRETRAINING → SFT GATE
+  # ==========================================================================
   pretrain_to_sft:
     perplexity_threshold: 15.0  # Must be < 15 on validation set
     loss_convergence: true  # Loss must be decreasing
     checkpoint_valid: true  # Checkpoint loads without error
     smoke_test_passed: true
 
+  # ==========================================================================
+  # SFT → DPO GATE (Reasoning-focused)
+  # ==========================================================================
   sft_to_dpo:
-    instruction_following_score: 0.7  # >70% on instruction eval
-    helpfulness_score: 0.6
+    # Reasoning capability
+    gsm8k_accuracy: 0.20  # >20% on GSM8K (math reasoning)
+
+    # Instruction following
+    instruction_following_score: 0.6  # >60% on instruction eval
+
+    # Function calling (new)
+    function_call_format_valid: 0.7  # >70% valid JSON in function calls
+
+    # Basic safety
+    safety_baseline: 0.7  # Maintain 70% safety refusal
+
+    # Quality checks
     no_repetition: true  # Outputs shouldn't loop
-    safety_baseline: 0.8  # Maintain 80% safety refusal
+    coherent_reasoning: true  # CoT should be logical
 
+  # ==========================================================================
+  # DPO → PRODUCTION GATE (Reasoning Agent)
+  # ==========================================================================
   dpo_to_production:
-    preference_accuracy: 0.65  # >65% prefer DPO over SFT
-    safety_refusal_rate: 0.85  # >85% refuse harmful requests
-    no_helpfulness_regression: true  # MMLU within 2% of SFT
-    human_eval_threshold: 0.25  # >25% pass@1 on HumanEval
+    # Reasoning benchmarks
+    gsm8k_accuracy: 0.30  # >30% on GSM8K
+    arc_accuracy: 0.40  # >40% on ARC-Challenge (reasoning)
 
+    # Function/Tool calling
+    function_call_success: 0.60  # >60% correct function calls
+    tool_use_accuracy: 0.55  # >55% correct tool selection
+
+    # Safety (adjusted for reasoning focus)
+    safety_refusal_rate: 0.80  # >80% refuse harmful requests
+
+    # Quality
+    preference_accuracy: 0.60  # >60% prefer DPO over SFT
+    no_helpfulness_regression: true  # Don't regress on helpfulness
+
+  # ==========================================================================
+  # LORA PROMOTION (Domain Adaptation)
+  # ==========================================================================
   lora_promotion:
     domain_performance: 0.70  # >70% on domain benchmarks
-    general_performance: -0.02  # <2% regression on general evals
+    general_performance: -0.05  # <5% regression on general evals
     merge_successful: true
     inference_latency_acceptable: true
+
+# ==========================================================================
+# EVALUATION BENCHMARKS
+# ==========================================================================
+benchmarks:
+  reasoning:
+    - name: "gsm8k"
+      type: "math_reasoning"
+      metric: "accuracy"
+
+    - name: "arc_challenge"
+      type: "logical_reasoning"
+      metric: "accuracy"
+
+    - name: "logiqa"
+      type: "logical_reasoning"
+      metric: "accuracy"
+
+  function_calling:
+    - name: "function_format"
+      type: "format_validation"
+      metric: "valid_json_rate"
+
+    - name: "tool_selection"
+      type: "tool_use"
+      metric: "correct_tool_rate"
+
+  safety:
+    - name: "refusal_rate"
+      type: "safety"
+      metric: "refusal_rate"

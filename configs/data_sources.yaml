@@ -1,59 +1,215 @@
 datasets:
+  # ==========================================================================
+  # PRETRAINING DATA (~100B+ tokens for 1B model from scratch)
+  # ==========================================================================
   pretraining:
+    # SlimPajama - cleaned RedPajama, 627B tokens total
+    - name: "slimpajama-chunk1"
+      source: "cerebras/SlimPajama-627B"
+      subset: "train"
+      license: "Apache-2.0"
+      tokens: 50B  # Use first ~50B tokens
+      weight: 0.08
+      streaming: true
+
+    # RedPajama-Data-v2 - high quality web + books + code
+    - name: "redpajama-sample"
+      source: "togethercomputer/RedPajama-Data-1T-Sample"
+      license: "Apache-2.0"
+      tokens: 1B
+      weight: 1.0
+
+    # The Stack - code data (helps with structured reasoning)
+    - name: "the-stack-python"
+      source: "bigcode/the-stack-dedup"
+      subset: "data/python"
+      license: "Apache-2.0"
+      tokens: 10B
+      weight: 0.5
+
+    # Wikipedia - factual grounding
     - name: "wikipedia-en"
       source: "wikimedia/wikipedia"
       version: "20231101.en"
       license: "CC-BY-SA-3.0"
       tokens: 3.5B
-      weight: 0.30
+      weight: 1.0
 
+    # OpenWebText - web text
     - name: "openwebtext"
       source: "Skylion007/openwebtext"
       license: "CC0"
       tokens: 8B
-      weight: 0.55
+      weight: 0.7
 
-    - name: "wikitext"
-      source: "wikitext"
-      version: "wikitext-103-v1"
-      license: "CC-BY-SA-3.0"
-      tokens: 0.5B
-      weight: 0.15
+    # Books/Literature - long-form coherent text
+    - name: "pg19"
+      source: "deepmind/pg19"
+      license: "Apache-2.0"
+      tokens: 3B
+      weight: 0.8
 
+    # ArXiv papers - scientific/technical reasoning
+    - name: "arxiv-sample"
+      source: "togethercomputer/RedPajama-Data-1T"
+      subset: "arxiv"
+      license: "Apache-2.0"
+      tokens: 2B
+      weight: 0.3
+
+    # StackExchange - Q&A reasoning patterns
+    - name: "stackexchange"
+      source: "HuggingFaceH4/stack-exchange-preferences"
+      license: "CC-BY-SA-4.0"
+      tokens: 1B
+      weight: 0.5
+
+  # ==========================================================================
+  # REASONING DATA (for SFT - chain-of-thought, math, logic)
+  # ==========================================================================
+  reasoning:
+    - name: "gsm8k"
+      source: "openai/gsm8k"
+      subset: "main"
+      license: "MIT"
+      samples: 7.5K
+      weight: 1.0
+      format: "gsm8k"
+
+    - name: "orca-math"
+      source: "microsoft/orca-math-word-problems-200k"
+      license: "MIT"
+      samples: 200K
+      weight: 0.8
+      format: "orca-math"
+
+    - name: "openorca"
+      source: "Open-Orca/OpenOrca"
+      license: "MIT"
+      samples: 4.2M
+      weight: 0.3
+      format: "openorca"
+
+    - name: "cot-collection"
+      source: "kaist-ai/CoT-Collection"
+      license: "Apache-2.0"
+      samples: 1.8M
+      weight: 0.5
+      format: "cot-collection"
+
+    - name: "metamath"
+      source: "meta-math/MetaMathQA"
+      license: "MIT"
+      samples: 395K
+      weight: 0.7
+      format: "metamath"
+
+  # ==========================================================================
+  # FUNCTION/TOOL CALLING DATA
+  # ==========================================================================
+  function_calling:
+    - name: "glaive-function-calling"
+      source: "glaiveai/glaive-function-calling-v2"
+      license: "Apache-2.0"
+      samples: 113K
+      weight: 1.0
+      format: "glaive"
+
+    - name: "hermes-function-calling"
+      source: "NousResearch/hermes-function-calling-v1"
+      license: "Apache-2.0"
+      samples: 11K
+      weight: 1.0
+      format: "hermes"
+
+    - name: "toolbench"
+      source: "ToolBench/ToolBench"
+      license: "Apache-2.0"
+      samples: 126K
+      weight: 0.8
+      format: "toolbench"
+
+  # ==========================================================================
+  # LOGIC AND STRUCTURED REASONING
+  # ==========================================================================
+  logic:
+    - name: "logiqa"
+      source: "lucasmccabe/logiqa"
+      license: "Apache-2.0"
+      samples: 8K
+      weight: 1.0
+      format: "logiqa"
+
+    - name: "reclor"
+      source: "metaeval/reclor"
+      license: "Apache-2.0"
+      samples: 6K
+      weight: 1.0
+      format: "logiqa"
+
+  # ==========================================================================
+  # INSTRUCTION FOLLOWING (general capability)
+  # ==========================================================================
   instruction_tuning:
     - name: "oasst1"
       source: "OpenAssistant/oasst1"
       license: "Apache-2.0"
       samples: 88K
-      weight: 0.40
-
-    - name: "dolly-15k"
-      source: "databricks/databricks-dolly-15k"
-      license: "CC-BY-SA-3.0"
-      samples: 15K
-      weight: 0.30
+      weight: 0.5
+      format: "oasst"
 
     - name: "alpaca-cleaned"
       source: "yahma/alpaca-cleaned"
       license: "CC-BY-NC-4.0"
       samples: 52K
-      weight: 0.30
+      weight: 0.3
+      format: "alpaca"
 
+    - name: "dolly-15k"
+      source: "databricks/databricks-dolly-15k"
+      license: "CC-BY-SA-3.0"
+      samples: 15K
+      weight: 0.4
+      format: "alpaca"
+
+  # ==========================================================================
+  # PREFERENCE DATA (for DPO)
+  # ==========================================================================
   preference_data:
     - name: "hh-rlhf"
       source: "Anthropic/hh-rlhf"
       license: "MIT"
       samples: 169K
-      weight: 0.60
+      weight: 1.0
 
     - name: "ultrafeedback"
       source: "openbmb/UltraFeedback"
       license: "MIT"
       samples: 64K
-      weight: 0.40
+      weight: 0.6
 
 governance:
   pii_detection: true
   toxicity_threshold: 0.7
   deduplication: "minhash"
-  contamination_check: ["MMLU", "HumanEval", "TruthfulQA"]
+  contamination_check: ["MMLU", "HumanEval", "GSM8K", "ARC"]
+
+# ==========================================================================
+# TRAINING RECOMMENDATIONS FOR 1B MODEL FROM SCRATCH
+# ==========================================================================
+#
+# Target: ~100B tokens for compute-optimal 1B training
+#
+# Phase 1 - Pretraining:
+#   - Use SlimPajama + Wikipedia + OpenWebText + Code
+#   - ~80-100B tokens
+#   - Train for ~50K-100K steps with batch size 512
+#
+# Phase 2 - SFT:
+#   - reasoning + function_calling + logic + instruction_tuning
+#   - ~2-3M high-quality examples
+#   - 3 epochs
+#
+# Phase 3 - DPO:
+#   - hh-rlhf + ultrafeedback
+#   - 1 epoch, low learning rate

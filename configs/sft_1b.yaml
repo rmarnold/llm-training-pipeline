@@ -1,0 +1,66 @@
+# ==========================================================================
+# SFT CONFIG FOR 1B REASONING MODEL
+# ==========================================================================
+# Focus: Reasoning, chain-of-thought, function/tool calling
+#
+# Expected time (A100 80GB):
+#   - 3 epochs on ~2M samples: ~8-12 hours
+#
+# Expected outcomes:
+#   - GSM8K accuracy > 20%
+#   - Function call format validity > 70%
+#   - Coherent reasoning chains
+# ==========================================================================
+
+run_name: "llm-1b-reasoning-sft"
+
+model:
+  checkpoint: "checkpoints/pretrain_1b_final"
+  gradient_checkpointing: true
+
+data:
+  train_data: "data/sft/train"
+  val_data: "data/sft/val"
+  max_seq_length: 2048
+  packing: true  # Enable sequence packing for efficiency
+  num_workers: 8
+  persistent_workers: true
+  pin_memory: true
+
+training:
+  num_train_epochs: 3
+  learning_rate: 2.0e-5  # Lower than pretraining
+  lr_scheduler: "cosine"
+  warmup_ratio: 0.03
+
+  per_device_train_batch_size: 8
+  gradient_accumulation_steps: 4  # effective batch = 32
+
+  bf16: true
+  max_grad_norm: 1.0
+  weight_decay: 0.0  # No weight decay for SFT
+
+  optim: "adamw_torch_fused"
+  fsdp: "full_shard auto_wrap"
+
+  # PyTorch 2.x optimizations
+  torch_compile: true
+  torch_compile_backend: "inductor"
+  torch_compile_mode: "default"
+
+logging:
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 200
+  save_total_limit: 3
+
+eval:
+  evaluation_strategy: "steps"
+  eval_steps: 100
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  load_best_model_at_end: true
+
+checkpointing:
+  output_dir: "checkpoints/sft_1b"
+  save_strategy: "steps"
