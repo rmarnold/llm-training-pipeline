@@ -88,12 +88,23 @@ class EvaluationSuite:
             tokenizer_path: Path to tokenizer
             timeouts: Optional dict of timeouts per evaluation type
         """
+        # Convert to absolute path to ensure it's treated as local, not HF Hub
+        model_path = os.path.abspath(model_path)
+        tokenizer_path = os.path.abspath(tokenizer_path)
+
+        if not os.path.isdir(model_path):
+            raise FileNotFoundError(
+                f"Model checkpoint not found at: {model_path}\n"
+                f"Please ensure the model has been trained and saved to this location."
+            )
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
-            device_map="auto"
+            device_map="auto",
+            local_files_only=True
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=True)
         self.model.eval()
         self.timeouts = {**self.DEFAULT_TIMEOUTS, **(timeouts or {})}
 
