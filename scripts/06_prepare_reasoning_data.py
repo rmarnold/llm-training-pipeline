@@ -254,15 +254,80 @@ def format_toolbench(example):
     return {"text": "".join(parts)}
 
 
+def format_mathinstruct(example):
+    """Format MathInstruct dataset (replaces CoT-Collection).
+
+    MathInstruct format: {"instruction": "...", "output": "..."}
+    Contains math problems with step-by-step solutions.
+    """
+    instruction = example.get("instruction", "")
+    output = example.get("output", "")
+
+    return {
+        "text": f"<|user|>\n{instruction}\n<|assistant|>\n{output}<|endoftext|>"
+    }
+
+
+def format_gorilla(example):
+    """Format Gorilla OpenFunctions dataset.
+
+    Format: {"question": "...", "function": [...], "answer": "..."}
+    """
+    question = example.get("question", example.get("instruction", ""))
+    answer = example.get("answer", example.get("output", ""))
+    functions = example.get("function", [])
+
+    if functions:
+        import json
+        func_str = json.dumps(functions, indent=2) if isinstance(functions, list) else str(functions)
+        prompt = f"Available functions:\n{func_str}\n\nUser request: {question}"
+    else:
+        prompt = question
+
+    return {
+        "text": f"<|user|>\n{prompt}\n<|assistant|>\n{answer}<|endoftext|>"
+    }
+
+
+def format_arc(example):
+    """Format ARC Challenge dataset.
+
+    ARC format: {"question": "...", "choices": {"text": [...], "label": [...]}, "answerKey": "..."}
+    """
+    question = example.get("question", "")
+    choices = example.get("choices", {})
+    answer_key = example.get("answerKey", "")
+
+    # Format choices
+    choice_texts = choices.get("text", [])
+    choice_labels = choices.get("label", [])
+
+    choices_str = "\n".join([f"{label}. {text}" for label, text in zip(choice_labels, choice_texts)])
+
+    # Find correct answer text
+    correct_idx = choice_labels.index(answer_key) if answer_key in choice_labels else 0
+    correct_text = choice_texts[correct_idx] if correct_idx < len(choice_texts) else ""
+
+    prompt = f"{question}\n\nChoices:\n{choices_str}"
+    response = f"The answer is {answer_key}. {correct_text}"
+
+    return {
+        "text": f"<|user|>\n{prompt}\n<|assistant|>\n{response}<|endoftext|>"
+    }
+
+
 # Format dispatcher
 FORMAT_HANDLERS = {
     "gsm8k": format_gsm8k,
     "orca-math": format_orca_math,
     "openorca": format_openorca,
     "cot-collection": format_cot_collection,
+    "mathinstruct": format_mathinstruct,
     "glaive": format_glaive_function_calling,
     "hermes": format_hermes_function_calling,
+    "gorilla": format_gorilla,
     "logiqa": format_logiqa,
+    "arc": format_arc,
     "alpaca": format_alpaca,
     "oasst": format_oasst,
     "metamath": format_metamath,

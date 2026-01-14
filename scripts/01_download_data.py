@@ -47,7 +47,6 @@ def download_streaming_dataset(ds_config, output_path, max_samples=None):
             subset,
             split="train",
             streaming=True,
-            trust_remote_code=True,
         )
     except Exception as e:
         print(f"  Error loading stream: {e}")
@@ -110,7 +109,6 @@ def download_regular_dataset(ds_config, output_path, max_samples=None):
                     split="train",
                     cache_dir="data/cache",
                     download_config=download_config,
-                    trust_remote_code=True,
                 )
             except Exception as e:
                 if attempt < max_retries - 1:

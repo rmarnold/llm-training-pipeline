@@ -8,7 +8,7 @@ datasets:
       source: "cerebras/SlimPajama-627B"
       subset: "train"
       license: "Apache-2.0"
-      tokens: 50B  # Use first ~50B tokens
+      tokens: 50B
       weight: 0.08
       streaming: true
 
@@ -18,14 +18,6 @@ datasets:
       license: "Apache-2.0"
       tokens: 1B
       weight: 1.0
-
-    # The Stack - code data (helps with structured reasoning)
-    - name: "the-stack-python"
-      source: "bigcode/the-stack-dedup"
-      subset: "data/python"
-      license: "Apache-2.0"
-      tokens: 10B
-      weight: 0.5
 
     # Wikipedia - factual grounding
     - name: "wikipedia-en"
@@ -49,33 +41,20 @@ datasets:
       tokens: 3B
       weight: 0.8
 
-    # ArXiv papers - scientific/technical reasoning
-    - name: "arxiv-sample"
-      source: "togethercomputer/RedPajama-Data-1T"
-      subset: "arxiv"
-      license: "Apache-2.0"
-      tokens: 2B
-      weight: 0.3
-
-    # StackExchange - Q&A reasoning patterns
-    - name: "stackexchange"
-      source: "HuggingFaceH4/stack-exchange-preferences"
-      license: "CC-BY-SA-4.0"
-      tokens: 1B
-      weight: 0.5
-
   # ==========================================================================
   # REASONING DATA (for SFT - chain-of-thought, math, logic)
   # ==========================================================================
   reasoning:
+    # GSM8K - Grade school math with solutions
     - name: "gsm8k"
-      source: "openai/gsm8k"
+      source: "gsm8k"
       subset: "main"
       license: "MIT"
       samples: 7.5K
       weight: 1.0
       format: "gsm8k"
 
+    # Orca Math - Synthetic math problems
     - name: "orca-math"
       source: "microsoft/orca-math-word-problems-200k"
       license: "MIT"
@@ -83,6 +62,7 @@ datasets:
       weight: 0.8
       format: "orca-math"
 
+    # OpenOrca - GPT-4 distillation (large, sample 30%)
     - name: "openorca"
       source: "Open-Orca/OpenOrca"
       license: "MIT"
@@ -90,13 +70,15 @@ datasets:
       weight: 0.3
       format: "openorca"
 
-    - name: "cot-collection"
-      source: "kaist-ai/CoT-Collection"
+    # MathInstruct - Replaces CoT-Collection (same purpose, works)
+    - name: "mathinstruct"
+      source: "TIGER-Lab/MathInstruct"
       license: "Apache-2.0"
-      samples: 1.8M
-      weight: 0.5
-      format: "cot-collection"
+      samples: 262K
+      weight: 0.7
+      format: "mathinstruct"
 
+    # MetaMath - Augmented math problems
     - name: "metamath"
       source: "meta-math/MetaMathQA"
       license: "MIT"
@@ -108,6 +90,7 @@ datasets:
   # FUNCTION/TOOL CALLING DATA
   # ==========================================================================
   function_calling:
+    # Glaive function calling
     - name: "glaive-function-calling"
       source: "glaiveai/glaive-function-calling-v2"
       license: "Apache-2.0"
@@ -115,6 +98,7 @@ datasets:
       weight: 1.0
       format: "glaive"
 
+    # Hermes function calling
     - name: "hermes-function-calling"
       source: "NousResearch/hermes-function-calling-v1"
       license: "Apache-2.0"
@@ -122,30 +106,34 @@ datasets:
       weight: 1.0
       format: "hermes"
 
-    - name: "toolbench"
-      source: "ToolBench/ToolBench"
+    # Gorilla OpenFunctions - Replaces ToolBench (better maintained)
+    - name: "gorilla-openfunctions"
+      source: "gorilla-llm/Berkeley-Function-Calling-Leaderboard"
       license: "Apache-2.0"
-      samples: 126K
-      weight: 0.8
-      format: "toolbench"
+      samples: 2K
+      weight: 1.0
+      format: "gorilla"
 
   # ==========================================================================
   # LOGIC AND STRUCTURED REASONING
   # ==========================================================================
   logic:
-    - name: "logiqa"
-      source: "lucasmccabe/logiqa"
+    # LogiQA2 - Updated version that works
+    - name: "logiqa2"
+      source: "logikon/logiqa2-nli"
       license: "Apache-2.0"
-      samples: 8K
+      samples: 10K
       weight: 1.0
       format: "logiqa"
 
-    - name: "reclor"
-      source: "metaeval/reclor"
-      license: "Apache-2.0"
-      samples: 6K
+    # ARC Challenge - Science reasoning
+    - name: "arc-challenge"
+      source: "allenai/ai2_arc"
+      subset: "ARC-Challenge"
+      license: "CC-BY-SA-4.0"
+      samples: 2.6K
       weight: 1.0
-      format: "logiqa"
+      format: "arc"
 
   # ==========================================================================
   # INSTRUCTION FOLLOWING (general capability)
@@ -198,12 +186,12 @@ governance:
 # TRAINING RECOMMENDATIONS FOR 1B MODEL FROM SCRATCH
 # ==========================================================================
 #
-# Target: ~100B tokens for compute-optimal 1B training
+# Target: ~50-100B tokens for compute-optimal 1B training
 #
 # Phase 1 - Pretraining:
-#   - Use SlimPajama + Wikipedia + OpenWebText + Code
-#   - ~80-100B tokens
-#   - Train for ~50K-100K steps with batch size 512
+#   - Use SlimPajama + Wikipedia + OpenWebText
+#   - ~50-100B tokens
+#   - Train for ~50K-100K steps with batch size 64
 #
 # Phase 2 - SFT:
 #   - reasoning + function_calling + logic + instruction_tuning
