@@ -1103,7 +1103,16 @@ def process_with_datatrove_pipeline(
     print(f"{'='*60}\n")
 
     # Temp directories for intermediate results
-    temp_dir = Path(output_dir) / ".datatrove_temp"
+    # IMPORTANT: Use local storage for temp files to avoid corruption from Drive sync issues
+    # In Colab, /content is local SSD while Drive is async-synced and can corrupt on session end
+    if os.path.exists("/content") and os.path.islink(output_dir):
+        # Running in Colab with Drive symlink - use local SSD for temp
+        temp_dir = Path("/content/datatrove_temp")
+        print(f"  Using local SSD for temp files: {temp_dir}")
+    else:
+        # Local development or no symlink - use output dir
+        temp_dir = Path(output_dir) / ".datatrove_temp"
+
     stage1_dir = temp_dir / "stage1_filtered"
     stage2_dir = temp_dir / "stage2_toxicity"
     dedup_sig_dir = temp_dir / "dedup_signatures"
