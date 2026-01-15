@@ -1130,27 +1130,48 @@ def process_with_datatrove_pipeline(
     print(f"  Total input documents: {stats['original_docs']:,}")
 
     # Check for resume from existing temp files
+    # IMPORTANT: Validate files before using - corrupted files from interrupted runs crash the pipeline
+    def validate_parquet_files(file_list, stage_name):
+        """Validate parquet files and return (valid_files, total_rows)."""
+        valid_files = []
+        total_rows = 0
+        for f in file_list:
+            try:
+                pf = pq.ParquetFile(f)
+                total_rows += pf.metadata.num_rows
+                valid_files.append(f)
+            except Exception as e:
+                print(f"  WARNING: Corrupted file {f.name} in {stage_name}, removing...")
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+        return valid_files, total_rows
+
     stage1_files = list(stage1_dir.glob("*.parquet"))
     stage2_files = list(stage2_dir.glob("*.parquet"))
     resume_from_stage = None
 
     if stage2_files:
-        print(f"\n  RESUMING: Found {len(stage2_files)} files from Stage 2 (toxicity)")
-        resume_from_stage = 3  # Skip to deduplication
-        # Count docs from stage 2
-        for f in stage2_files:
-            pf = pq.ParquetFile(f)
-            stats['after_toxicity'] += pf.metadata.num_rows
-        stats['after_quality'] = stats['after_toxicity']  # Approximate
-        print(f"  Skipping to Stage 3 (deduplication)")
-    elif stage1_files:
-        print(f"\n  RESUMING: Found {len(stage1_files)} files from Stage 1 (quality)")
-        resume_from_stage = 2  # Skip to toxicity
-        # Count docs from stage 1
-        for f in stage1_files:
-            pf = pq.ParquetFile(f)
-            stats['after_quality'] += pf.metadata.num_rows
-        print(f"  Skipping to Stage 2 (toxicity)")
+        stage2_files, stage2_rows = validate_parquet_files(stage2_files, "Stage 2")
+        if stage2_files:
+            print(f"\n  RESUMING: Found {len(stage2_files)} valid files from Stage 2 (toxicity)")
+            resume_from_stage = 3  # Skip to deduplication
+            stats['after_toxicity'] = stage2_rows
+            stats['after_quality'] = stats['after_toxicity']  # Approximate
+            print(f"  Skipping to Stage 3 (deduplication)")
+        else:
+            print(f"\n  No valid Stage 2 files found, starting fresh")
+
+    if not resume_from_stage and stage1_files:
+        stage1_files, stage1_rows = validate_parquet_files(stage1_files, "Stage 1")
+        if stage1_files:
+            print(f"\n  RESUMING: Found {len(stage1_files)} valid files from Stage 1 (quality)")
+            resume_from_stage = 2  # Skip to toxicity
+            stats['after_quality'] = stage1_rows
+            print(f"  Skipping to Stage 2 (toxicity)")
+        else:
+            print(f"\n  No valid Stage 1 files found, starting fresh")
 
     # =========================================================================
     # STAGE 1: Quality Filtering with Native Pipeline
@@ -2512,6 +2533,8 @@ def main():
                        help='Force legacy pipeline mode (default if --native-pipeline not specified)')
     parser.add_argument('--keep-temp-files', action='store_true',
                        help='Keep intermediate temp files for recovery (native pipeline only)')
+    parser.add_argument('--fresh', action='store_true',
+                       help='Force fresh start by removing all intermediate/cached files')
     # Google Drive sync options (for Colab)
     parser.add_argument('--drive-dir', type=str, default=None,
                        help='Google Drive directory for sync (e.g., /content/drive/MyDrive/llm-training-pipeline/data/processed)')
@@ -2585,6 +2608,18 @@ def main():
             use_gopher_quality = True
             use_fineweb = not args.no_fineweb_filter
             use_gopher_rep = not args.no_repetition_filter
+
+        # Handle --fresh flag: remove all intermediate files
+        if args.fresh:
+            import shutil
+            temp_dir = Path(args.output_dir) / ".datatrove_temp"
+            if temp_dir.exists():
+                print(f"  --fresh: Removing intermediate files in {temp_dir}")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            # Also remove any output files to force complete reprocessing
+            for f in Path(args.output_dir).glob("*.parquet"):
+                print(f"  --fresh: Removing {f.name}")
+                f.unlink()
 
         process_with_datatrove_pipeline(
             input_dir=args.input_dir,
