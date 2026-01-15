@@ -206,20 +206,46 @@ class EvaluationSuite:
         ppl = torch.exp(torch.stack(nlls).sum() / end_loc)
         return ppl.item()
 
+    def _install_humaneval(self):
+        """Auto-install human-eval from GitHub if not present."""
+        import subprocess
+
+        print("  Installing human-eval from GitHub...")
+        try:
+            # Install directly from GitHub using pip
+            subprocess.run(
+                ["pip", "install", "git+https://github.com/openai/human-eval.git"],
+                check=True, capture_output=True
+            )
+            print("  human-eval installed successfully!")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"  Failed to install human-eval: {e}")
+            return False
+        except Exception as e:
+            print(f"  Failed to install human-eval: {e}")
+            return False
+
     def eval_humaneval(self):
         """Evaluate on HumanEval coding benchmark.
 
-        Requires manual setup:
-        1. git clone https://github.com/openai/human-eval
-        2. pip install -e human-eval
+        Auto-installs human-eval from GitHub if not present.
         """
         try:
             from human_eval.data import write_jsonl, read_problems
             from human_eval.evaluation import evaluate_functional_correctness
         except ImportError:
-            print("  Warning: human_eval not installed. Skipping HumanEval benchmark.")
-            print("  To install: git clone https://github.com/openai/human-eval && pip install -e human-eval")
-            return None
+            # Try to auto-install
+            if self._install_humaneval():
+                try:
+                    from human_eval.data import write_jsonl, read_problems
+                    from human_eval.evaluation import evaluate_functional_correctness
+                except ImportError:
+                    print("  Warning: human_eval installation succeeded but import still failed.")
+                    return None
+            else:
+                print("  Skipping HumanEval benchmark (installation failed).")
+                return None
 
         problems = read_problems()
         samples = []
