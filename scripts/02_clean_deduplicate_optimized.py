@@ -1022,6 +1022,7 @@ def process_with_datatrove_pipeline(
     use_gpu: bool = True,
     toxicity_batch_size: int = None,
     keep_temp_files: bool = False,
+    skip_toxicity: bool = False,
 ) -> dict:
     """Process data using datatrove's native pipeline architecture.
 
@@ -1263,7 +1264,21 @@ def process_with_datatrove_pipeline(
     # =========================================================================
     # STAGE 2: Toxicity Filtering (GPU - can't be in datatrove pipeline)
     # =========================================================================
-    if resume_from_stage and resume_from_stage > 2:
+    if skip_toxicity:
+        print("\nSTAGE 2: Toxicity Filtering - SKIPPED (--no-toxicity flag)")
+        print("-" * 50)
+        # Just copy/link files from stage1 to stage2
+        import shutil
+        toxicity_kept = 0
+        for stage1_file in stage1_files:
+            df = pd.read_parquet(stage1_file)
+            if len(df) > 0:
+                output_file = stage2_dir / stage1_file.name
+                shutil.copy2(stage1_file, output_file)
+                toxicity_kept += len(df)
+        stats['after_toxicity'] = toxicity_kept
+        print(f"  Passed through: {toxicity_kept:,} docs (no filtering)")
+    elif resume_from_stage and resume_from_stage > 2:
         print("\nSTAGE 2: Toxicity Filtering - SKIPPED (using cached results)")
         print("-" * 50)
         print(f"  Documents from cache: {stats['after_toxicity']:,}")
@@ -1271,31 +1286,31 @@ def process_with_datatrove_pipeline(
         print("\nSTAGE 2: Toxicity Filtering (GPU)")
         print("-" * 50)
 
-    # Only run Stage 2 if not resuming from a later stage
-    if not resume_from_stage or resume_from_stage <= 2:
-        # Initialize toxicity model
-        cleaner = DataCleaner(use_gpu=use_gpu, batch_size=toxicity_batch_size)
+        # Only run Stage 2 if not resuming from a later stage
+        if not resume_from_stage or resume_from_stage <= 2:
+            # Initialize toxicity model
+            cleaner = DataCleaner(use_gpu=use_gpu, batch_size=toxicity_batch_size)
 
-        import pyarrow.parquet as pq
-        import pyarrow as pa
+            import pyarrow.parquet as pq
+            import pyarrow as pa
 
-        toxicity_kept = 0
-        for stage1_file in tqdm(stage1_files, desc="  Processing files"):
-            df = pd.read_parquet(stage1_file)
-            if len(df) == 0:
-                continue
+            toxicity_kept = 0
+            for stage1_file in tqdm(stage1_files, desc="  Processing files"):
+                df = pd.read_parquet(stage1_file)
+                if len(df) == 0:
+                    continue
 
-            # Run toxicity detection
-            toxic_mask = cleaner.is_toxic_batch(df['text'].tolist(), show_progress=False)
-            df = df[~np.array(toxic_mask)].reset_index(drop=True)
+                # Run toxicity detection
+                toxic_mask = cleaner.is_toxic_batch(df['text'].tolist(), show_progress=False)
+                df = df[~np.array(toxic_mask)].reset_index(drop=True)
 
-            if len(df) > 0:
-                output_file = stage2_dir / stage1_file.name
-                df.to_parquet(output_file, index=False)
-                toxicity_kept += len(df)
+                if len(df) > 0:
+                    output_file = stage2_dir / stage1_file.name
+                    df.to_parquet(output_file, index=False)
+                    toxicity_kept += len(df)
 
-        stats['after_toxicity'] = toxicity_kept
-        print(f"  After toxicity filtering: {toxicity_kept:,} docs")
+            stats['after_toxicity'] = toxicity_kept
+            print(f"  After toxicity filtering: {toxicity_kept:,} docs")
 
     # =========================================================================
     # STAGE 3: Deduplication with Native MinhashDedup
@@ -2536,6 +2551,8 @@ def main():
                        help='Skip FineWebQualityFilter (15% faster, less strict)')
     parser.add_argument('--fast-quality', action='store_true',
                        help='Only use GopherQualityFilter (fastest, basic filtering)')
+    parser.add_argument('--no-toxicity', action='store_true',
+                       help='Skip toxicity filtering (faster, use for pretraining data)')
     parser.add_argument('--native-pipeline', action='store_true',
                        help='Use native datatrove pipeline (faster, uses MinhashDedup)')
     parser.add_argument('--legacy', action='store_true',
@@ -2606,6 +2623,7 @@ def main():
         print(f"  - GPU acceleration: {use_gpu}")
         print(f"  - CPU workers: {n_workers}")
         print(f"  - File pattern: {args.pattern}")
+        print(f"  - Toxicity filtering: {'DISABLED' if args.no_toxicity else 'ENABLED'}")
         print()
 
         # Determine filter settings
@@ -2642,6 +2660,7 @@ def main():
             use_gpu=use_gpu,
             toxicity_batch_size=args.batch_size,
             keep_temp_files=args.keep_temp_files,
+            skip_toxicity=args.no_toxicity,
         )
     else:
         if args.native_pipeline and not DATATROVE_PIPELINE_AVAILABLE:
