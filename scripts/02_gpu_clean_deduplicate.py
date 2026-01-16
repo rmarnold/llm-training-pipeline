@@ -351,39 +351,38 @@ class GPUDataPipeline:
         total_after_quality = 0
 
         if DATATROVE_AVAILABLE and self.quality_filters:
-            # Process files in batches to avoid too many open files
-            BATCH_SIZE = 50  # Process 50 small parquet files at a time
+            # Process all files with a single progress bar
+            print(f"  Processing {len(cleaned_files)} chunk files...")
 
-            for batch_start in range(0, len(cleaned_files), BATCH_SIZE):
-                batch_files = cleaned_files[batch_start:batch_start + BATCH_SIZE]
+            for file_idx, cf in enumerate(tqdm(cleaned_files, desc="  Quality filtering", disable=not self.show_progress)):
+                try:
+                    df = pd.read_parquet(cf)
+                    texts = df['text'].tolist()
+                    ids = df['id'].tolist()
+                    del df
 
-                for file_idx, cf in enumerate(tqdm(batch_files, desc=f"  Quality filtering batch {batch_start//BATCH_SIZE + 1}", disable=not self.show_progress)):
-                    try:
-                        df = pd.read_parquet(cf)
-                        texts = df['text'].tolist()
-                        ids = df['id'].tolist()
-                        del df
+                    # Single-threaded quality filtering (fast for 10K chunk files)
+                    quality_mask = self._apply_quality_filters(texts)
+                    filtered_texts = [t for t, m in zip(texts, quality_mask) if m]
+                    filtered_ids = [i for i, m in zip(ids, quality_mask) if m]
+
+                    del texts, ids, quality_mask
+
+                    if filtered_texts:
+                        quality_df = pd.DataFrame({'id': filtered_ids, 'text': filtered_texts})
+                        quality_file = quality_dir / f"quality_{file_idx:05d}.parquet"
+                        quality_df.to_parquet(quality_file, compression='snappy')
+                        total_after_quality += len(quality_df)
+                        del quality_df
+
+                    del filtered_texts, filtered_ids
+
+                    # Only gc every 100 files to reduce overhead
+                    if file_idx % 100 == 0:
                         gc.collect()
 
-                        quality_mask = self._apply_quality_filters(texts)
-                        filtered_texts = [t for t, m in zip(texts, quality_mask) if m]
-                        filtered_ids = [i for i, m in zip(ids, quality_mask) if m]
-
-                        del texts, ids, quality_mask
-                        gc.collect()
-
-                        if filtered_texts:
-                            quality_df = pd.DataFrame({'id': filtered_ids, 'text': filtered_texts})
-                            quality_file = quality_dir / f"quality_{batch_start + file_idx:05d}.parquet"
-                            quality_df.to_parquet(quality_file, compression='snappy')
-                            total_after_quality += len(quality_df)
-                            del quality_df
-
-                        del filtered_texts, filtered_ids
-                        gc.collect()
-
-                    except Exception as e:
-                        print(f"  Warning: Quality filter failed on {cf}: {e}")
+                except Exception as e:
+                    print(f"  Warning: Quality filter failed on {cf}: {e}")
         else:
             print("  Skipping quality filters (datatrove not available)")
             # Just copy files
@@ -568,25 +567,24 @@ class GPUDataPipeline:
         Returns:
             Boolean mask (True = keep)
         """
-        from multiprocessing import Pool, cpu_count
-
+        # For streaming mode with small chunks (10K), single-threaded is actually faster
+        # because it avoids process spawn overhead and CUDA initialization in workers
+        # Multiprocessing only helps for batches > 50K docs
         n_texts = len(texts)
-        n_workers = max(1, int(cpu_count() * 0.8))
 
-        # For small batches, use single-threaded
-        if n_texts < 1000:
+        if n_texts < 50_000:
+            # Single-threaded - faster for small batches, no spawn overhead
             return [self._filter_single(t) for t in texts]
 
-        # Parallel processing
-        with Pool(processes=n_workers) as pool:
-            if self.show_progress:
-                results = list(tqdm(
-                    pool.imap(self._filter_single, texts, chunksize=5000),
-                    total=n_texts,
-                    desc="  Quality filter"
-                ))
-            else:
-                results = pool.map(self._filter_single, texts, chunksize=5000)
+        # Only use multiprocessing for very large batches
+        from multiprocessing import get_context, cpu_count
+
+        n_workers = max(1, min(4, int(cpu_count() * 0.5)))  # Fewer workers, less overhead
+
+        # Use 'spawn' to avoid CUDA issues in child processes
+        ctx = get_context('spawn')
+        with ctx.Pool(processes=n_workers) as pool:
+            results = pool.map(self._filter_single, texts, chunksize=10000)
 
         return results
 
