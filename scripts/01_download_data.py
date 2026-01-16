@@ -179,6 +179,7 @@ def download_datasets(
     config_path="configs/data_sources.yaml",
     phases=None,
     max_samples=None,
+    output_dir="data/raw",
 ):
     """Download all configured datasets.
 
@@ -186,11 +187,12 @@ def download_datasets(
         config_path: Path to data sources config
         phases: List of phases to download (None = all)
         max_samples: Max samples per dataset
+        output_dir: Output directory for downloaded data
     """
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
-    os.makedirs("data/raw", exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     manifest = {}
 
     # All possible phases
@@ -219,7 +221,7 @@ def download_datasets(
 
         for ds_config in config["datasets"][phase]:
             name = ds_config["name"]
-            output_path = f"data/raw/{phase}_{name}.parquet"
+            output_path = f"{output_dir}/{phase}_{name}.parquet"
 
             # Check if already exists
             if os.path.exists(output_path) or os.path.exists(output_path.replace(".parquet", "")):
@@ -308,6 +310,12 @@ if __name__ == "__main__":
         default=None,
         help="Max samples per dataset (for testing)",
     )
+    parser.add_argument(
+        "--output-dir", "-o",
+        type=str,
+        default="data/raw",
+        help="Output directory for downloaded data",
+    )
 
     args = parser.parse_args()
 
@@ -315,4 +323,5 @@ if __name__ == "__main__":
         config_path=args.config,
         phases=args.phases,
         max_samples=args.max_samples,
+        output_dir=args.output_dir,
     )
