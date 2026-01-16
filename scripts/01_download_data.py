@@ -41,15 +41,52 @@ def download_streaming_dataset(ds_config, output_path, max_samples=None):
 
     print(f"  Loading {source} in streaming mode...")
 
-    try:
-        ds_stream = load_dataset(
-            source,
-            subset,
-            split="train",
-            streaming=True,
-        )
-    except Exception as e:
-        print(f"  Error loading stream: {e}")
+    # Try different loading approaches
+    ds_stream = None
+    errors = []
+
+    # Approach 1: With subset if specified
+    if subset:
+        try:
+            ds_stream = load_dataset(
+                source,
+                subset,
+                split="train",
+                streaming=True,
+                trust_remote_code=True,
+            )
+        except Exception as e:
+            errors.append(f"with subset '{subset}': {e}")
+
+    # Approach 2: Without subset (use default config)
+    if ds_stream is None:
+        try:
+            ds_stream = load_dataset(
+                source,
+                split="train",
+                streaming=True,
+                trust_remote_code=True,
+            )
+        except Exception as e:
+            errors.append(f"without subset: {e}")
+
+    # Approach 3: Try 'default' config explicitly
+    if ds_stream is None:
+        try:
+            ds_stream = load_dataset(
+                source,
+                "default",
+                split="train",
+                streaming=True,
+                trust_remote_code=True,
+            )
+        except Exception as e:
+            errors.append(f"with 'default' config: {e}")
+
+    if ds_stream is None:
+        print(f"  Error loading stream. Tried:")
+        for err in errors:
+            print(f"    - {err}")
         return 0
 
     # Calculate target samples
@@ -74,9 +111,9 @@ def download_streaming_dataset(ds_config, output_path, max_samples=None):
         print(f"  Warning: No samples downloaded")
         return 0
 
-    # Convert to dataset and save
+    # Convert to dataset and save as parquet
     ds = Dataset.from_list(samples)
-    ds.save_to_disk(output_path.replace(".parquet", ""))
+    ds.to_parquet(output_path)
     print(f"  Saved {len(ds):,} samples to {output_path}")
 
     return len(ds)
@@ -109,6 +146,7 @@ def download_regular_dataset(ds_config, output_path, max_samples=None):
                     split="train",
                     cache_dir="data/cache",
                     download_config=download_config,
+                    trust_remote_code=True,
                 )
             except Exception as e:
                 if attempt < max_retries - 1:

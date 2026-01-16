@@ -4,20 +4,23 @@ datasets:
   # ==========================================================================
   pretraining:
     # SlimPajama - cleaned RedPajama, 627B tokens total
-    - name: "slimpajama-chunk1"
+    # Note: This is a HUGE dataset. We stream a small portion.
+    - name: "slimpajama"
       source: "cerebras/SlimPajama-627B"
-      subset: "train"
+      # No subset needed - use default config
       license: "Apache-2.0"
       tokens: 50B
-      weight: 0.08
+      weight: 0.05  # Take 5% = ~30M samples
       streaming: true
 
-    # RedPajama-Data-v2 - high quality web + books + code
-    - name: "redpajama-sample"
-      source: "togethercomputer/RedPajama-Data-1T-Sample"
-      license: "Apache-2.0"
-      tokens: 1B
-      weight: 1.0
+    # FineWeb-Edu - High quality educational web text (replaces RedPajama)
+    - name: "fineweb-edu-sample"
+      source: "HuggingFaceFW/fineweb-edu"
+      subset: "sample-10BT"
+      license: "ODC-By-1.0"
+      tokens: 10B
+      weight: 0.3
+      streaming: true
 
     # Wikipedia - factual grounding
     - name: "wikipedia-en"
@@ -34,12 +37,14 @@ datasets:
       tokens: 8B
       weight: 0.7
 
-    # Books/Literature - long-form coherent text
-    - name: "pg19"
-      source: "deepmind/pg19"
-      license: "Apache-2.0"
-      tokens: 3B
-      weight: 0.8
+    # C4 - Colossal Clean Crawled Corpus (replaces pg19 which has script issues)
+    - name: "c4-en"
+      source: "allenai/c4"
+      subset: "en"
+      license: "ODC-By-1.0"
+      tokens: 150B
+      weight: 0.02  # Take 2% = ~7M samples
+      streaming: true
 
   # ==========================================================================
   # REASONING DATA (for SFT - chain-of-thought, math, logic)
