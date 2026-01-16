@@ -182,8 +182,63 @@ class GPUDataPipeline:
                 self._toxicity_model = None
         return self._toxicity_model
 
-    def process(self) -> dict:
+    def _check_stage_complete(self, stage: int) -> bool:
+        """Check if a stage has already been completed.
+
+        Args:
+            stage: Stage number (1-4)
+
+        Returns:
+            True if stage is complete and can be skipped
+        """
+        if stage == 1:
+            cleaned_dir = self.cache_dir / "cleaned"
+            if cleaned_dir.exists():
+                files = list(cleaned_dir.glob("*.parquet"))
+                if len(files) > 0:
+                    # Check if we have a reasonable number of cleaned files
+                    return True
+            return False
+
+        elif stage == 2:
+            quality_dir = self.cache_dir / "quality_filtered"
+            if quality_dir.exists():
+                files = list(quality_dir.glob("*.parquet"))
+                if len(files) > 0:
+                    return True
+            return False
+
+        elif stage == 3:
+            toxicity_dir = self.cache_dir / "toxicity_filtered"
+            if toxicity_dir.exists():
+                files = list(toxicity_dir.glob("*.parquet"))
+                if len(files) > 0:
+                    return True
+            return False
+
+        elif stage == 4:
+            final_output = self.output_dir / "processed.parquet"
+            return final_output.exists()
+
+        return False
+
+    def _count_docs_in_dir(self, dir_path: Path) -> int:
+        """Count total documents in all parquet files in a directory."""
+        total = 0
+        for f in dir_path.glob("*.parquet"):
+            try:
+                import pyarrow.parquet as pq
+                pf = pq.ParquetFile(f)
+                total += pf.metadata.num_rows
+            except Exception:
+                pass
+        return total
+
+    def process(self, resume: bool = True) -> dict:
         """Run the full GPU pipeline.
+
+        Args:
+            resume: If True, skip completed stages (default: True)
 
         Returns:
             Dict with processing statistics
@@ -199,6 +254,7 @@ class GPUDataPipeline:
             'after_dedup': 0,
             'gpu_text': self.use_gpu_text,
             'gpu_dedup': self.use_gpu_dedup,
+            'resumed_from_stage': None,
         }
 
         print("=" * 60)
@@ -211,333 +267,370 @@ class GPUDataPipeline:
         print(f"Quality Filters: {[f[0] for f in self.quality_filters]}")
         print(f"Toxicity Filter: {not self.skip_toxicity}")
         print(f"Deduplication: {not self.skip_dedup}")
+        print(f"Resume Mode: {resume}")
         print("=" * 60)
 
+        # Check for resume points
+        if resume:
+            for stage in [4, 3, 2, 1]:
+                if self._check_stage_complete(stage):
+                    stats['resumed_from_stage'] = stage + 1
+                    print(f"\n*** RESUMING: Stage {stage} complete, starting from Stage {stage + 1} ***")
+                    break
+
+        # Define stage directories
+        cleaned_dir = self.cache_dir / "cleaned"
+        quality_dir = self.cache_dir / "quality_filtered"
+        toxicity_dir = self.cache_dir / "toxicity_filtered"
+
         # Stage 1: Load, clean, and save file-by-file (streaming to avoid OOM)
-        print("\n[Stage 1/4] Loading and cleaning text (streaming mode)...")
+        skip_stage1 = resume and self._check_stage_complete(1)
         stage1_start = time.time()
 
-        # Find input files - ONLY pretraining data (not SFT/DPO which have different formats)
-        parquet_files = list(self.input_dir.glob("**/*.parquet"))
-
-        # Filter to only pretraining files (have 'text' column with raw text)
-        pretraining_prefixes = ['pretraining_', 'slimpajama', 'wikipedia', 'openwebtext',
-                                'the-stack', 'arxiv', 'pg19', 'c4', 'pile', 'fineweb']
-        pretraining_files = [
-            f for f in parquet_files
-            if any(f.stem.lower().startswith(p) or p in f.stem.lower() for p in pretraining_prefixes)
-        ]
-
-        # Exclude SFT/DPO/reasoning files which have different column structures
-        exclude_prefixes = ['reasoning_', 'function_calling_', 'instruction_tuning_',
-                           'preference_data_', 'logic_', 'sft_', 'dpo_']
-        pretraining_files = [
-            f for f in pretraining_files
-            if not any(f.stem.lower().startswith(p) for p in exclude_prefixes)
-        ]
-
-        if not pretraining_files:
-            # Fall back to all files if no pretraining files found
-            pretraining_files = parquet_files
-            print(f"  No pretraining-specific files found, using all {len(parquet_files)} files")
+        if skip_stage1:
+            print("\n[Stage 1/4] SKIPPED (already complete)")
+            stats['after_cleaning'] = self._count_docs_in_dir(cleaned_dir)
+            print(f"  Found {stats['after_cleaning']:,} cleaned docs in cache")
         else:
-            print(f"  Found {len(pretraining_files)} pretraining files (filtered from {len(parquet_files)} total)")
+            print("\n[Stage 1/4] Loading and cleaning text (streaming mode)...")
+            cleaned_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create temp directory for cleaned files
-        cleaned_dir = self.cache_dir / "cleaned"
-        cleaned_dir.mkdir(parents=True, exist_ok=True)
+            # Find input files - ONLY pretraining data (not SFT/DPO which have different formats)
+            parquet_files = list(self.input_dir.glob("**/*.parquet"))
 
-        total_input = 0
-        total_cleaned = 0
+            # Filter to only pretraining files (have 'text' column with raw text)
+            pretraining_prefixes = ['pretraining_', 'slimpajama', 'wikipedia', 'openwebtext',
+                                    'the-stack', 'arxiv', 'pg19', 'c4', 'pile', 'fineweb']
+            pretraining_files = [
+                f for f in parquet_files
+                if any(f.stem.lower().startswith(p) or p in f.stem.lower() for p in pretraining_prefixes)
+            ]
 
-        # Process each file individually with TRUE STREAMING to avoid memory accumulation
-        # Use pyarrow for chunked reading - never load full file into memory
-        import pyarrow.parquet as pq
+            # Exclude SFT/DPO/reasoning files which have different column structures
+            exclude_prefixes = ['reasoning_', 'function_calling_', 'instruction_tuning_',
+                               'preference_data_', 'logic_', 'sft_', 'dpo_']
+            pretraining_files = [
+                f for f in pretraining_files
+                if not any(f.stem.lower().startswith(p) for p in exclude_prefixes)
+            ]
 
-        for file_idx, pq_file in enumerate(tqdm(pretraining_files, desc="  Processing files", disable=not self.show_progress)):
-            try:
-                file_size_mb = pq_file.stat().st_size / (1024 * 1024)
+            if not pretraining_files:
+                # Fall back to all files if no pretraining files found
+                pretraining_files = parquet_files
+                print(f"  No pretraining-specific files found, using all {len(parquet_files)} files")
+            else:
+                print(f"  Found {len(pretraining_files)} pretraining files (filtered from {len(parquet_files)} total)")
 
-                # Use very small row groups for streaming (10K rows at a time)
-                STREAM_CHUNK_SIZE = 10_000
+            total_input = 0
+            total_cleaned = 0
 
-                # Open parquet file for streaming
+            # Process each file individually with TRUE STREAMING to avoid memory accumulation
+            # Use pyarrow for chunked reading - never load full file into memory
+            import pyarrow.parquet as pq
+
+            for file_idx, pq_file in enumerate(tqdm(pretraining_files, desc="  Processing files", disable=not self.show_progress)):
                 try:
-                    parquet_file = pq.ParquetFile(pq_file)
-                except Exception as e:
-                    print(f"  Skipping {pq_file.name}: cannot open ({e})")
-                    continue
+                    # Use very small row groups for streaming (10K rows at a time)
+                    STREAM_CHUNK_SIZE = 10_000
 
-                # Check for 'text' column
-                if 'text' not in parquet_file.schema.names:
-                    print(f"  Skipping {pq_file.name}: no 'text' column")
-                    continue
+                    # Open parquet file for streaming
+                    try:
+                        parquet_file = pq.ParquetFile(pq_file)
+                    except Exception as e:
+                        print(f"  Skipping {pq_file.name}: cannot open ({e})")
+                        continue
 
-                file_input = 0
-                file_cleaned = 0
-                chunk_idx = 0
+                    # Check for 'text' column
+                    if 'text' not in parquet_file.schema.names:
+                        print(f"  Skipping {pq_file.name}: no 'text' column")
+                        continue
 
-                # Stream through the file in small batches
-                for batch in parquet_file.iter_batches(batch_size=STREAM_CHUNK_SIZE, columns=['text']):
-                    batch_df = batch.to_pandas()
-                    texts = batch_df['text'].fillna('').tolist()
-                    batch_input = len(texts)
-                    file_input += batch_input
-                    total_input += batch_input
+                    file_input = 0
+                    file_cleaned = 0
+                    chunk_idx = 0
 
-                    del batch_df, batch
-                    gc.collect()
+                    # Stream through the file in small batches
+                    for batch in parquet_file.iter_batches(batch_size=STREAM_CHUNK_SIZE, columns=['text']):
+                        batch_df = batch.to_pandas()
+                        texts = batch_df['text'].fillna('').tolist()
+                        batch_input = len(texts)
+                        file_input += batch_input
+                        total_input += batch_input
 
-                    # GPU clean this small chunk
-                    cleaned_chunk = gpu_clean_texts(
-                        texts,
-                        batch_size=min(self.batch_size, 50_000),  # Smaller GPU batches
-                        show_progress=False,
-                        use_gpu=self.use_gpu_text
-                    )
-
-                    del texts
-                    gc.collect()
-
-                    # Filter empty and create IDs
-                    cleaned_texts = []
-                    all_ids = []
-                    for i, t in enumerate(cleaned_chunk):
-                        if t and len(t.strip()) > 0:
-                            cleaned_texts.append(t)
-                            all_ids.append(f"{pq_file.stem}_{chunk_idx}_{i}")
-
-                    del cleaned_chunk
-                    gc.collect()
-
-                    # Save each chunk immediately to disk (don't accumulate in memory)
-                    if cleaned_texts:
-                        cleaned_df = pd.DataFrame({'id': all_ids, 'text': cleaned_texts})
-                        cleaned_file = cleaned_dir / f"cleaned_{file_idx:03d}_{chunk_idx:04d}_{pq_file.stem[:30]}.parquet"
-                        cleaned_df.to_parquet(cleaned_file, compression='snappy')
-                        file_cleaned += len(cleaned_df)
-                        total_cleaned += len(cleaned_df)
-                        del cleaned_df
-
-                    del cleaned_texts, all_ids
-                    gc.collect()
-
-                    chunk_idx += 1
-
-                del parquet_file
-                gc.collect()
-
-                print(f"    {pq_file.name}: {file_input:,} -> {file_cleaned:,} docs ({chunk_idx} chunks)")
-
-            except Exception as e:
-                print(f"  Warning: Failed to process {pq_file}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
-
-        stats['input_docs'] = total_input
-        stats['after_cleaning'] = total_cleaned
-        stage1_time = time.time() - stage1_start
-        print(f"  Stage 1 complete: {stats['after_cleaning']:,} docs from {stats['input_docs']:,} ({stage1_time:.1f}s)")
-
-        # Stage 2: Quality filtering (streaming from cleaned files)
-        print("\n[Stage 2/4] Quality filtering (streaming mode)...")
-        stage2_start = time.time()
-
-        quality_dir = self.cache_dir / "quality_filtered"
-        quality_dir.mkdir(parents=True, exist_ok=True)
-
-        cleaned_files = sorted(cleaned_dir.glob("*.parquet"))
-        total_after_quality = 0
-
-        if DATATROVE_AVAILABLE and self.quality_filters:
-            # Process all files with a single progress bar
-            print(f"  Processing {len(cleaned_files)} chunk files...")
-
-            for file_idx, cf in enumerate(tqdm(cleaned_files, desc="  Quality filtering", disable=not self.show_progress)):
-                try:
-                    df = pd.read_parquet(cf)
-                    texts = df['text'].tolist()
-                    ids = df['id'].tolist()
-                    del df
-
-                    # Single-threaded quality filtering (fast for 10K chunk files)
-                    quality_mask = self._apply_quality_filters(texts)
-                    filtered_texts = [t for t, m in zip(texts, quality_mask) if m]
-                    filtered_ids = [i for i, m in zip(ids, quality_mask) if m]
-
-                    del texts, ids, quality_mask
-
-                    if filtered_texts:
-                        quality_df = pd.DataFrame({'id': filtered_ids, 'text': filtered_texts})
-                        quality_file = quality_dir / f"quality_{file_idx:05d}.parquet"
-                        quality_df.to_parquet(quality_file, compression='snappy')
-                        total_after_quality += len(quality_df)
-                        del quality_df
-
-                    del filtered_texts, filtered_ids
-
-                    # Only gc every 100 files to reduce overhead
-                    if file_idx % 100 == 0:
+                        del batch_df, batch
                         gc.collect()
 
+                        # GPU clean this small chunk
+                        cleaned_chunk = gpu_clean_texts(
+                            texts,
+                            batch_size=min(self.batch_size, 50_000),  # Smaller GPU batches
+                            show_progress=False,
+                            use_gpu=self.use_gpu_text
+                        )
+
+                        del texts
+                        gc.collect()
+
+                        # Filter empty and create IDs
+                        cleaned_texts = []
+                        all_ids = []
+                        for i, t in enumerate(cleaned_chunk):
+                            if t and len(t.strip()) > 0:
+                                cleaned_texts.append(t)
+                                all_ids.append(f"{pq_file.stem}_{chunk_idx}_{i}")
+
+                        del cleaned_chunk
+                        gc.collect()
+
+                        # Save each chunk immediately to disk (don't accumulate in memory)
+                        if cleaned_texts:
+                            cleaned_df = pd.DataFrame({'id': all_ids, 'text': cleaned_texts})
+                            cleaned_file = cleaned_dir / f"cleaned_{file_idx:03d}_{chunk_idx:04d}_{pq_file.stem[:30]}.parquet"
+                            cleaned_df.to_parquet(cleaned_file, compression='snappy')
+                            file_cleaned += len(cleaned_df)
+                            total_cleaned += len(cleaned_df)
+                            del cleaned_df
+
+                        del cleaned_texts, all_ids
+                        gc.collect()
+
+                        chunk_idx += 1
+
+                    del parquet_file
+                    gc.collect()
+
+                    print(f"    {pq_file.name}: {file_input:,} -> {file_cleaned:,} docs ({chunk_idx} chunks)")
+
                 except Exception as e:
-                    print(f"  Warning: Quality filter failed on {cf}: {e}")
+                    print(f"  Warning: Failed to process {pq_file}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+
+            stats['input_docs'] = total_input
+            stats['after_cleaning'] = total_cleaned
+            stage1_time = time.time() - stage1_start
+            print(f"  Stage 1 complete: {stats['after_cleaning']:,} docs from {stats['input_docs']:,} ({stage1_time:.1f}s)")
+
+        # Stage 2: Quality filtering (streaming from cleaned files)
+        skip_stage2 = resume and self._check_stage_complete(2)
+        stage2_start = time.time()
+
+        if skip_stage2:
+            print("\n[Stage 2/4] SKIPPED (already complete)")
+            stats['after_quality'] = self._count_docs_in_dir(quality_dir)
+            print(f"  Found {stats['after_quality']:,} quality-filtered docs in cache")
         else:
-            print("  Skipping quality filters (datatrove not available)")
-            # Just copy files
-            for cf in cleaned_files:
-                df = pd.read_parquet(cf)
-                total_after_quality += len(df)
-                df.to_parquet(quality_dir / cf.name, compression='snappy')
-                del df
+            print("\n[Stage 2/4] Quality filtering (streaming mode)...")
+            quality_dir.mkdir(parents=True, exist_ok=True)
 
-        stats['after_quality'] = total_after_quality
-        stage2_time = time.time() - stage2_start
-        print(f"  Stage 2 complete: {stats['after_quality']:,} docs ({stage2_time:.1f}s)")
+            cleaned_files = sorted(cleaned_dir.glob("*.parquet"))
+            total_after_quality = 0
 
-        # Stage 3: Toxicity filtering (streaming)
-        print("\n[Stage 3/4] Toxicity filtering...")
-        stage3_start = time.time()
+            if DATATROVE_AVAILABLE and self.quality_filters:
+                # Process all files with a single progress bar
+                print(f"  Processing {len(cleaned_files)} chunk files...")
 
-        toxicity_dir = self.cache_dir / "toxicity_filtered"
-        toxicity_dir.mkdir(parents=True, exist_ok=True)
-
-        quality_files = sorted(quality_dir.glob("*.parquet"))
-        total_after_toxicity = 0
-
-        if not self.skip_toxicity:
-            toxicity_model = self._get_toxicity_model()
-            if toxicity_model:
-                for file_idx, qf in enumerate(tqdm(quality_files, desc="  Toxicity filtering", disable=not self.show_progress)):
+                for file_idx, cf in enumerate(tqdm(cleaned_files, desc="  Quality filtering", disable=not self.show_progress)):
                     try:
-                        df = pd.read_parquet(qf)
+                        df = pd.read_parquet(cf)
                         texts = df['text'].tolist()
                         ids = df['id'].tolist()
                         del df
-                        gc.collect()
 
-                        toxic_mask = toxicity_model.is_toxic_batch(texts, show_progress=False)
-                        filtered_texts = [t for t, is_toxic in zip(texts, toxic_mask) if not is_toxic]
-                        filtered_ids = [i for i, is_toxic in zip(ids, toxic_mask) if not is_toxic]
+                        # Single-threaded quality filtering (fast for 10K chunk files)
+                        quality_mask = self._apply_quality_filters(texts)
+                        filtered_texts = [t for t, m in zip(texts, quality_mask) if m]
+                        filtered_ids = [i for i, m in zip(ids, quality_mask) if m]
 
-                        del texts, ids, toxic_mask
-                        gc.collect()
+                        del texts, ids, quality_mask
 
                         if filtered_texts:
-                            toxicity_df = pd.DataFrame({'id': filtered_ids, 'text': filtered_texts})
-                            toxicity_file = toxicity_dir / f"toxicity_{file_idx:03d}.parquet"
-                            toxicity_df.to_parquet(toxicity_file, compression='snappy')
-                            total_after_toxicity += len(toxicity_df)
-                            del toxicity_df
+                            quality_df = pd.DataFrame({'id': filtered_ids, 'text': filtered_texts})
+                            quality_file = quality_dir / f"quality_{file_idx:05d}.parquet"
+                            quality_df.to_parquet(quality_file, compression='snappy')
+                            total_after_quality += len(quality_df)
+                            del quality_df
 
                         del filtered_texts, filtered_ids
-                        gc.collect()
+
+                        # Only gc every 100 files to reduce overhead
+                        if file_idx % 100 == 0:
+                            gc.collect()
 
                     except Exception as e:
-                        print(f"  Warning: Toxicity filter failed on {qf}: {e}")
+                        print(f"  Warning: Quality filter failed on {cf}: {e}")
             else:
-                print("  Skipping (model not available)")
+                print("  Skipping quality filters (datatrove not available)")
+                # Just copy files
+                for cf in cleaned_files:
+                    df = pd.read_parquet(cf)
+                    total_after_quality += len(df)
+                    df.to_parquet(quality_dir / cf.name, compression='snappy')
+                    del df
+
+            stats['after_quality'] = total_after_quality
+            stage2_time = time.time() - stage2_start
+            print(f"  Stage 2 complete: {stats['after_quality']:,} docs ({stage2_time:.1f}s)")
+
+        # Stage 3: Toxicity filtering (streaming)
+        skip_stage3 = resume and self._check_stage_complete(3)
+        stage3_start = time.time()
+
+        if skip_stage3:
+            print("\n[Stage 3/4] SKIPPED (already complete)")
+            stats['after_toxicity'] = self._count_docs_in_dir(toxicity_dir)
+            print(f"  Found {stats['after_toxicity']:,} toxicity-filtered docs in cache")
+        else:
+            print("\n[Stage 3/4] Toxicity filtering...")
+            toxicity_dir.mkdir(parents=True, exist_ok=True)
+
+            quality_files = sorted(quality_dir.glob("*.parquet"))
+            total_after_toxicity = 0
+
+            if not self.skip_toxicity:
+                toxicity_model = self._get_toxicity_model()
+                if toxicity_model:
+                    for file_idx, qf in enumerate(tqdm(quality_files, desc="  Toxicity filtering", disable=not self.show_progress)):
+                        try:
+                            df = pd.read_parquet(qf)
+                            texts = df['text'].tolist()
+                            ids = df['id'].tolist()
+                            del df
+                            gc.collect()
+
+                            toxic_mask = toxicity_model.is_toxic_batch(texts, show_progress=False)
+                            filtered_texts = [t for t, is_toxic in zip(texts, toxic_mask) if not is_toxic]
+                            filtered_ids = [i for i, is_toxic in zip(ids, toxic_mask) if not is_toxic]
+
+                            del texts, ids, toxic_mask
+                            gc.collect()
+
+                            if filtered_texts:
+                                toxicity_df = pd.DataFrame({'id': filtered_ids, 'text': filtered_texts})
+                                toxicity_file = toxicity_dir / f"toxicity_{file_idx:03d}.parquet"
+                                toxicity_df.to_parquet(toxicity_file, compression='snappy')
+                                total_after_toxicity += len(toxicity_df)
+                                del toxicity_df
+
+                            del filtered_texts, filtered_ids
+                            gc.collect()
+
+                        except Exception as e:
+                            print(f"  Warning: Toxicity filter failed on {qf}: {e}")
+                else:
+                    print("  Skipping (model not available)")
+                    for qf in quality_files:
+                        df = pd.read_parquet(qf)
+                        total_after_toxicity += len(df)
+                        df.to_parquet(toxicity_dir / qf.name, compression='snappy')
+                        del df
+            else:
+                print("  Skipping (disabled)")
                 for qf in quality_files:
                     df = pd.read_parquet(qf)
                     total_after_toxicity += len(df)
                     df.to_parquet(toxicity_dir / qf.name, compression='snappy')
                     del df
+
+            stats['after_toxicity'] = total_after_toxicity
+            stage3_time = time.time() - stage3_start
+            print(f"  Stage 3 complete: {stats['after_toxicity']:,} docs ({stage3_time:.1f}s)")
+
+        # Stage 4: Deduplication
+        skip_stage4 = resume and self._check_stage_complete(4)
+        stage4_start = time.time()
+
+        if skip_stage4:
+            print("\n[Stage 4/4] SKIPPED (already complete)")
+            final_output = self.output_dir / "processed.parquet"
+            if final_output.exists():
+                stats['after_dedup'] = len(pd.read_parquet(final_output))
+            print(f"  Found {stats['after_dedup']:,} deduplicated docs")
         else:
-            print("  Skipping (disabled)")
-            for qf in quality_files:
-                df = pd.read_parquet(qf)
-                total_after_toxicity += len(df)
-                df.to_parquet(toxicity_dir / qf.name, compression='snappy')
-                del df
+            print("\n[Stage 4/4] Deduplication...")
 
-        stats['after_toxicity'] = total_after_toxicity
-        stage3_time = time.time() - stage3_start
-        print(f"  Stage 3 complete: {stats['after_toxicity']:,} docs ({stage3_time:.1f}s)")
+            # First, combine files for deduplication (streaming concatenation to avoid OOM)
+            print("  Combining files for deduplication (streaming mode)...")
+            intermediate_path = self.cache_dir / "pre_dedup"
+            intermediate_path.mkdir(parents=True, exist_ok=True)
+            intermediate_file = intermediate_path / "data.parquet"
 
-        # Combine files for deduplication (streaming concatenation to avoid OOM)
-        print("\n  Combining files for deduplication (streaming mode)...")
-        intermediate_path = self.cache_dir / "pre_dedup"
-        intermediate_path.mkdir(parents=True, exist_ok=True)
-        intermediate_file = intermediate_path / "data.parquet"
+            toxicity_files = sorted(toxicity_dir.glob("*.parquet"))
 
-        toxicity_files = sorted(toxicity_dir.glob("*.parquet"))
+            import pyarrow.parquet as pq
 
-        if toxicity_files:
-            # Use pyarrow to stream-concatenate without loading all into memory
-            import pyarrow as pa
-            import pyarrow.parquet as pq_writer
+            if toxicity_files:
+                # Use pyarrow to stream-concatenate without loading all into memory
+                import pyarrow.parquet as pq_writer
 
-            # First pass: collect all record batches
-            writer = None
-            total_rows = 0
+                # First pass: collect all record batches
+                writer = None
+                total_rows = 0
 
-            for tf in tqdm(toxicity_files, desc="  Combining files", disable=not self.show_progress):
-                try:
-                    table = pq.read_table(tf)
-                    total_rows += table.num_rows
+                for tf in tqdm(toxicity_files, desc="  Combining files", disable=not self.show_progress):
+                    try:
+                        table = pq.read_table(tf)
+                        total_rows += table.num_rows
 
-                    if writer is None:
-                        writer = pq_writer.ParquetWriter(str(intermediate_file), table.schema)
+                        if writer is None:
+                            writer = pq_writer.ParquetWriter(str(intermediate_file), table.schema)
 
-                    writer.write_table(table)
-                    del table
-                    gc.collect()
-                except Exception as e:
-                    print(f"  Warning: Failed to read {tf}: {e}")
+                        writer.write_table(table)
+                        del table
+                        gc.collect()
+                    except Exception as e:
+                        print(f"  Warning: Failed to read {tf}: {e}")
 
-            if writer:
-                writer.close()
-                print(f"  Combined {total_rows:,} documents from {len(toxicity_files)} files")
+                if writer:
+                    writer.close()
+                    print(f"  Combined {total_rows:,} documents from {len(toxicity_files)} files")
+                else:
+                    print("  Warning: No documents after filtering!")
+                    empty_df = pd.DataFrame({'id': [], 'text': []})
+                    gpu_save_parquet(empty_df, str(intermediate_file))
             else:
                 print("  Warning: No documents after filtering!")
                 empty_df = pd.DataFrame({'id': [], 'text': []})
                 gpu_save_parquet(empty_df, str(intermediate_file))
-        else:
-            print("  Warning: No documents after filtering!")
-            empty_df = pd.DataFrame({'id': [], 'text': []})
-            gpu_save_parquet(empty_df, str(intermediate_file))
 
-        # Stage 4: Deduplication
-        print("\n[Stage 4/4] Deduplication...")
-        stage4_start = time.time()
+            # Run deduplication
+            if not self.skip_dedup:
+                dedup_output = self.output_dir / "deduplicated"
+                gpu_fuzzy_dedup(
+                    input_path=str(intermediate_file),
+                    output_path=str(dedup_output),
+                    text_column='text',
+                    id_column='id',
+                    similarity_threshold=self.dedup_threshold,
+                    cache_path=str(self.cache_dir / "dedup_cache"),
+                    use_gpu=self.use_gpu_dedup,
+                    show_progress=self.show_progress,
+                )
 
-        if not self.skip_dedup:
-            dedup_output = self.output_dir / "deduplicated"
-            gpu_fuzzy_dedup(
-                input_path=str(intermediate_file),
-                output_path=str(dedup_output),
-                text_column='text',
-                id_column='id',
-                similarity_threshold=self.dedup_threshold,
-                cache_path=str(self.cache_dir / "dedup_cache"),
-                use_gpu=self.use_gpu_dedup,
-                show_progress=self.show_progress,
-            )
+                # Count final documents
+                final_files = list(dedup_output.glob("*.parquet"))
+                final_count = sum(len(pd.read_parquet(f)) for f in final_files)
+                stats['after_dedup'] = final_count
 
-            # Count final documents
-            final_files = list(dedup_output.glob("*.parquet"))
-            final_count = sum(len(pd.read_parquet(f)) for f in final_files)
-            stats['after_dedup'] = final_count
+                # Copy to final output
+                final_output = self.output_dir / "processed.parquet"
+                if final_files:
+                    dfs = [pd.read_parquet(f) for f in final_files]
+                    final_df = pd.concat(dfs, ignore_index=True)
+                    gpu_save_parquet(final_df, str(final_output))
+            else:
+                print("  Skipping dedup (disabled)")
+                # Copy intermediate to final
+                final_output = self.output_dir / "processed.parquet"
+                import shutil
+                shutil.copy(intermediate_file, final_output)
+                intermediate_df = pd.read_parquet(intermediate_file)
+                stats['after_dedup'] = len(intermediate_df)
+                del intermediate_df
 
-            # Copy to final output
-            final_output = self.output_dir / "processed.parquet"
-            if final_files:
-                dfs = [pd.read_parquet(f) for f in final_files]
-                final_df = pd.concat(dfs, ignore_index=True)
-                gpu_save_parquet(final_df, str(final_output))
-        else:
-            print("  Skipping (disabled)")
-            # Copy intermediate to final
-            final_output = self.output_dir / "processed.parquet"
-            import shutil
-            shutil.copy(intermediate_file, final_output)
-            intermediate_df = pd.read_parquet(intermediate_file)
-            stats['after_dedup'] = len(intermediate_df)
-            del intermediate_df
-
-        stage4_time = time.time() - stage4_start
-        print(f"  Stage 4 complete: {stats['after_dedup']:,} docs ({stage4_time:.1f}s)")
+            stage4_time = time.time() - stage4_start
+            print(f"  Stage 4 complete: {stats['after_dedup']:,} docs ({stage4_time:.1f}s)")
 
         # Summary
         stats['end_time'] = time.time()
@@ -712,6 +805,11 @@ def main():
         action="store_true",
         help="Suppress progress bars"
     )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Disable resume mode (re-run all stages from scratch)"
+    )
 
     args = parser.parse_args()
 
@@ -742,7 +840,7 @@ def main():
         show_progress=not args.quiet,
     )
 
-    stats = pipeline.process()
+    stats = pipeline.process(resume=not args.no_resume)
     return stats
 
 
