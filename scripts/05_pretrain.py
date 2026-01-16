@@ -418,16 +418,25 @@ def setup_training(
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
 
-    # Compile model with GPU-appropriate mode
+    # Compile model with GPU-appropriate mode (can be disabled via CLI for small models)
     compile_mode = gpu_info['compile_mode']
-    print(f"Compiling model with torch.compile (mode={compile_mode})...")
-    model = torch.compile(model, mode=compile_mode)
+    use_torch_compile = cli_overrides.get('torch_compile', config['training'].get('torch_compile', True))
+    if use_torch_compile:
+        print(f"Compiling model with torch.compile (mode={compile_mode})...")
+        model = torch.compile(model, mode=compile_mode)
+    else:
+        print("torch.compile disabled (--no-torch-compile flag or config)")
 
     # Check distributed training mode for FSDP
     world_size = int(os.environ.get('WORLD_SIZE', 1))
     use_fsdp = world_size > 1
     if config['training'].get('fsdp') and not use_fsdp:
         print("Note: FSDP disabled (single GPU detected). Use torchrun for multi-GPU training.")
+
+    # Resolve warmup: CLI can override with either warmup_steps or warmup_ratio
+    # warmup_ratio takes precedence if both specified (more flexible for different max_steps)
+    warmup_steps = cli_overrides.get('warmup_steps', config['training']['warmup_steps'])
+    warmup_ratio = cli_overrides.get('warmup_ratio', 0.0)
 
     # Training arguments (with CLI overrides)
     training_args = TrainingArguments(
@@ -437,13 +446,14 @@ def setup_training(
         # Optimization
         num_train_epochs=config['training']['num_train_epochs'],
         max_steps=cli_overrides.get('max_steps', config['training']['max_steps']),
-        learning_rate=config['training']['learning_rate'],
+        learning_rate=cli_overrides.get('learning_rate', config['training']['learning_rate']),
         lr_scheduler_type=config['training']['lr_scheduler'],
-        warmup_steps=config['training']['warmup_steps'],
+        warmup_steps=warmup_steps if warmup_ratio == 0.0 else 0,
+        warmup_ratio=warmup_ratio,
 
         # Batch sizing
-        per_device_train_batch_size=config['training']['per_device_train_batch_size'],
-        gradient_accumulation_steps=config['training']['gradient_accumulation_steps'],
+        per_device_train_batch_size=cli_overrides.get('per_device_train_batch_size', config['training']['per_device_train_batch_size']),
+        gradient_accumulation_steps=cli_overrides.get('gradient_accumulation_steps', config['training']['gradient_accumulation_steps']),
 
         # Precision
         bf16=config['training']['bf16'],
@@ -457,7 +467,7 @@ def setup_training(
 
         # Optimization
         # Use get_optimizer_name for 8-bit Adam fallback
-        optim=get_optimizer_name(config['training']['optim']),
+        optim=get_optimizer_name(cli_overrides.get('optim', config['training']['optim'])),
         # FSDP only works in distributed mode (world_size > 1)
         fsdp=config['training']['fsdp'] if use_fsdp else "",
         fsdp_transformer_layer_cls_to_wrap=config['training']['fsdp_transformer_layer_cls_to_wrap'] if use_fsdp else None,
@@ -477,13 +487,13 @@ def setup_training(
         save_steps=cli_overrides.get('save_steps', config['checkpointing']['save_steps']),
         save_total_limit=config['logging']['save_total_limit'],
 
-        # torch.compile
-        torch_compile=config['training'].get('torch_compile', True),
+        # torch.compile (can be disabled via CLI for small models)
+        torch_compile=cli_overrides.get('torch_compile', config['training'].get('torch_compile', True)),
         torch_compile_backend=config['training'].get('torch_compile_backend', 'inductor'),
         torch_compile_mode=compile_mode,
 
         # Data loading optimization
-        dataloader_num_workers=config['data'].get('num_workers', 8),
+        dataloader_num_workers=cli_overrides.get('dataloader_num_workers', config['data'].get('num_workers', 8)),
         dataloader_pin_memory=config['data'].get('pin_memory', True),
         dataloader_persistent_workers=config['data'].get('persistent_workers', True),
         # Required for torch.compile - compiled model has different signature
@@ -734,6 +744,19 @@ def main() -> None:
     parser.add_argument("--train_data_path", type=str, help="Override training data path")
     parser.add_argument("--eval_data_path", type=str, help="Override evaluation data path")
     parser.add_argument("--enable-oom-recovery", action="store_true", help="Enable automatic OOM recovery")
+
+    # Training hyperparameters (for size-specific optimization)
+    parser.add_argument("--per_device_train_batch_size", type=int, help="Override batch size per device")
+    parser.add_argument("--gradient_accumulation_steps", type=int, help="Override gradient accumulation steps")
+    parser.add_argument("--learning_rate", type=float, help="Override learning rate")
+    parser.add_argument("--warmup_ratio", type=float, help="Override warmup ratio (0.0-1.0)")
+    parser.add_argument("--warmup_steps", type=int, help="Override warmup steps (takes precedence over ratio)")
+    parser.add_argument("--dataloader_num_workers", type=int, help="Override number of dataloader workers")
+    parser.add_argument("--optim", type=str, choices=["adamw_torch_fused", "adamw_bnb_8bit", "adamw_torch"],
+                        help="Override optimizer")
+    parser.add_argument("--no-torch-compile", action="store_true",
+                        help="Disable torch.compile (faster for small models)")
+
     # Kernel optimization flags
     parser.add_argument("--use-liger-kernel", action="store_true", default=True,
                         help="Enable Liger Kernel (~20%% speedup, ~60%% memory reduction) [default: enabled]")
@@ -789,6 +812,24 @@ def main() -> None:
         cli_overrides['eval_data_path'] = args.eval_data_path
     if getattr(args, 'enable_oom_recovery', False):
         cli_overrides['enable_oom_recovery'] = True
+
+    # New training hyperparameter overrides (for size-specific optimization)
+    if args.per_device_train_batch_size is not None:
+        cli_overrides['per_device_train_batch_size'] = args.per_device_train_batch_size
+    if args.gradient_accumulation_steps is not None:
+        cli_overrides['gradient_accumulation_steps'] = args.gradient_accumulation_steps
+    if args.learning_rate is not None:
+        cli_overrides['learning_rate'] = args.learning_rate
+    if args.warmup_ratio is not None:
+        cli_overrides['warmup_ratio'] = args.warmup_ratio
+    if args.warmup_steps is not None:
+        cli_overrides['warmup_steps'] = args.warmup_steps
+    if args.dataloader_num_workers is not None:
+        cli_overrides['dataloader_num_workers'] = args.dataloader_num_workers
+    if args.optim is not None:
+        cli_overrides['optim'] = args.optim
+    if args.no_torch_compile:
+        cli_overrides['torch_compile'] = False
 
     # Setup and detect GPU
     gpu_info = detect_gpu_type()
