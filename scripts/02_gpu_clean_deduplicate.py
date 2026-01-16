@@ -218,20 +218,61 @@ class GPUDataPipeline:
         all_texts = []
         all_ids = []
 
-        # Find input files
+        # Find input files - ONLY pretraining data (not SFT/DPO which have different formats)
         parquet_files = list(self.input_dir.glob("**/*.parquet"))
-        if not parquet_files:
-            print(f"No parquet files found in {self.input_dir}")
-            return stats
 
-        print(f"  Found {len(parquet_files)} parquet files")
+        # Filter to only pretraining files (have 'text' column with raw text)
+        pretraining_prefixes = ['pretraining_', 'slimpajama', 'wikipedia', 'openwebtext',
+                                'the-stack', 'arxiv', 'pg19', 'c4', 'pile']
+        pretraining_files = [
+            f for f in parquet_files
+            if any(f.stem.lower().startswith(p) or p in f.stem.lower() for p in pretraining_prefixes)
+        ]
 
-        for pq_file in tqdm(parquet_files, desc="  Loading", disable=not self.show_progress):
+        # Exclude SFT/DPO/reasoning files which have different column structures
+        exclude_prefixes = ['reasoning_', 'function_calling_', 'instruction_tuning_',
+                           'preference_data_', 'logic_', 'sft_', 'dpo_']
+        pretraining_files = [
+            f for f in pretraining_files
+            if not any(f.stem.lower().startswith(p) for p in exclude_prefixes)
+        ]
+
+        if not pretraining_files:
+            # Fall back to all files if no pretraining files found
+            pretraining_files = parquet_files
+            print(f"  No pretraining-specific files found, using all {len(parquet_files)} files")
+        else:
+            print(f"  Found {len(pretraining_files)} pretraining files (filtered from {len(parquet_files)} total)")
+
+        for pq_file in tqdm(pretraining_files, desc="  Loading", disable=not self.show_progress):
             try:
-                df = gpu_load_parquet(str(pq_file), columns=['text'])
-                texts = df['text'].fillna('').tolist()
+                # Load in chunks for large files to avoid OOM
+                file_size_mb = pq_file.stat().st_size / (1024 * 1024)
+
+                if file_size_mb > 1000 and self.use_gpu_text:
+                    # Large file - load in chunks on CPU then process
+                    print(f"  Large file ({file_size_mb:.0f}MB): {pq_file.name} - loading in chunks...")
+                    chunk_size = 500_000
+                    df_iter = pd.read_parquet(pq_file, columns=['text'])
+                    texts = df_iter['text'].fillna('').tolist()
+                else:
+                    # Normal size - try GPU load first
+                    try:
+                        df = gpu_load_parquet(str(pq_file), columns=['text'])
+                        texts = df['text'].fillna('').tolist()
+                    except Exception as gpu_err:
+                        if 'out_of_memory' in str(gpu_err) or 'bad_alloc' in str(gpu_err):
+                            print(f"  GPU OOM on {pq_file.name} - falling back to CPU...")
+                            df = pd.read_parquet(pq_file, columns=['text'])
+                            texts = df['text'].fillna('').tolist()
+                        else:
+                            raise
+
                 all_texts.extend(texts)
                 all_ids.extend([f"{pq_file.stem}_{i}" for i in range(len(texts))])
+            except KeyError as e:
+                # File doesn't have 'text' column - skip it
+                print(f"  Skipping {pq_file.name}: missing column {e}")
             except Exception as e:
                 print(f"  Warning: Failed to load {pq_file}: {e}")
 
