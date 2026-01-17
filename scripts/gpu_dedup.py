@@ -12,36 +12,65 @@ import pandas as pd
 from tqdm import tqdm
 
 # Check for NeMo Curator availability
-# NeMo Curator 25.x changed the API - try multiple import paths
+# NeMo Curator API has changed across versions - try multiple import paths
 NEMO_AVAILABLE = False
 NEMO_API_VERSION = None
+NEMO_IMPORT_ERROR = None
 
-try:
-    # Try new workflow-based API (NeMo Curator 25.x)
-    from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
-    import dask.dataframe as dd
-    NEMO_AVAILABLE = True
-    NEMO_API_VERSION = "workflow"
-except ImportError:
+def _try_nemo_import():
+    """Try to import NeMo Curator with multiple API paths."""
+    global NEMO_AVAILABLE, NEMO_API_VERSION, NEMO_IMPORT_ERROR
+
+    # Try 1: NeMo Curator 1.0.0 / 25.x workflow API
     try:
-        # Try modules import (some versions)
+        from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
+        import dask.dataframe as dd
+        NEMO_AVAILABLE = True
+        NEMO_API_VERSION = "workflow"
+        return
+    except ImportError as e:
+        NEMO_IMPORT_ERROR = str(e)
+
+    # Try 2: NeMo Curator 1.0.0 stages API (alternative path)
+    try:
+        import nemo_curator.stages as stages
+        if hasattr(stages, 'deduplication'):
+            # Check what's in the deduplication module
+            dedup_mod = stages.deduplication
+            if hasattr(dedup_mod, 'fuzzy'):
+                fuzzy_mod = dedup_mod.fuzzy
+                if hasattr(fuzzy_mod, 'FuzzyDeduplicationWorkflow'):
+                    import dask.dataframe as dd
+                    NEMO_AVAILABLE = True
+                    NEMO_API_VERSION = "workflow_v2"
+                    return
+    except ImportError as e:
+        NEMO_IMPORT_ERROR = str(e)
+
+    # Try 3: modules API (some older versions)
+    try:
         from nemo_curator.modules import FuzzyDuplicates
         from nemo_curator.datasets import DocumentDataset
-        from nemo_curator.utils.distributed_utils import get_client
         import dask.dataframe as dd
         NEMO_AVAILABLE = True
         NEMO_API_VERSION = "modules"
-    except ImportError:
-        try:
-            # Try legacy direct import (NeMo Curator < 25.x)
-            from nemo_curator import FuzzyDuplicates
-            from nemo_curator.datasets import DocumentDataset
-            from nemo_curator.utils.distributed_utils import get_client
-            import dask.dataframe as dd
-            NEMO_AVAILABLE = True
-            NEMO_API_VERSION = "legacy"
-        except ImportError:
-            pass
+        return
+    except ImportError as e:
+        NEMO_IMPORT_ERROR = str(e)
+
+    # Try 4: Legacy direct import (NeMo Curator < 25.x)
+    try:
+        from nemo_curator import FuzzyDuplicates
+        from nemo_curator.datasets import DocumentDataset
+        import dask.dataframe as dd
+        NEMO_AVAILABLE = True
+        NEMO_API_VERSION = "legacy"
+        return
+    except ImportError as e:
+        NEMO_IMPORT_ERROR = str(e)
+
+# Run import check
+_try_nemo_import()
 
 # Check for dask-cuda
 try:
@@ -558,6 +587,8 @@ if __name__ == '__main__':
     print("=" * 50)
     print(f"NeMo Curator available: {NEMO_AVAILABLE}")
     print(f"NeMo API version: {NEMO_API_VERSION}")
+    if NEMO_IMPORT_ERROR and not NEMO_AVAILABLE:
+        print(f"NeMo import error: {NEMO_IMPORT_ERROR}")
     print(f"Dask CUDA available: {DASK_CUDA_AVAILABLE}")
     print(f"GPU dedup available: {is_gpu_dedup_available()}")
     print(f"Datasketch available: {DATASKETCH_AVAILABLE}")
