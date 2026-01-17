@@ -5,7 +5,6 @@ Falls back to CPU datasketch if NeMo Curator is not available.
 """
 from __future__ import annotations
 
-import os
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -13,14 +12,36 @@ import pandas as pd
 from tqdm import tqdm
 
 # Check for NeMo Curator availability
+# NeMo Curator 25.x changed the API - try multiple import paths
+NEMO_AVAILABLE = False
+NEMO_API_VERSION = None
+
 try:
-    from nemo_curator import FuzzyDuplicates
-    from nemo_curator.datasets import DocumentDataset
-    from nemo_curator.utils.distributed_utils import get_client
+    # Try new workflow-based API (NeMo Curator 25.x)
+    from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
     import dask.dataframe as dd
     NEMO_AVAILABLE = True
+    NEMO_API_VERSION = "workflow"
 except ImportError:
-    NEMO_AVAILABLE = False
+    try:
+        # Try modules import (some versions)
+        from nemo_curator.modules import FuzzyDuplicates
+        from nemo_curator.datasets import DocumentDataset
+        from nemo_curator.utils.distributed_utils import get_client
+        import dask.dataframe as dd
+        NEMO_AVAILABLE = True
+        NEMO_API_VERSION = "modules"
+    except ImportError:
+        try:
+            # Try legacy direct import (NeMo Curator < 25.x)
+            from nemo_curator import FuzzyDuplicates
+            from nemo_curator.datasets import DocumentDataset
+            from nemo_curator.utils.distributed_utils import get_client
+            import dask.dataframe as dd
+            NEMO_AVAILABLE = True
+            NEMO_API_VERSION = "legacy"
+        except ImportError:
+            pass
 
 # Check for dask-cuda
 try:
@@ -118,29 +139,197 @@ def _gpu_dedup_nemo(
     n_workers: int,
     show_progress: bool,
 ) -> str:
-    """GPU deduplication using NeMo Curator."""
-    from nemo_curator import FuzzyDuplicates
-    from nemo_curator.datasets import DocumentDataset
-    from nemo_curator.utils.distributed_utils import get_client
+    """GPU deduplication using NeMo Curator.
+
+    Supports multiple API versions:
+    - workflow: NeMo Curator 25.x (FuzzyDeduplicationWorkflow)
+    - modules: Some versions (from nemo_curator.modules import FuzzyDuplicates)
+    - legacy: NeMo Curator < 25.x (from nemo_curator import FuzzyDuplicates)
+    """
+    input_p = Path(input_path)
+    output_p = Path(output_path)
+    output_p.mkdir(parents=True, exist_ok=True)
+
+    if cache_path is None:
+        cache_p = output_p / ".nemo_cache"
+    else:
+        cache_p = Path(cache_path)
+    cache_p.mkdir(parents=True, exist_ok=True)
+
+    if show_progress:
+        print(f"GPU Deduplication (NeMo Curator - {NEMO_API_VERSION} API)")
+        print(f"  Input: {input_p}")
+        print(f"  Output: {output_p}")
+        print(f"  Threshold: {similarity_threshold}")
+        print(f"  N-grams: {char_ngrams}, Buckets: {num_buckets}")
+
+    # Use workflow API for NeMo Curator 25.x
+    if NEMO_API_VERSION == "workflow":
+        return _gpu_dedup_workflow_api(
+            input_path=input_p,
+            output_path=output_p,
+            text_column=text_column,
+            id_column=id_column,
+            similarity_threshold=similarity_threshold,
+            char_ngrams=char_ngrams,
+            num_buckets=num_buckets,
+            hashes_per_bucket=hashes_per_bucket,
+            cache_path=cache_p,
+            show_progress=show_progress,
+        )
+
+    # Use legacy/modules API for older versions
+    return _gpu_dedup_legacy_api(
+        input_path=input_p,
+        output_path=output_p,
+        text_column=text_column,
+        id_column=id_column,
+        similarity_threshold=similarity_threshold,
+        char_ngrams=char_ngrams,
+        num_buckets=num_buckets,
+        hashes_per_bucket=hashes_per_bucket,
+        cache_path=cache_p,
+        n_workers=n_workers,
+        show_progress=show_progress,
+    )
+
+
+def _gpu_dedup_workflow_api(
+    input_path: Path,
+    output_path: Path,
+    text_column: str,
+    id_column: str,
+    similarity_threshold: float,
+    char_ngrams: int,
+    num_buckets: int,
+    hashes_per_bucket: int,
+    cache_path: Path,
+    show_progress: bool,
+) -> str:
+    """GPU deduplication using NeMo Curator 25.x workflow API."""
+    from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
+
+    # Prepare input directory (workflow expects directory, not single file)
+    if input_path.is_file():
+        # Copy single file to temp directory
+        input_dir = cache_path / "input_temp"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(input_path, input_dir / input_path.name)
+        input_path_str = str(input_dir)
+    else:
+        input_path_str = str(input_path)
+
+    # Workflow output paths
+    workflow_output = cache_path / "fuzzy_output"
+    dedup_ids_path = workflow_output / "FuzzyDuplicateIds"
+
+    if show_progress:
+        print("  Running FuzzyDeduplicationWorkflow...")
+
+    try:
+        # Run the fuzzy deduplication workflow
+        workflow = FuzzyDeduplicationWorkflow(
+            input_path=input_path_str,
+            cache_path=str(cache_path / "workflow_cache"),
+            output_path=str(workflow_output),
+            text_field=text_column,
+            perform_removal=False,  # We'll handle removal ourselves
+            input_filetype="parquet",
+            seed=42,
+            char_ngrams=char_ngrams,
+            num_bands=num_buckets,
+            minhashes_per_band=hashes_per_bucket,
+        )
+        workflow.run()
+
+        if show_progress:
+            print("  Workflow complete, filtering duplicates...")
+
+        # Load duplicate IDs from workflow output
+        dup_ids = set()
+        if dedup_ids_path.exists():
+            for dup_file in dedup_ids_path.glob("*.parquet"):
+                try:
+                    dup_df = pd.read_parquet(dup_file)
+                    if id_column in dup_df.columns:
+                        dup_ids.update(dup_df[id_column].tolist())
+                    elif 'id' in dup_df.columns:
+                        dup_ids.update(dup_df['id'].tolist())
+                except Exception as e:
+                    if show_progress:
+                        print(f"  Warning: Could not read {dup_file}: {e}")
+
+        if show_progress:
+            print(f"  Found {len(dup_ids):,} duplicate IDs")
+
+        # Load original data and filter
+        if input_path.is_file():
+            df = pd.read_parquet(input_path)
+        else:
+            parquet_files = list(input_path.glob("*.parquet"))
+            dfs = [pd.read_parquet(f) for f in parquet_files]
+            df = pd.concat(dfs, ignore_index=True)
+
+        n_docs = len(df)
+
+        # Add ID column if missing
+        if id_column not in df.columns:
+            df[id_column] = df.index.astype(str)
+
+        # Filter out duplicates
+        result_df = df[~df[id_column].isin(dup_ids)]
+
+        # Save results
+        result_df.to_parquet(output_path / "deduplicated.parquet", index=False)
+
+        if show_progress:
+            n_kept = len(result_df)
+            n_removed = n_docs - n_kept
+            print(f"  Removed: {n_removed:,} duplicates ({100*n_removed/n_docs:.1f}%)")
+            print(f"  Kept: {n_kept:,} unique documents")
+
+    except Exception as e:
+        if show_progress:
+            print(f"  Warning: Workflow API failed ({e}), falling back to CPU")
+        # Fall back to CPU deduplication
+        return _cpu_dedup_datasketch(
+            input_path=str(input_path),
+            output_path=str(output_path),
+            text_column=text_column,
+            id_column=id_column,
+            similarity_threshold=similarity_threshold,
+            show_progress=show_progress,
+        )
+
+    return str(output_path)
+
+
+def _gpu_dedup_legacy_api(
+    input_path: Path,
+    output_path: Path,
+    text_column: str,
+    id_column: str,
+    similarity_threshold: float,
+    char_ngrams: int,
+    num_buckets: int,
+    hashes_per_bucket: int,
+    cache_path: Path,
+    n_workers: int,
+    show_progress: bool,
+) -> str:
+    """GPU deduplication using legacy NeMo Curator API (< 25.x)."""
     from dask_cuda import LocalCUDACluster
     import dask.dataframe as dd
 
-    input_path = Path(input_path)
-    output_path = Path(output_path)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    if cache_path is None:
-        cache_path = output_path / ".nemo_cache"
+    # Import based on API version
+    if NEMO_API_VERSION == "modules":
+        from nemo_curator.modules import FuzzyDuplicates
+        from nemo_curator.datasets import DocumentDataset
+        from nemo_curator.utils.distributed_utils import get_client
     else:
-        cache_path = Path(cache_path)
-    cache_path.mkdir(parents=True, exist_ok=True)
-
-    if show_progress:
-        print(f"GPU Deduplication (NeMo Curator)")
-        print(f"  Input: {input_path}")
-        print(f"  Output: {output_path}")
-        print(f"  Threshold: {similarity_threshold}")
-        print(f"  N-grams: {char_ngrams}, Buckets: {num_buckets}")
+        from nemo_curator import FuzzyDuplicates
+        from nemo_curator.datasets import DocumentDataset
+        from nemo_curator.utils.distributed_utils import get_client
 
     # Start Dask CUDA cluster
     cluster = LocalCUDACluster(n_workers=n_workers)
@@ -149,6 +338,7 @@ def _gpu_dedup_nemo(
     if show_progress:
         print(f"  Dask cluster: {n_workers} GPU workers")
 
+    n_docs = 0
     try:
         # Load data
         if input_path.is_file():
@@ -163,8 +353,8 @@ def _gpu_dedup_nemo(
         # Create NeMo dataset
         dataset = DocumentDataset(ddf)
 
+        n_docs = len(ddf)
         if show_progress:
-            n_docs = len(ddf)
             print(f"  Documents: {n_docs:,}")
 
         # Configure fuzzy deduplication
@@ -230,21 +420,21 @@ def _cpu_dedup_datasketch(
 
     from datasketch import MinHash, MinHashLSH
 
-    input_path = Path(input_path)
-    output_path = Path(output_path)
-    output_path.mkdir(parents=True, exist_ok=True)
+    input_p = Path(input_path)
+    output_p = Path(output_path)
+    output_p.mkdir(parents=True, exist_ok=True)
 
     if show_progress:
         print(f"CPU Deduplication (datasketch)")
-        print(f"  Input: {input_path}")
-        print(f"  Output: {output_path}")
+        print(f"  Input: {input_p}")
+        print(f"  Output: {output_p}")
         print(f"  Threshold: {similarity_threshold}")
 
     # Load data
-    if input_path.is_file():
-        df = pd.read_parquet(input_path)
+    if input_p.is_file():
+        df = pd.read_parquet(input_p)
     else:
-        parquet_files = list(input_path.glob("*.parquet"))
+        parquet_files = list(input_p.glob("*.parquet"))
         dfs = [pd.read_parquet(f) for f in parquet_files]
         df = pd.concat(dfs, ignore_index=True)
 
@@ -283,7 +473,7 @@ def _cpu_dedup_datasketch(
 
     # Filter and save
     result_df = df[keep_mask]
-    output_file = output_path / "deduplicated.parquet"
+    output_file = output_p / "deduplicated.parquet"
     result_df.to_parquet(output_file, index=False)
 
     if show_progress:
@@ -292,7 +482,7 @@ def _cpu_dedup_datasketch(
         print(f"  Removed: {n_removed:,} duplicates ({100*n_removed/n_docs:.1f}%)")
         print(f"  Kept: {n_kept:,} unique documents")
 
-    return str(output_path)
+    return str(output_p)
 
 
 def benchmark_dedup(n_samples: int = 10_000) -> dict:
@@ -367,6 +557,7 @@ if __name__ == '__main__':
     print("GPU Dedup Utils - Testing")
     print("=" * 50)
     print(f"NeMo Curator available: {NEMO_AVAILABLE}")
+    print(f"NeMo API version: {NEMO_API_VERSION}")
     print(f"Dask CUDA available: {DASK_CUDA_AVAILABLE}")
     print(f"GPU dedup available: {is_gpu_dedup_available()}")
     print(f"Datasketch available: {DATASKETCH_AVAILABLE}")
