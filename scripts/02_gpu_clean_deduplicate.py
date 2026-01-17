@@ -83,6 +83,7 @@ class GPUDataPipeline:
         input_dir: str = "data/raw",
         output_dir: str = "data/processed",
         cache_dir: str = ".gpu_cache",
+        backup_dir: Optional[str] = None,
         use_gpu: Optional[bool] = None,
         fast_quality: bool = False,
         skip_quality: bool = False,
@@ -99,6 +100,7 @@ class GPUDataPipeline:
             input_dir: Directory with raw parquet files
             output_dir: Output directory for processed data
             cache_dir: Cache directory for intermediate results
+            backup_dir: Optional backup directory (e.g., Google Drive) for incremental sync
             use_gpu: Force GPU (True) or CPU (False). None = auto-detect.
             fast_quality: Skip expensive repetition filters
             skip_quality: Skip ALL quality filtering (fastest)
@@ -112,6 +114,7 @@ class GPUDataPipeline:
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.cache_dir = Path(cache_dir)
+        self.backup_dir = Path(backup_dir) if backup_dir else None
         self.fast_quality = fast_quality
         self.skip_quality = skip_quality
         self.skip_toxicity = skip_toxicity
@@ -120,6 +123,12 @@ class GPUDataPipeline:
         self.dedup_threshold = dedup_threshold
         self.batch_size = batch_size
         self.show_progress = show_progress
+
+        # Create backup subdirectories if backup_dir specified
+        if self.backup_dir:
+            (self.backup_dir / "cleaned").mkdir(parents=True, exist_ok=True)
+            (self.backup_dir / "quality_filtered").mkdir(parents=True, exist_ok=True)
+            (self.backup_dir / "toxicity_filtered").mkdir(parents=True, exist_ok=True)
 
         # Auto-detect GPU capabilities
         if use_gpu is None:
@@ -237,6 +246,68 @@ class GPUDataPipeline:
                 pass
         return total
 
+    def _backup_file(self, local_file: Path, stage: str) -> None:
+        """Backup a single file to the backup directory."""
+        if not self.backup_dir:
+            return
+        try:
+            import shutil
+            backup_path = self.backup_dir / stage / local_file.name
+            shutil.copy2(local_file, backup_path)
+        except Exception as e:
+            print(f"  Warning: Backup failed for {local_file.name}: {e}")
+
+    def _restore_from_backup(self, local_dir: Path, stage: str) -> int:
+        """Restore files from backup directory to local cache.
+
+        Returns:
+            Number of files restored
+        """
+        if not self.backup_dir:
+            return 0
+
+        backup_stage_dir = self.backup_dir / stage
+        if not backup_stage_dir.exists():
+            return 0
+
+        local_dir.mkdir(parents=True, exist_ok=True)
+        restored = 0
+
+        for backup_file in backup_stage_dir.glob("*.parquet"):
+            local_file = local_dir / backup_file.name
+            if not local_file.exists():
+                try:
+                    import shutil
+                    shutil.copy2(backup_file, local_file)
+                    restored += 1
+                except Exception:
+                    pass
+
+        return restored
+
+    def _get_processed_files(self, local_dir: Path, stage: str) -> set:
+        """Get set of already-processed file prefixes from local + backup."""
+        processed = set()
+
+        # Check local cache
+        for f in local_dir.glob("*.parquet"):
+            # Extract the source file prefix (e.g., "pretraining_fineweb-edu-sample")
+            # Filename format: cleaned_{file_idx:03d}_{chunk_idx:04d}_{stem[:30]}.parquet
+            parts = f.stem.split('_', 3)
+            if len(parts) >= 4:
+                processed.add(parts[3])  # The stem[:30] part
+
+        # Check backup
+        if self.backup_dir:
+            backup_dir = self.backup_dir / stage
+            if backup_dir.exists():
+                for f in backup_dir.glob("*.parquet"):
+                    parts = f.stem.split('_', 3)
+                    if len(parts) >= 4:
+                        processed.add(parts[3])
+
+        return processed
+
     def process(self, resume: bool = True) -> dict:
         """Run the full GPU pipeline.
 
@@ -298,6 +369,17 @@ class GPUDataPipeline:
             print("\n[Stage 1/4] Loading and cleaning text (streaming mode)...")
             cleaned_dir.mkdir(parents=True, exist_ok=True)
 
+            # Restore any existing files from backup (if backup_dir specified)
+            if self.backup_dir:
+                restored = self._restore_from_backup(cleaned_dir, "cleaned")
+                if restored > 0:
+                    print(f"  Restored {restored} chunk files from backup")
+
+            # Get already-processed file prefixes (for resume within stage)
+            processed_prefixes = self._get_processed_files(cleaned_dir, "cleaned")
+            if processed_prefixes:
+                print(f"  Found {len(processed_prefixes)} already-processed file prefixes")
+
             # Find input files - ONLY pretraining data (not SFT/DPO which have different formats)
             parquet_files = list(self.input_dir.glob("**/*.parquet"))
 
@@ -333,6 +415,17 @@ class GPUDataPipeline:
 
             for file_idx, pq_file in enumerate(tqdm(pretraining_files, desc="  Processing files", disable=not self.show_progress)):
                 try:
+                    # Check if this file was already processed (resume support)
+                    file_prefix = pq_file.stem[:30]
+                    if file_prefix in processed_prefixes:
+                        # Count existing chunks for this file
+                        existing_chunks = list(cleaned_dir.glob(f"cleaned_{file_idx:03d}_*_{file_prefix}.parquet"))
+                        if existing_chunks:
+                            existing_docs = sum(len(pd.read_parquet(f)) for f in existing_chunks)
+                            total_cleaned += existing_docs
+                            print(f"    {pq_file.name}: SKIPPED (already processed, {existing_docs:,} docs)")
+                            continue
+
                     # Use very small row groups for streaming (10K rows at a time)
                     STREAM_CHUNK_SIZE = 10_000
 
@@ -351,6 +444,7 @@ class GPUDataPipeline:
                     file_input = 0
                     file_cleaned = 0
                     chunk_idx = 0
+                    file_chunk_files = []  # Track chunk files for this input file
 
                     # Stream through the file in small batches
                     for batch in parquet_file.iter_batches(batch_size=STREAM_CHUNK_SIZE, columns=['text']):
@@ -390,6 +484,7 @@ class GPUDataPipeline:
                             cleaned_df = pd.DataFrame({'id': all_ids, 'text': cleaned_texts})
                             cleaned_file = cleaned_dir / f"cleaned_{file_idx:03d}_{chunk_idx:04d}_{pq_file.stem[:30]}.parquet"
                             cleaned_df.to_parquet(cleaned_file, compression='snappy')
+                            file_chunk_files.append(cleaned_file)
                             file_cleaned += len(cleaned_df)
                             total_cleaned += len(cleaned_df)
                             del cleaned_df
@@ -401,6 +496,11 @@ class GPUDataPipeline:
 
                     del parquet_file
                     gc.collect()
+
+                    # Backup all chunks for this file after processing completes
+                    if self.backup_dir and file_chunk_files:
+                        for chunk_file in file_chunk_files:
+                            self._backup_file(chunk_file, "cleaned")
 
                     print(f"    {pq_file.name}: {file_input:,} -> {file_cleaned:,} docs ({chunk_idx} chunks)")
 
@@ -764,6 +864,11 @@ def main():
         help="Cache directory"
     )
     parser.add_argument(
+        "--backup-dir",
+        default=None,
+        help="Backup directory (e.g., Google Drive) for incremental sync and resume"
+    )
+    parser.add_argument(
         "--force-gpu",
         action="store_true",
         help="Force GPU mode (fail if not available)"
@@ -852,6 +957,7 @@ def main():
         input_dir=args.input,
         output_dir=args.output,
         cache_dir=args.cache,
+        backup_dir=args.backup_dir,
         use_gpu=use_gpu,
         fast_quality=args.fast_quality,
         skip_quality=args.skip_quality,
