@@ -85,6 +85,7 @@ class GPUDataPipeline:
         cache_dir: str = ".gpu_cache",
         use_gpu: Optional[bool] = None,
         fast_quality: bool = False,
+        skip_quality: bool = False,
         skip_toxicity: bool = False,
         skip_dedup: bool = False,
         toxicity_threshold: float = 0.7,
@@ -100,6 +101,7 @@ class GPUDataPipeline:
             cache_dir: Cache directory for intermediate results
             use_gpu: Force GPU (True) or CPU (False). None = auto-detect.
             fast_quality: Skip expensive repetition filters
+            skip_quality: Skip ALL quality filtering (fastest)
             skip_toxicity: Skip toxicity filtering
             skip_dedup: Skip deduplication
             toxicity_threshold: Threshold for toxicity detection
@@ -111,6 +113,7 @@ class GPUDataPipeline:
         self.output_dir = Path(output_dir)
         self.cache_dir = Path(cache_dir)
         self.fast_quality = fast_quality
+        self.skip_quality = skip_quality
         self.skip_toxicity = skip_toxicity
         self.skip_dedup = skip_dedup
         self.toxicity_threshold = toxicity_threshold
@@ -264,7 +267,7 @@ class GPUDataPipeline:
         print(f"Output: {self.output_dir}")
         print(f"GPU Text Cleaning: {self.use_gpu_text} (RAPIDS)")
         print(f"GPU Deduplication: {self.use_gpu_dedup} (NeMo)")
-        print(f"Quality Filters: {[f[0] for f in self.quality_filters]}")
+        print(f"Quality Filters: {'SKIPPED' if self.skip_quality else [f[0] for f in self.quality_filters]}")
         print(f"Toxicity Filter: {not self.skip_toxicity}")
         print(f"Deduplication: {not self.skip_dedup}")
         print(f"Resume Mode: {resume}")
@@ -420,6 +423,20 @@ class GPUDataPipeline:
             print("\n[Stage 2/4] SKIPPED (already complete)")
             stats['after_quality'] = self._count_docs_in_dir(quality_dir)
             print(f"  Found {stats['after_quality']:,} quality-filtered docs in cache")
+        elif self.skip_quality:
+            # Fast mode: skip quality filtering entirely, just copy files
+            print("\n[Stage 2/4] SKIPPED (--skip-quality mode)")
+            quality_dir.mkdir(parents=True, exist_ok=True)
+            cleaned_files = sorted(cleaned_dir.glob("*.parquet"))
+            total_after_quality = 0
+            for cf in tqdm(cleaned_files, desc="  Copying files", disable=not self.show_progress):
+                df = pd.read_parquet(cf)
+                total_after_quality += len(df)
+                df.to_parquet(quality_dir / cf.name, compression='snappy')
+                del df
+            stats['after_quality'] = total_after_quality
+            stage2_time = time.time() - stage2_start
+            print(f"  Stage 2 complete: {stats['after_quality']:,} docs copied ({stage2_time:.1f}s)")
         else:
             print("\n[Stage 2/4] Quality filtering (streaming mode)...")
             quality_dir.mkdir(parents=True, exist_ok=True)
@@ -762,6 +779,11 @@ def main():
         help="Skip expensive quality filters (repetition detection)"
     )
     parser.add_argument(
+        "--skip-quality",
+        action="store_true",
+        help="Skip ALL quality filtering (fastest mode, just clean + dedup)"
+    )
+    parser.add_argument(
         "--no-toxicity",
         action="store_true",
         help="Skip toxicity filtering"
@@ -832,6 +854,7 @@ def main():
         cache_dir=args.cache,
         use_gpu=use_gpu,
         fast_quality=args.fast_quality,
+        skip_quality=args.skip_quality,
         skip_toxicity=args.no_toxicity,
         skip_dedup=args.no_dedup,
         toxicity_threshold=args.toxicity_threshold,
