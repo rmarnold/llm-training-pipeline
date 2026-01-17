@@ -1,0 +1,1037 @@
+Cleaning command: python scripts/02_clean_deduplicate_optimized.py --input-dir /content/data_local/raw --output-dir /content/data_local/processed --legacy --full-clean --fast-quality --drive-dir /content/drive/MyDrive/llm-training-pipeline/data/processed --sync-threads 10
+Pipeline mode: LEGACY (multiprocessing)
+Unicode cleaning: FULL (plsfix)
+Quality filters: fast
+
+Using LOCAL SSD for faster I/O (3-5x speedup)
+  Input:  /content/data_local/raw
+  Output: /content/data_local/processed
+
+Drive auto-sync: ENABLED
+  Each stage syncs to: /content/drive/MyDrive/llm-training-pipeline/data/processed
+  Recovery: If interrupted, re-run to resume from last completed stage
+
+Cleaning mode: FULL (with plsfix Unicode/mojibake fixing)
+Quality filters: FAST (GopherQuality only)
+Pipeline mode: LEGACY (with multiprocessing)
+Starting optimized data cleaning:
+  - GPU acceleration: True
+  - Checkpoint caching: True
+  - Batch size: None
+  - CPU workers: 9
+  - File pattern: pretraining_
+  - Drive sync: ENABLED (10 threads)
+  - Drive path: /content/drive/MyDrive/llm-training-pipeline/data/processed
+
+
+============================================================
+Found 3 files to process
+GPU acceleration: True
+Caching enabled: True
+Batch size: None
+CPU workers: 9
+Drive sync: ENABLED (10 threads)
+Drive path: /content/drive/MyDrive/llm-training-pipeline/data/processed
+============================================================
+
+  [Restored stage state from Google Drive]
+
+==================================================
+STAGE RECOVERY STATUS
+==================================================
+  text_clean: COMPLETE
+  quality_filter: COMPLETE
+  toxicity_filter: COMPLETE
+  dedup: COMPLETE
+  final: COMPLETE
+==================================================
+
+
+Processing pretraining_openwebtext.parquet...
+  Source file: 8,013,769 documents
+  Cleaning 8,013,769 documents (of 8,013,769 total)...
+    Streaming from parquet (batch_size=100,000)...
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [01:34<00:00, 8443.34it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 8443.34it/s] done]
+    Cleaning text: 100% 500000/500000 [02:00<00:00, 4152.54it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [01:34<00:00, 6630.79it/s] 
+    Cleaning text: 100% 500000/500000 [01:50<00:00, 6630.79it/s] done]
+    Cleaning text: 100% 500000/500000 [01:53<00:00, 4387.89it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [01:38<00:00, 7162.39it/s]
+    Cleaning text: 100% 500000/500000 [01:54<00:00, 7162.39it/s] done]
+    Cleaning text: 100% 500000/500000 [01:57<00:00, 4240.59it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 497475/500000 [01:36<00:00, 10887.90it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 10887.90it/s] done]
+    Cleaning text: 100% 500000/500000 [01:56<00:00, 4303.35it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  98% 490001/500000 [01:36<00:01, 7672.21it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 7672.21it/s] done]
+    Cleaning text: 100% 500000/500000 [01:55<00:00, 4319.61it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  98% 490001/500000 [01:36<00:01, 8756.32it/s]
+    Cleaning text: 100% 500000/500000 [01:53<00:00, 8756.32it/s] done]
+    Cleaning text: 100% 500000/500000 [01:56<00:00, 4298.20it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  98% 490001/500000 [01:36<00:01, 9113.61it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 9113.61it/s] done]
+    Cleaning text: 100% 500000/500000 [01:55<00:00, 4314.89it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  98% 490001/500000 [01:36<00:01, 7630.55it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 7630.55it/s] done]
+    Cleaning text: 100% 500000/500000 [01:55<00:00, 4333.58it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [01:37<00:00, 9321.23it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 9321.23it/s] done]
+    Cleaning text: 100% 500000/500000 [01:55<00:00, 4311.51it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  98% 490001/500000 [01:36<00:01, 8186.94it/s]
+    Cleaning text: 100% 500000/500000 [01:53<00:00, 8186.94it/s] done]
+    Cleaning text: 100% 500000/500000 [01:56<00:00, 4294.61it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  98% 490001/500000 [01:37<00:01, 7531.11it/s]
+    Cleaning text: 100% 500000/500000 [01:53<00:00, 7531.11it/s] done]
+    Cleaning text: 100% 500000/500000 [01:56<00:00, 4276.64it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  97% 485001/500000 [01:36<00:02, 6773.12it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 6773.12it/s] done]
+    Cleaning text: 100% 500000/500000 [01:56<00:00, 4309.26it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [01:36<00:00, 9523.42it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 9523.42it/s] done]
+    Cleaning text: 100% 500000/500000 [01:55<00:00, 4340.83it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  97% 485001/500000 [01:36<00:01, 7787.02it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 7787.02it/s] done]
+    Cleaning text: 100% 500000/500000 [01:55<00:00, 4318.41it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [01:36<00:00, 8997.66it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 8997.66it/s] done]
+    Cleaning text: 100% 500000/500000 [01:55<00:00, 4328.10it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [01:37<00:00, 8836.93it/s]
+    Cleaning text: 100% 500000/500000 [01:52<00:00, 8836.93it/s] done]
+    Cleaning text: 100% 500000/500000 [01:55<00:00, 4318.98it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text: 100% 13769/13769 [00:10<00:00, 1273.63it/s]
+
+    [Saving chunk 0: 13,769 docs...] done]
+
+  [Stage 'text_clean' marked complete]
+
+  Syncing stage 'text_clean' to Google Drive...
+    2 files, 1155.7 MB, 10 threads
+    Synced 2/2 files to Drive
+  Processing 17 chunks through quality/toxicity filters...
+    Auto-tuned toxicity: batch_size=256, fp16=True for NVIDIA A100-SXM4-80GB (85GB)
+Loading toxicity model on cuda...
+2026-01-08 08:57:00.665974: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2026-01-08 08:57:01.319735: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1767862621.595136   37493 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1767862621.671774   37493 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1767862622.229620   37493 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1767862622.229665   37493 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1767862622.229669   37493 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1767862622.229675   37493 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2026-01-08 08:57:02.282261: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+    Model verified on cuda:0
+    Converted model to fp16 for faster inference
+    Warming up GPU with test batch...
+    GPU warmup complete
+      Datatrove filters enabled: ['use_gopher_quality']
+    Using datatrove (Gopher+FineWeb) parallel quality filters (9 workers)
+    Chunk 1/1: 13,769 docs
+      Quality filter: 100% 13769/13769 [01:31<00:00, 150.00it/s]
+      Rejection breakdown:
+        - Passed: 12,656 (91.9%)
+        - Failed quality: 1,113 (8.1%)
+      After quality: 12,656 docs (91.9% kept)
+    Pre-tokenizing 12,656 texts using 12 CPU cores...
+    Tokenizing (num_proc=12): 100% 12656/12656 [00:23<00:00, 540.62 examples/s] 
+    Tokenization complete. Running GPU inference...
+    Toxicity (cuda, fp16, bs=256, parallel_tok): 100% 50/50 [00:10<00:00,  4.77batch/s]
+      After toxicity: 12,636 docs
+
+    Quality filter summary:
+      Total passed: 12,656/8,013,769 (0.2%)
+      Rejection reasons:
+        - Quality (word count/stop words): 1,113 (0.0%)
+    After toxicity filter: 12,636/8,013,769 (0.2%)
+
+  [Stage 'quality_filter' marked complete]
+
+  Syncing stage 'quality_filter' to Google Drive...
+    1 files, 35.3 MB, 10 threads
+    Synced 1/1 files to Drive
+
+  [Stage 'toxicity_filter' marked complete]
+
+  Syncing stage 'toxicity_filter' to Google Drive...
+    1 files, 35.3 MB, 10 threads
+    Synced 1/1 files to Drive
+  Streaming deduplication across 1 filtered chunks...
+Loading toxicity model on cpu...
+    Deduplicating: 100% 1/1 [01:54<00:00, 114.55s/it]
+
+    After deduplication: 12636/8013769 (0.2%)
+Saved pretraining_openwebtext_clean.parquet: 12636/8013769 documents
+
+  [Stage 'dedup' marked complete]
+
+  Syncing stage 'dedup' to Google Drive...
+    1 files, 35.3 MB, 10 threads
+    Synced 1/1 files to Drive
+
+  [Stage 'final' marked complete]
+
+  Syncing stage 'final' to Google Drive...
+    1 files, 35.3 MB, 10 threads
+    Synced 1/1 files to Drive
+
+==================================================
+STAGE RECOVERY STATUS
+==================================================
+  text_clean: COMPLETE
+  quality_filter: COMPLETE
+  toxicity_filter: COMPLETE
+  dedup: COMPLETE
+  final: COMPLETE
+==================================================
+
+
+Processing pretraining_wikipedia-en.parquet...
+  Source file: 6,407,814 documents
+  Cleaning 6,407,814 documents (of 6,407,814 total)...
+    Streaming from parquet (batch_size=100,000)...
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [01:13<00:00, 12855.85it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [01:28<00:00, 5634.04it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [00:59<00:00, 14155.46it/s]
+    Cleaning text: 100% 500000/500000 [01:10<00:00, 14155.46it/s] done]
+    Cleaning text: 100% 500000/500000 [01:11<00:00, 6964.22it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [00:54<00:00, 17139.97it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [01:04<00:00, 7807.35it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [00:52<00:00, 10810.53it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [01:02<00:00, 7990.09it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [00:53<00:00, 8373.07it/s] 
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [01:03<00:00, 7905.28it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  97% 485001/500000 [01:08<00:00, 20657.36it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [01:20<00:00, 6195.14it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  98% 490001/500000 [00:49<00:00, 15670.19it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [00:57<00:00, 8682.01it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [00:48<00:00, 16055.06it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [00:57<00:00, 8769.71it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  97% 485001/500000 [00:46<00:00, 16971.65it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [00:55<00:00, 9020.79it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  98% 490001/500000 [00:46<00:00, 20609.75it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [00:54<00:00, 9104.83it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [00:47<00:00, 18784.54it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [00:56<00:00, 8851.33it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [01:47<00:00, 7185.00it/s]
+    Cleaning text: 100% 500000/500000 [02:04<00:00, 7185.00it/s] done]
+    Cleaning text: 100% 500000/500000 [02:09<00:00, 3875.62it/s]
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text: 100% 407814/407814 [01:20<00:00, 5080.44it/s] 
+
+    [Saving chunk 0: 407,814 docs...] done]
+
+  [Stage 'text_clean' marked complete]
+
+  Syncing stage 'text_clean' to Google Drive...
+    1 files, 1117.0 MB, 10 threads
+    Synced 1/1 files to Drive
+  Processing 13 chunks through quality/toxicity filters...
+    Auto-tuned toxicity: batch_size=256, fp16=True for NVIDIA A100-SXM4-80GB (85GB)
+      Datatrove filters enabled: ['use_gopher_quality']
+    Using datatrove (Gopher+FineWeb) parallel quality filters (9 workers)
+    Chunk 1/1: 407,814 docs
+      Quality filter: 100% 407814/407814 [19:15<00:00, 352.92it/s]
+      Rejection breakdown:
+        - Passed: 288,671 (70.8%)
+        - Failed quality: 119,143 (29.2%)
+      After quality: 288,671 docs (70.8% kept)
+    Pre-tokenizing 288,671 texts using 12 CPU cores...
+    Tokenizing (num_proc=12):   1% 4000/288671 [00:48<39:46, 119.28 examples/s]terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+    Tokenizing (num_proc=12):   2% 6000/288671 [00:59<31:59, 147.30 examples/s]terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+    Tokenizing (num_proc=12):   2% 6000/288671 [01:06<52:27, 89.79 examples/s] 
+Error processing pretraining_wikipedia-en.parquet: One of the subprocesses has abruptly died during map operation.To debug the error, disable multiprocessing.
+Traceback (most recent call last):
+  File "/content/llm-training-pipeline/scripts/02_clean_deduplicate_optimized.py", line 1891, in process_single_file
+    toxic_mask = cleaner.is_toxic_batch(chunk_df['text'].tolist(), show_progress=True)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/llm-training-pipeline/scripts/02_clean_deduplicate_optimized.py", line 491, in is_toxic_batch
+    all_inputs = parallel_tokenize(
+                 ^^^^^^^^^^^^^^^^^^
+  File "/content/llm-training-pipeline/scripts/02_clean_deduplicate_optimized.py", line 302, in parallel_tokenize
+    tokenized = ds.map(
+                ^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/datasets/arrow_dataset.py", line 560, in wrapper
+    out: Union["Dataset", "DatasetDict"] = func(self, *args, **kwargs)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/datasets/arrow_dataset.py", line 3309, in map
+    for rank, done, content in iflatmap_unordered(
+                               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/datasets/utils/py_utils.py", line 619, in iflatmap_unordered
+    raise RuntimeError(
+RuntimeError: One of the subprocesses has abruptly died during map operation.To debug the error, disable multiprocessing.
+
+==================================================
+STAGE RECOVERY STATUS
+==================================================
+  text_clean: COMPLETE
+  quality_filter: COMPLETE
+  toxicity_filter: COMPLETE
+  dedup: COMPLETE
+  final: COMPLETE
+==================================================
+
+
+Processing pretraining_wikitext.parquet...
+  Source file: 1,801,350 documents
+  Cleaning 1,801,350 documents (of 1,801,350 total)...
+    Streaming from parquet (batch_size=100,000)...
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  97% 485001/500000 [00:10<00:00, 136462.73it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [00:12<00:00, 41314.60it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  99% 495001/500000 [00:11<00:00, 139208.07it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [00:12<00:00, 40403.10it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text:  96% 478480/500000 [00:10<00:00, 119905.54it/s]
+    [Saving chunk 0: 500,000 docs...] done]
+    Cleaning text: 100% 500000/500000 [00:12<00:00, 40685.46it/s] 
+    Using 9 CPU workers (pool_chunk=5,000, save_chunk=500,000)...
+    Cleaning text: 100% 301350/301350 [00:09<00:00, 33077.99it/s] 
+
+    [Saving chunk 0: 301,350 docs...] done]
+
+  [Stage 'text_clean' marked complete]
+
+  Syncing stage 'text_clean' to Google Drive...
+    1 files, 48.8 MB, 10 threads
+    Synced 1/1 files to Drive
+  Processing 4 chunks through quality/toxicity filters...
+    Auto-tuned toxicity: batch_size=256, fp16=True for NVIDIA A100-SXM4-80GB (85GB)
+      Datatrove filters enabled: ['use_gopher_quality']
+    Using datatrove (Gopher+FineWeb) parallel quality filters (9 workers)
+    Chunk 1/1: 301,350 docs
+      Quality filter: 100% 301350/301350 [01:09<00:00, 4318.81it/s]
+      Rejection breakdown:
+        - Passed: 83,674 (27.8%)
+        - Failed quality: 217,676 (72.2%)
+      After quality: 83,674 docs (27.8% kept)
+    Pre-tokenizing 83,674 texts using 12 CPU cores...
+    Tokenizing (num_proc=12):  14% 12000/83674 [00:17<00:33, 2168.43 examples/s]terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+    Tokenizing (num_proc=12):  18% 15000/83674 [00:18<00:26, 2543.64 examples/s]terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+    Tokenizing (num_proc=12):  20% 17000/83674 [00:18<00:22, 2988.63 examples/s]terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+    Tokenizing (num_proc=12):  22% 18000/83674 [00:19<00:23, 2748.02 examples/s]terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+terminate called after throwing an instance of 'c10::AcceleratorError'
+  what():  CUDA error: initialization error
+Search for `cudaErrorInitializationError' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Exception raised from c10_cuda_check_implementation at /pytorch/c10/cuda/CUDAException.cpp:44 (most recent call first):
+frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x80 (0x7d3a2f97cb80 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #1: <unknown function> + 0x11fb7 (0x7d3a2fc66fb7 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #2: c10::cuda::ExchangeDevice(signed char) + 0x9a (0x7d3a2fcad35a in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10_cuda.so)
+frame #3: <unknown function> + 0x11794cd (0x7d39b2bca4cd in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #4: <unknown function> + 0x117999e (0x7d39b2bca99e in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #5: <unknown function> + 0x11748f3 (0x7d39b2bc58f3 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #6: <unknown function> + 0x117c425 (0x7d39b2bcd425 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so)
+frame #7: <unknown function> + 0x4827bf (0x7d3a003917bf in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #8: c10::TensorImpl::~TensorImpl() + 0x9 (0x7d3a2f959d69 in /usr/local/lib/python3.12/dist-packages/torch/lib/libc10.so)
+frame #9: <unknown function> + 0x7cb668 (0x7d3a006da668 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #10: <unknown function> + 0x7cb9d5 (0x7d3a006da9d5 in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so)
+frame #11: python3() [0x53e034]
+frame #12: python3() [0x57f260]
+frame #13: python3() [0x57f221]
+frame #14: python3() [0x57f221]
+frame #15: python3() [0x57f221]
+frame #16: python3() [0x57f221]
+frame #17: python3() [0x57e276]
+frame #18: python3() [0x535e9a]
+frame #19: python3() [0x55a0df]
+frame #20: python3() [0x620c0e]
+frame #21: python3() [0x620b22]
+<omitting python frames>
+frame #23: python3() [0x599e7d]
+frame #24: python3() [0x599a0e]
+frame #27: python3() [0x599e7d]
+frame #28: python3() [0x599a0e]
+frame #31: python3() [0x599e7d]
+frame #32: python3() [0x599a0e]
+frame #37: python3() [0x66a45d]
+frame #41: python3() [0x66f0a3]
+frame #44: python3() [0x596c48]
+frame #45: python3() [0x5c844d]
+frame #48: python3() [0x57e4aa]
+frame #52: python3() [0x57e4aa]
+frame #56: python3() [0x65c44b]
+frame #57: python3() [0x6574d6]
+frame #58: python3() [0x654145]
+
+    Tokenizing (num_proc=12):  22% 18000/83674 [00:27<01:40, 650.43 examples/s] 
+Error processing pretraining_wikitext.parquet: One of the subprocesses has abruptly died during map operation.To debug the error, disable multiprocessing.
+Traceback (most recent call last):
+  File "/content/llm-training-pipeline/scripts/02_clean_deduplicate_optimized.py", line 1891, in process_single_file
+    toxic_mask = cleaner.is_toxic_batch(chunk_df['text'].tolist(), show_progress=True)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/llm-training-pipeline/scripts/02_clean_deduplicate_optimized.py", line 491, in is_toxic_batch
+    all_inputs = parallel_tokenize(
+                 ^^^^^^^^^^^^^^^^^^
+  File "/content/llm-training-pipeline/scripts/02_clean_deduplicate_optimized.py", line 302, in parallel_tokenize
+    tokenized = ds.map(
+                ^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/datasets/arrow_dataset.py", line 560, in wrapper
+    out: Union["Dataset", "DatasetDict"] = func(self, *args, **kwargs)
+                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/datasets/arrow_dataset.py", line 3309, in map
+    for rank, done, content in iflatmap_unordered(
+                               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/datasets/utils/py_utils.py", line 619, in iflatmap_unordered
+    raise RuntimeError(
+RuntimeError: One of the subprocesses has abruptly died during map operation.To debug the error, disable multiprocessing.
+
+============================================================
+SUMMARY
+============================================================
+  pretraining_openwebtext.parquet: 12636/8013769 (0.2%)
+
+Total: 12636/8013769 (0.2% kept)
+============================================================
+
