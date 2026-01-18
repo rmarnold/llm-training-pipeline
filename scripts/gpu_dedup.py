@@ -245,7 +245,10 @@ def _gpu_dedup_workflow_api(
     """
     from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
     from nemo_curator.core.client import RayClient
-    from nemo_curator.stages.deduplication.id_generator import create_id_generator_actor
+    from nemo_curator.stages.deduplication.id_generator import (
+        create_id_generator_actor,
+        kill_id_generator_actor,
+    )
 
     # Prepare input directory (workflow expects directory, not single file)
     if input_path.is_file():
@@ -303,6 +306,14 @@ def _gpu_dedup_workflow_api(
 
     try:
         # Step 3: Create ID generator actor (MUST be done after RayClient starts)
+        # First, kill any existing actor from previous runs to avoid conflicts
+        if show_progress:
+            print("  Cleaning up any existing ID generator actor...")
+        try:
+            kill_id_generator_actor()
+        except Exception:
+            pass  # No existing actor, which is fine
+
         if show_progress:
             print("  Creating ID generator actor...")
         create_id_generator_actor()
