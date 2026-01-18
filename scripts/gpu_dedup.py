@@ -325,6 +325,30 @@ def _gpu_dedup_workflow_api(
         if show_progress:
             print("  Starting FuzzyDeduplicationWorkflow...")
 
+        # Determine appropriate blocksize based on available GPU memory
+        # Default 1GiB is too large for T4 (16GB) with large datasets
+        # Use smaller blocks to avoid OOM - 256MB should work on most GPUs
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                if gpu_mem_gb < 20:
+                    # T4 (16GB) or smaller - use smaller blocks
+                    input_blocksize = "256MiB"
+                elif gpu_mem_gb < 50:
+                    # A10 (24GB), L4 (24GB) - use medium blocks
+                    input_blocksize = "512MiB"
+                else:
+                    # A100 (40GB/80GB), H100 - can use larger blocks
+                    input_blocksize = "1GiB"
+            else:
+                input_blocksize = "256MiB"
+        except Exception:
+            input_blocksize = "256MiB"
+
+        if show_progress:
+            print(f"    input_blocksize: {input_blocksize}")
+
         workflow = FuzzyDeduplicationWorkflow(
             input_path=input_path_str,
             cache_path=str(workflow_cache / "minhash_cache"),
@@ -332,6 +356,7 @@ def _gpu_dedup_workflow_api(
             text_field=text_column,
             perform_removal=False,  # Identify only - removal not implemented in 1.0.0
             input_filetype="parquet",
+            input_blocksize=input_blocksize,  # Control memory usage per block
             seed=42,
             char_ngrams=char_ngrams,
             num_bands=num_buckets,

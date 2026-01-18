@@ -667,55 +667,23 @@ class GPUDataPipeline:
         else:
             print("\n[Stage 4/4] Deduplication...")
 
-            # First, combine files for deduplication (streaming concatenation to avoid OOM)
-            print("  Combining files for deduplication (streaming mode)...")
-            intermediate_path = self.cache_dir / "pre_dedup"
-            intermediate_path.mkdir(parents=True, exist_ok=True)
-            intermediate_file = intermediate_path / "data.parquet"
-
+            # For GPU deduplication, pass the directory of files instead of combining
+            # This allows the workflow to process files in chunks and avoid OOM
             toxicity_files = sorted(toxicity_dir.glob("*.parquet"))
-
-            import pyarrow.parquet as pq
-
-            if toxicity_files:
-                # Use pyarrow to stream-concatenate without loading all into memory
-                import pyarrow.parquet as pq_writer
-
-                # First pass: collect all record batches
-                writer = None
-                total_rows = 0
-
-                for tf in tqdm(toxicity_files, desc="  Combining files", disable=not self.show_progress):
-                    try:
-                        table = pq.read_table(tf)
-                        total_rows += table.num_rows
-
-                        if writer is None:
-                            writer = pq_writer.ParquetWriter(str(intermediate_file), table.schema)
-
-                        writer.write_table(table)
-                        del table
-                        gc.collect()
-                    except Exception as e:
-                        print(f"  Warning: Failed to read {tf}: {e}")
-
-                if writer:
-                    writer.close()
-                    print(f"  Combined {total_rows:,} documents from {len(toxicity_files)} files")
-                else:
-                    print("  Warning: No documents after filtering!")
-                    empty_df = pd.DataFrame({'id': [], 'text': []})
-                    gpu_save_parquet(empty_df, str(intermediate_file))
-            else:
-                print("  Warning: No documents after filtering!")
-                empty_df = pd.DataFrame({'id': [], 'text': []})
-                gpu_save_parquet(empty_df, str(intermediate_file))
+            total_rows = sum(len(pd.read_parquet(f)) for f in toxicity_files[:3]) if len(toxicity_files) >= 3 else 0
+            # Estimate total from sample
+            if toxicity_files and total_rows > 0:
+                avg_per_file = total_rows / min(3, len(toxicity_files))
+                total_rows = int(avg_per_file * len(toxicity_files))
+            print(f"  Found {len(toxicity_files)} files (~{total_rows:,} docs) for deduplication")
 
             # Run deduplication
             if not self.skip_dedup:
                 dedup_output = self.output_dir / "deduplicated"
+                # Pass the DIRECTORY of files, not a single combined file
+                # This allows NeMo Curator to process files in chunks based on input_blocksize
                 gpu_fuzzy_dedup(
-                    input_path=str(intermediate_file),
+                    input_path=str(toxicity_dir),  # Directory of chunk files
                     output_path=str(dedup_output),
                     text_column='text',
                     id_column='id',
@@ -738,13 +706,27 @@ class GPUDataPipeline:
                     gpu_save_parquet(final_df, str(final_output))
             else:
                 print("  Skipping dedup (disabled)")
-                # Copy intermediate to final
+                # Combine toxicity files into final output
                 final_output = self.output_dir / "processed.parquet"
-                import shutil
-                shutil.copy(intermediate_file, final_output)
-                intermediate_df = pd.read_parquet(intermediate_file)
-                stats['after_dedup'] = len(intermediate_df)
-                del intermediate_df
+                if toxicity_files:
+                    import pyarrow.parquet as pq
+                    import pyarrow.parquet as pq_writer
+                    writer = None
+                    total_rows = 0
+                    for tf in toxicity_files:
+                        table = pq.read_table(tf)
+                        total_rows += table.num_rows
+                        if writer is None:
+                            writer = pq_writer.ParquetWriter(str(final_output), table.schema)
+                        writer.write_table(table)
+                        del table
+                    if writer:
+                        writer.close()
+                    stats['after_dedup'] = total_rows
+                else:
+                    empty_df = pd.DataFrame({'id': [], 'text': []})
+                    gpu_save_parquet(empty_df, str(final_output))
+                    stats['after_dedup'] = 0
 
             stage4_time = time.time() - stage4_start
             print(f"  Stage 4 complete: {stats['after_dedup']:,} docs ({stage4_time:.1f}s)")
