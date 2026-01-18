@@ -235,7 +235,11 @@ def _gpu_dedup_workflow_api(
     cache_path: Path,
     show_progress: bool,
 ) -> str:
-    """GPU deduplication using NeMo Curator 25.x workflow API."""
+    """GPU deduplication using NeMo Curator 1.0.0+ workflow API.
+
+    Uses FuzzyDeduplicationWorkflow with perform_removal=True for end-to-end
+    GPU-accelerated deduplication.
+    """
     from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
 
     # Prepare input directory (workflow expects directory, not single file)
@@ -248,21 +252,36 @@ def _gpu_dedup_workflow_api(
     else:
         input_path_str = str(input_path)
 
-    # Workflow output paths
-    workflow_output = cache_path / "fuzzy_output"
-    dedup_ids_path = workflow_output / "FuzzyDuplicateIds"
+    # Workflow output paths - use output_path directly for deduplicated data
+    workflow_cache = cache_path / "workflow_cache"
+    workflow_cache.mkdir(parents=True, exist_ok=True)
+
+    # Output goes directly to our output path
+    dedup_output = output_path / "deduplicated"
+    dedup_output.mkdir(parents=True, exist_ok=True)
 
     if show_progress:
-        print("  Running FuzzyDeduplicationWorkflow...")
+        print("  Running FuzzyDeduplicationWorkflow (with removal)...")
+        print(f"    char_ngrams: {char_ngrams} (recommended: 20+ for lower false positives)")
+        print(f"    num_bands: {num_buckets}, minhashes_per_band: {hashes_per_bucket}")
 
     try:
-        # Run the fuzzy deduplication workflow
+        # Shutdown any existing Ray instance to start fresh
+        try:
+            import ray
+            if ray.is_initialized():
+                ray.shutdown()
+        except Exception:
+            pass
+
+        # Run the fuzzy deduplication workflow with removal
+        # Setting perform_removal=True lets the workflow handle everything
         workflow = FuzzyDeduplicationWorkflow(
             input_path=input_path_str,
-            cache_path=str(cache_path / "workflow_cache"),
-            output_path=str(workflow_output),
+            cache_path=str(workflow_cache),
+            output_path=str(dedup_output),
             text_field=text_column,
-            perform_removal=False,  # We'll handle removal ourselves
+            perform_removal=True,  # Let workflow handle removal end-to-end
             input_filetype="parquet",
             seed=42,
             char_ngrams=char_ngrams,
@@ -272,54 +291,111 @@ def _gpu_dedup_workflow_api(
         workflow.run()
 
         if show_progress:
-            print("  Workflow complete, filtering duplicates...")
-
-        # Load duplicate IDs from workflow output
-        dup_ids = set()
-        if dedup_ids_path.exists():
-            for dup_file in dedup_ids_path.glob("*.parquet"):
-                try:
-                    dup_df = pd.read_parquet(dup_file)
-                    if id_column in dup_df.columns:
-                        dup_ids.update(dup_df[id_column].tolist())
-                    elif 'id' in dup_df.columns:
-                        dup_ids.update(dup_df['id'].tolist())
-                except Exception as e:
-                    if show_progress:
-                        print(f"  Warning: Could not read {dup_file}: {e}")
-
-        if show_progress:
-            print(f"  Found {len(dup_ids):,} duplicate IDs")
-
-        # Load original data and filter
-        if input_path.is_file():
-            df = pd.read_parquet(input_path)
-        else:
-            parquet_files = list(input_path.glob("*.parquet"))
-            dfs = [pd.read_parquet(f) for f in parquet_files]
-            df = pd.concat(dfs, ignore_index=True)
-
-        n_docs = len(df)
-
-        # Add ID column if missing
-        if id_column not in df.columns:
-            df[id_column] = df.index.astype(str)
-
-        # Filter out duplicates
-        result_df = df[~df[id_column].isin(dup_ids)]
-
-        # Save results
-        result_df.to_parquet(output_path / "deduplicated.parquet", index=False)
-
-        if show_progress:
-            n_kept = len(result_df)
-            n_removed = n_docs - n_kept
-            print(f"  Removed: {n_removed:,} duplicates ({100*n_removed/n_docs:.1f}%)")
-            print(f"  Kept: {n_kept:,} unique documents")
+            # Count results
+            result_files = list(dedup_output.glob("*.parquet"))
+            if result_files:
+                n_kept = sum(len(pd.read_parquet(f)) for f in result_files)
+                print(f"  Workflow complete!")
+                print(f"  Output: {len(result_files)} parquet files, {n_kept:,} documents")
+            else:
+                print("  Workflow complete (check output directory)")
 
     except Exception as e:
+        error_msg = str(e)
         if show_progress:
-            print(f"  Warning: Workflow API failed ({e}), falling back to CPU")
+            print(f"  Warning: Workflow API failed: {error_msg}")
+
+        # Check if it's a Ray/actor error - try without removal as fallback
+        if "actor" in error_msg.lower() or "ray" in error_msg.lower():
+            if show_progress:
+                print("  Trying workflow without removal (identify-only mode)...")
+            try:
+                # Shutdown Ray and try again
+                try:
+                    import ray
+                    if ray.is_initialized():
+                        ray.shutdown()
+                except Exception:
+                    pass
+
+                # Just identify duplicates, we'll remove manually
+                id_output = cache_path / "fuzzy_ids"
+                workflow = FuzzyDeduplicationWorkflow(
+                    input_path=input_path_str,
+                    cache_path=str(workflow_cache),
+                    output_path=str(id_output),
+                    text_field=text_column,
+                    perform_removal=False,
+                    input_filetype="parquet",
+                    seed=42,
+                    char_ngrams=char_ngrams,
+                    num_bands=num_buckets,
+                    minhashes_per_band=hashes_per_bucket,
+                )
+                workflow.run()
+
+                # Manual removal based on identified duplicates
+                if show_progress:
+                    print("  Identify complete, removing duplicates manually...")
+
+                # Load duplicate IDs
+                dup_ids_path = id_output / "FuzzyDuplicateIds"
+                dup_ids = set()
+                if dup_ids_path.exists():
+                    for dup_file in dup_ids_path.glob("*.parquet"):
+                        try:
+                            dup_df = pd.read_parquet(dup_file)
+                            # Get the ID column - workflow uses _curator_dedup_id
+                            for col in ['_curator_dedup_id', id_column, 'id']:
+                                if col in dup_df.columns:
+                                    dup_ids.update(dup_df[col].tolist())
+                                    break
+                        except Exception:
+                            pass
+
+                if show_progress:
+                    print(f"  Found {len(dup_ids):,} duplicate IDs")
+
+                # Load and filter original data
+                if input_path.is_file():
+                    df = pd.read_parquet(input_path)
+                else:
+                    parquet_files = list(input_path.glob("*.parquet"))
+                    dfs = [pd.read_parquet(f) for f in parquet_files]
+                    df = pd.concat(dfs, ignore_index=True)
+
+                n_docs = len(df)
+
+                # Filter - check multiple ID columns
+                filtered = False
+                for col in ['_curator_dedup_id', id_column, 'id']:
+                    if col in df.columns:
+                        df = df[~df[col].isin(dup_ids)]
+                        filtered = True
+                        break
+
+                if not filtered and id_column not in df.columns:
+                    # Add index as ID and filter
+                    df['_temp_id'] = df.index.astype(str)
+                    df = df[~df['_temp_id'].isin(dup_ids)]
+                    df = df.drop('_temp_id', axis=1)
+
+                # Save results
+                df.to_parquet(dedup_output / "deduplicated.parquet", index=False)
+
+                if show_progress:
+                    n_kept = len(df)
+                    n_removed = n_docs - n_kept
+                    print(f"  Removed: {n_removed:,} duplicates ({100*n_removed/n_docs:.1f}%)")
+                    print(f"  Kept: {n_kept:,} unique documents")
+
+                return str(output_path)
+
+            except Exception as e2:
+                if show_progress:
+                    print(f"  Identify-only mode also failed: {e2}")
+                    print("  Falling back to CPU datasketch...")
+
         # Fall back to CPU deduplication
         return _cpu_dedup_datasketch(
             input_path=str(input_path),
