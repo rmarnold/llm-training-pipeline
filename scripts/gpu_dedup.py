@@ -237,10 +237,15 @@ def _gpu_dedup_workflow_api(
 ) -> str:
     """GPU deduplication using NeMo Curator 1.0.0+ workflow API.
 
-    Uses FuzzyDeduplicationWorkflow with perform_removal=True for end-to-end
-    GPU-accelerated deduplication.
+    Uses FuzzyDeduplicationWorkflow with proper RayClient initialization.
+    The workflow requires:
+    1. RayClient started with GPU support
+    2. ID generator actor created after RayClient starts
+    3. Then workflow can be run
     """
     from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
+    from nemo_curator.core.client import RayClient
+    from nemo_curator.stages.deduplication.id_generator import create_id_generator_actor
 
     # Prepare input directory (workflow expects directory, not single file)
     if input_path.is_file():
@@ -265,32 +270,51 @@ def _gpu_dedup_workflow_api(
         print(f"    char_ngrams: {char_ngrams} (recommended: 20+ for lower false positives)")
         print(f"    num_bands: {num_buckets}, minhashes_per_band: {hashes_per_bucket}")
 
+    # Step 1: Shutdown any existing Ray instances to ensure clean state
     try:
-        # Shutdown any existing Ray instance to start fresh
-        try:
-            import ray
-            if ray.is_initialized():
-                ray.shutdown()
-        except Exception:
-            pass
+        import ray
+        if ray.is_initialized():
+            if show_progress:
+                print("  Shutting down existing Ray instance...")
+            ray.shutdown()
+            import time
+            time.sleep(2)  # Give Ray time to fully shutdown
+    except Exception:
+        pass
 
-        # Import ID generator functions - required for NeMo Curator 1.0.0
-        from nemo_curator.stages.deduplication.id_generator import (
-            create_id_generator_actor,
-            write_id_generator_to_disk,
-            kill_id_generator_actor,
-        )
+    # Step 2: Initialize RayClient with GPU support
+    # This is REQUIRED before creating the ID generator actor
+    if show_progress:
+        print("  Initializing RayClient with GPU support...")
 
+    # Detect available GPUs
+    try:
+        import torch
+        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    except ImportError:
+        num_gpus = 1  # Assume 1 GPU if torch not available
+
+    # Use fewer CPUs to avoid resource contention in Colab
+    import os
+    num_cpus = min(os.cpu_count() or 4, 8)
+
+    ray_client = RayClient(num_cpus=num_cpus, num_gpus=num_gpus)
+    ray_client.start()
+
+    try:
+        # Step 3: Create ID generator actor (MUST be done after RayClient starts)
+        if show_progress:
+            print("  Creating ID generator actor...")
+        create_id_generator_actor()
+
+        # Step 4: Create and run workflow
         # NeMo Curator 1.0.0: perform_removal is not implemented yet
         # So we use perform_removal=False to identify duplicates, then remove manually
         id_output = workflow_cache / "fuzzy_ids"
         id_output.mkdir(parents=True, exist_ok=True)
 
-        # Create the ID generator actor BEFORE running the workflow
-        # This is required for the MinHashStage to work
         if show_progress:
-            print("  Initializing ID generator actor...")
-        create_id_generator_actor()
+            print("  Starting FuzzyDeduplicationWorkflow...")
 
         workflow = FuzzyDeduplicationWorkflow(
             input_path=input_path_str,
@@ -305,11 +329,6 @@ def _gpu_dedup_workflow_api(
             minhashes_per_band=hashes_per_bucket,
         )
         workflow.run()
-
-        # Save ID generator state and clean up
-        id_generator_path = str(workflow_cache / "fuzzy_id_generator.json")
-        write_id_generator_to_disk(id_generator_path)
-        kill_id_generator_actor()
 
         if show_progress:
             print("  MinHash + LSH complete, loading duplicate IDs...")
@@ -379,6 +398,8 @@ def _gpu_dedup_workflow_api(
             print(f"  Removed: {n_removed:,} duplicates ({100*n_removed/n_docs:.1f}%)")
             print(f"  Kept: {n_kept:,} unique documents")
 
+        return str(output_path)
+
     except Exception as e:
         error_msg = str(e)
         if show_progress:
@@ -395,7 +416,14 @@ def _gpu_dedup_workflow_api(
             show_progress=show_progress,
         )
 
-    return str(output_path)
+    finally:
+        # Step 5: Always stop RayClient when done (success or failure)
+        try:
+            if show_progress:
+                print("  Stopping RayClient...")
+            ray_client.stop()
+        except Exception:
+            pass  # Ignore cleanup errors
 
 
 def _gpu_dedup_legacy_api(
