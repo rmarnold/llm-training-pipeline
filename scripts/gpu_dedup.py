@@ -274,10 +274,23 @@ def _gpu_dedup_workflow_api(
         except Exception:
             pass
 
+        # Import ID generator functions - required for NeMo Curator 1.0.0
+        from nemo_curator.stages.deduplication.id_generator import (
+            create_id_generator_actor,
+            write_id_generator_to_disk,
+            kill_id_generator_actor,
+        )
+
         # NeMo Curator 1.0.0: perform_removal is not implemented yet
         # So we use perform_removal=False to identify duplicates, then remove manually
         id_output = workflow_cache / "fuzzy_ids"
         id_output.mkdir(parents=True, exist_ok=True)
+
+        # Create the ID generator actor BEFORE running the workflow
+        # This is required for the MinHashStage to work
+        if show_progress:
+            print("  Initializing ID generator actor...")
+        create_id_generator_actor()
 
         workflow = FuzzyDeduplicationWorkflow(
             input_path=input_path_str,
@@ -292,6 +305,11 @@ def _gpu_dedup_workflow_api(
             minhashes_per_band=hashes_per_bucket,
         )
         workflow.run()
+
+        # Save ID generator state and clean up
+        id_generator_path = str(workflow_cache / "fuzzy_id_generator.json")
+        write_id_generator_to_disk(id_generator_path)
+        kill_id_generator_actor()
 
         if show_progress:
             print("  MinHash + LSH complete, loading duplicate IDs...")
