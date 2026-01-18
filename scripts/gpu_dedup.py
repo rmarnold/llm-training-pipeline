@@ -391,45 +391,75 @@ def _gpu_dedup_workflow_api(
         if show_progress:
             print(f"  Found {len(dup_ids):,} duplicate document IDs")
 
-        # Load original data and remove duplicates
+        # Remove duplicates by streaming through files one at a time
+        # This avoids loading all 12M+ documents into memory at once
         if show_progress:
-            print("  Removing duplicates from original data...")
+            print("  Removing duplicates from original data (streaming mode)...")
+
+        import pyarrow.parquet as pq
 
         if input_path.is_file():
-            df = pd.read_parquet(input_path)
+            parquet_files = [input_path]
         else:
-            parquet_files = list(input_path.glob("*.parquet"))
-            dfs = [pd.read_parquet(f) for f in parquet_files]
-            df = pd.concat(dfs, ignore_index=True)
+            parquet_files = sorted(input_path.glob("*.parquet"))
 
-        n_docs = len(df)
+        # Stream through files, filter duplicates, write incrementally
+        writer = None
+        n_docs = 0
+        n_kept = 0
+        output_file = dedup_output / "deduplicated.parquet"
 
-        # The workflow adds _curator_dedup_id to processed data
-        # Check for it in the output, or use original ID column
-        id_col_to_use = None
-        for col in ['_curator_dedup_id', id_column, 'id']:
-            if col in df.columns:
-                id_col_to_use = col
-                break
+        for i, pf in enumerate(parquet_files):
+            try:
+                # Read one file at a time
+                df = pd.read_parquet(pf)
+                file_docs = len(df)
+                n_docs += file_docs
 
-        if id_col_to_use:
-            # Convert to string for matching
-            df[id_col_to_use] = df[id_col_to_use].astype(str)
-            result_df = df[~df[id_col_to_use].isin(dup_ids)]
-        else:
-            # No ID column - use index-based approach
-            # This happens if the input didn't have IDs and workflow didn't add them
-            df['_temp_idx'] = df.index.astype(str)
-            result_df = df[~df['_temp_idx'].isin(dup_ids)]
-            result_df = result_df.drop('_temp_idx', axis=1)
+                # Find the ID column
+                id_col_to_use = None
+                for col in ['_curator_dedup_id', id_column, 'id']:
+                    if col in df.columns:
+                        id_col_to_use = col
+                        break
 
-        # Save deduplicated results
-        result_df.to_parquet(dedup_output / "deduplicated.parquet", index=False)
+                if id_col_to_use:
+                    # Filter out duplicates
+                    df[id_col_to_use] = df[id_col_to_use].astype(str)
+                    filtered_df = df[~df[id_col_to_use].isin(dup_ids)]
+                else:
+                    # No ID column - keep all (can't filter without IDs)
+                    filtered_df = df
+
+                n_kept += len(filtered_df)
+
+                # Write incrementally using PyArrow
+                if len(filtered_df) > 0:
+                    table = pq.Table.from_pandas(filtered_df, preserve_index=False)
+                    if writer is None:
+                        writer = pq.ParquetWriter(str(output_file), table.schema)
+                    writer.write_table(table)
+
+                # Free memory
+                del df, filtered_df
+                if 'table' in dir():
+                    del table
+
+                # Progress update every 100 files
+                if show_progress and (i + 1) % 100 == 0:
+                    print(f"    Processed {i + 1}/{len(parquet_files)} files, kept {n_kept:,}/{n_docs:,} docs")
+
+            except Exception as e:
+                if show_progress:
+                    print(f"    Warning: Error processing {pf.name}: {e}")
+
+        if writer:
+            writer.close()
 
         if show_progress:
-            n_kept = len(result_df)
             n_removed = n_docs - n_kept
-            print(f"  Removed: {n_removed:,} duplicates ({100*n_removed/n_docs:.1f}%)")
+            pct_removed = 100 * n_removed / max(1, n_docs)
+            print(f"  Removed: {n_removed:,} duplicates ({pct_removed:.1f}%)")
             print(f"  Kept: {n_kept:,} unique documents")
 
         return str(output_path)
