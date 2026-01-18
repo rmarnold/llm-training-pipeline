@@ -245,10 +245,7 @@ def _gpu_dedup_workflow_api(
     """
     from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
     from nemo_curator.core.client import RayClient
-    from nemo_curator.stages.deduplication.id_generator import (
-        create_id_generator_actor,
-        kill_id_generator_actor,
-    )
+    from nemo_curator.stages.deduplication.id_generator import kill_id_generator_actor
 
     # Prepare input directory (workflow expects directory, not single file)
     if input_path.is_file():
@@ -305,8 +302,9 @@ def _gpu_dedup_workflow_api(
     ray_client.start()
 
     try:
-        # Step 3: Create ID generator actor (MUST be done after RayClient starts)
-        # First, kill any existing actor from previous runs to avoid conflicts
+        # Step 3: Clean up any existing ID generator actor from previous runs
+        # The workflow will create its own actor - we just need to ensure
+        # no stale actor exists from a previous run
         if show_progress:
             print("  Cleaning up any existing ID generator actor...")
         try:
@@ -314,9 +312,9 @@ def _gpu_dedup_workflow_api(
         except Exception:
             pass  # No existing actor, which is fine
 
-        if show_progress:
-            print("  Creating ID generator actor...")
-        create_id_generator_actor()
+        # DO NOT call create_id_generator_actor() here!
+        # The FuzzyDeduplicationWorkflow creates and manages the actor internally.
+        # If we create it, the workflow will fail with "actor already exists" error.
 
         # Step 4: Create and run workflow
         # NeMo Curator 1.0.0: perform_removal is not implemented yet
