@@ -396,6 +396,7 @@ def _gpu_dedup_workflow_api(
         if show_progress:
             print("  Removing duplicates from original data (streaming mode)...")
 
+        import pyarrow as pa
         import pyarrow.parquet as pq
 
         if input_path.is_file():
@@ -435,7 +436,7 @@ def _gpu_dedup_workflow_api(
 
                 # Write incrementally using PyArrow
                 if len(filtered_df) > 0:
-                    table = pq.Table.from_pandas(filtered_df, preserve_index=False)
+                    table = pa.Table.from_pandas(filtered_df, preserve_index=False)
                     if writer is None:
                         writer = pq.ParquetWriter(str(output_file), table.schema)
                     writer.write_table(table)
