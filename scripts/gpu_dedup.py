@@ -395,38 +395,13 @@ def _gpu_dedup_workflow_api(
         if show_progress:
             print(f"  Found {len(dup_curator_ids):,} duplicate curator IDs")
 
-        # Now we need to map _curator_dedup_id back to original document IDs
-        # The minhash cache contains this mapping
-        dup_ids = set()
-        minhash_cache = workflow_cache / "minhash_cache" / "MinHashStage"
-        if minhash_cache.exists() and len(dup_curator_ids) > 0:
-            minhash_files = list(minhash_cache.glob("*.parquet"))
-            if show_progress:
-                print(f"  Mapping {len(dup_curator_ids):,} curator IDs to original IDs using {len(minhash_files)} minhash files...")
-
-            for mf in minhash_files:
-                try:
-                    # Read minhash file which has both _curator_dedup_id and original id
-                    mh_df = pd.read_parquet(mf, columns=['_curator_dedup_id', id_column] if id_column != '_curator_dedup_id' else ['_curator_dedup_id'])
-                    # Find rows where curator ID is in our duplicate set
-                    mask = mh_df['_curator_dedup_id'].isin(dup_curator_ids)
-                    if mask.any():
-                        if id_column in mh_df.columns and id_column != '_curator_dedup_id':
-                            # Map to original IDs
-                            dup_ids.update(mh_df.loc[mask, id_column].astype(str).tolist())
-                        else:
-                            # Use curator IDs directly if no separate ID column
-                            dup_ids.update(mh_df.loc[mask, '_curator_dedup_id'].astype(str).tolist())
-                    del mh_df
-                except Exception as e:
-                    if show_progress:
-                        print(f"    Warning: Could not read minhash file {mf.name}: {e}")
-        else:
-            # Fallback - use curator IDs directly (won't match unless files have _curator_dedup_id)
-            dup_ids = set(str(x) for x in dup_curator_ids)
+        # NeMo Curator assigns sequential _curator_dedup_id values (0, 1, 2, ...) as it processes
+        # documents in file order. We'll use these IDs directly for filtering.
+        # The dup_curator_ids set contains the internal IDs of duplicates to remove.
+        dup_ids = dup_curator_ids  # Use curator IDs directly
 
         if show_progress:
-            print(f"  Found {len(dup_ids):,} duplicate document IDs")
+            print(f"  Will filter using {len(dup_ids):,} curator IDs")
 
         # Remove duplicates by streaming through files one at a time
         # This avoids loading all 12M+ documents into memory at once
@@ -442,9 +417,11 @@ def _gpu_dedup_workflow_api(
             parquet_files = sorted(input_path.glob("*.parquet"))
 
         # Stream through files, filter duplicates, write incrementally
+        # Track global document index to match _curator_dedup_id assignment
         writer = None
         n_docs = 0
         n_kept = 0
+        global_doc_idx = 0  # NeMo Curator assigns sequential IDs starting from 0
         output_file = dedup_output / "deduplicated.parquet"
 
         for i, pf in enumerate(parquet_files):
@@ -454,20 +431,18 @@ def _gpu_dedup_workflow_api(
                 file_docs = len(df)
                 n_docs += file_docs
 
-                # Find the ID column
-                id_col_to_use = None
-                for col in ['_curator_dedup_id', id_column, 'id']:
-                    if col in df.columns:
-                        id_col_to_use = col
-                        break
+                # NeMo Curator assigns _curator_dedup_id sequentially across all documents
+                # as it processes files in sorted order. We match by computing the same
+                # global index for each document.
+                # Create curator IDs for this file's documents
+                file_curator_ids = list(range(global_doc_idx, global_doc_idx + file_docs))
 
-                if id_col_to_use:
-                    # Filter out duplicates
-                    df[id_col_to_use] = df[id_col_to_use].astype(str)
-                    filtered_df = df[~df[id_col_to_use].isin(dup_ids)]
-                else:
-                    # No ID column - keep all (can't filter without IDs)
-                    filtered_df = df
+                # Create mask for documents to keep (not in duplicate set)
+                keep_mask = [cid not in dup_ids for cid in file_curator_ids]
+                filtered_df = df[keep_mask]
+
+                # Update global index for next file
+                global_doc_idx += file_docs
 
                 n_kept += len(filtered_df)
 
@@ -479,7 +454,7 @@ def _gpu_dedup_workflow_api(
                     writer.write_table(table)
 
                 # Free memory
-                del df, filtered_df
+                del df, filtered_df, keep_mask, file_curator_ids
                 if 'table' in dir():
                     del table
 
