@@ -738,17 +738,31 @@ class GPUDataPipeline:
                     show_progress=self.show_progress,
                 )
 
-                # Count final documents
+                # Count final documents (use metadata to avoid loading into memory)
                 final_files = list(dedup_output.glob("*.parquet"))
-                final_count = sum(len(pd.read_parquet(f)) for f in final_files)
+                import pyarrow.parquet as pq_count
+                final_count = sum(pq_count.read_metadata(f).num_rows for f in final_files)
                 stats['after_dedup'] = final_count
 
-                # Copy to final output
+                # Move to final output (don't copy to avoid OOM with 11M+ docs)
                 final_output = self.output_dir / "processed.parquet"
                 if final_files:
-                    dfs = [pd.read_parquet(f) for f in final_files]
-                    final_df = pd.concat(dfs, ignore_index=True)
-                    gpu_save_parquet(final_df, str(final_output))
+                    if len(final_files) == 1:
+                        # Single file - just move it
+                        import shutil
+                        shutil.move(str(final_files[0]), str(final_output))
+                    else:
+                        # Multiple files - stream and merge without loading all into memory
+                        import pyarrow.parquet as pq_merge
+                        writer = None
+                        for ff in final_files:
+                            table = pq_merge.read_table(ff)
+                            if writer is None:
+                                writer = pq_merge.ParquetWriter(str(final_output), table.schema)
+                            writer.write_table(table)
+                            del table
+                        if writer:
+                            writer.close()
             else:
                 print("  Skipping dedup (disabled)")
                 # Combine toxicity files into final output
