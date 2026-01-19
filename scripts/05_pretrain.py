@@ -314,6 +314,23 @@ def get_curriculum_data_path(
     """
     cli_overrides = cli_overrides or {}
 
+    def is_valid_hf_dataset(path: str) -> bool:
+        """Check if path contains a valid HuggingFace Dataset with non-empty state.json."""
+        state_file = os.path.join(path, 'state.json')
+        if not os.path.exists(state_file):
+            return False
+        try:
+            # Check if state.json is non-empty and valid JSON
+            with open(state_file, 'r') as f:
+                content = f.read().strip()
+                if not content:
+                    return False
+                import json
+                json.loads(content)
+                return True
+        except (json.JSONDecodeError, IOError):
+            return False
+
     # CLI overrides take precedence - check each path independently
     cli_train_path = cli_overrides.get('train_data_path')
     cli_eval_path = cli_overrides.get('eval_data_path')
@@ -325,12 +342,21 @@ def get_curriculum_data_path(
         train_subdir = os.path.join(cli_train_path, 'train')
         val_subdir = os.path.join(cli_train_path, 'val')
         if os.path.exists(train_subdir) and os.path.isdir(train_subdir):
-            # Check if train_subdir is a valid HuggingFace Dataset (has state.json)
-            if os.path.exists(os.path.join(train_subdir, 'state.json')):
-                print(f"Auto-detected HuggingFace Dataset at {train_subdir}")
+            # Check if train_subdir is a valid HuggingFace Dataset (non-empty state.json)
+            if is_valid_hf_dataset(train_subdir):
+                print(f"Auto-detected valid HuggingFace Dataset at {train_subdir}")
                 cli_train_path = train_subdir
-                if cli_eval_path is None and os.path.exists(val_subdir):
+                if cli_eval_path is None and is_valid_hf_dataset(val_subdir):
                     cli_eval_path = val_subdir
+            else:
+                # state.json exists but is empty/corrupted - warn user
+                state_file = os.path.join(train_subdir, 'state.json')
+                if os.path.exists(state_file):
+                    print(f"WARNING: Found corrupted/empty state.json at {train_subdir}")
+                    print(f"  The local dataset copy may be incomplete.")
+                    print(f"  Checking if original path has valid data...")
+                    # Don't use the corrupted subdirectory, keep original path
+                    # User may have passed the direct train path
 
         if cli_eval_path:
             return cli_train_path, cli_eval_path
@@ -560,6 +586,30 @@ def setup_training(
     if not os.path.exists(eval_data_path):
         print(f"Error: Validation data not found at {eval_data_path}")
         sys.exit(1)
+
+    # Validate dataset integrity before loading
+    def validate_dataset_path(path: str, name: str) -> None:
+        """Validate that a HuggingFace dataset path has valid state.json."""
+        state_file = os.path.join(path, 'state.json')
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, 'r') as f:
+                    content = f.read().strip()
+                    if not content:
+                        raise ValueError("state.json is empty")
+                    import json
+                    json.loads(content)
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"\nError: {name} dataset at {path} has corrupted state.json")
+                print(f"  Issue: {e}")
+                print(f"\nThis usually happens when copying data to local SSD was interrupted.")
+                print(f"Solutions:")
+                print(f"  1. Re-copy the dataset: rm -rf {path} && cp -r <source> {path}")
+                print(f"  2. Use the original path directly (e.g., from Google Drive)")
+                sys.exit(1)
+
+    validate_dataset_path(train_data_path, "Training")
+    validate_dataset_path(eval_data_path, "Validation")
 
     print(f"\nLoading data from: {train_data_path}")
     train_dataset = load_from_disk(train_data_path)
