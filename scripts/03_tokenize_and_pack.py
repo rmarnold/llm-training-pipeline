@@ -105,8 +105,15 @@ def pack_sequences_streaming(ctx_len: int, tokenizer, input_dir: str = "data/pro
     return chunk_dir, total_sequences
 
 
-def merge_chunks_to_dataset(chunk_dir: Path, output_path: str, ctx_len: int):
-    """Merge chunk files into a HuggingFace Dataset."""
+def merge_chunks_to_dataset(chunk_dir: Path, output_path: str, ctx_len: int, keep_chunks: bool = False):
+    """Merge chunk files into a HuggingFace Dataset.
+
+    Args:
+        chunk_dir: Directory containing .npy chunk files
+        output_path: Output path for HuggingFace dataset
+        ctx_len: Context length (for logging)
+        keep_chunks: If True, don't delete chunk files after merge (for recovery)
+    """
     print(f"  Merging chunks into HuggingFace Dataset...")
 
     chunk_files = sorted(chunk_dir.glob("chunk_*.npy"))
@@ -136,13 +143,99 @@ def merge_chunks_to_dataset(chunk_dir: Path, output_path: str, ctx_len: int):
     dataset.save_to_disk(output_path)
     print(f"    Saved dataset with {len(dataset)} sequences to {output_path}")
 
-    # Cleanup chunks
-    for chunk_path in chunk_files:
-        chunk_path.unlink()
-    chunk_dir.rmdir()
-    print(f"    Cleaned up chunk files")
+    # Cleanup chunks (unless keep_chunks is True)
+    if not keep_chunks:
+        for chunk_path in chunk_files:
+            chunk_path.unlink()
+        chunk_dir.rmdir()
+        print(f"    Cleaned up chunk files")
+    else:
+        print(f"    Kept chunk files for recovery (--keep-chunks)")
 
     return dataset
+
+
+def recover_from_chunks(output_dir: str, ctx_len: int = 2048):
+    """Recover a HuggingFace dataset from existing .npy chunk files.
+
+    Use this when tokenization completed but dataset creation was interrupted.
+    """
+    import shutil
+
+    chunk_dir = Path(output_dir) / f"chunks_ctx{ctx_len}"
+    train_path = f"{output_dir}/train"
+    val_path = f"{output_dir}/val"
+
+    # Check for chunks
+    if not chunk_dir.exists():
+        print(f"No chunk directory found at {chunk_dir}")
+        print(f"Looking for alternative chunk locations...")
+
+        # Check for chunks in parent directory
+        for potential_dir in Path(output_dir).glob("chunks_*"):
+            if list(potential_dir.glob("chunk_*.npy")):
+                chunk_dir = potential_dir
+                print(f"Found chunks at {chunk_dir}")
+                break
+        else:
+            print("No chunks found. Need to re-run tokenization from scratch.")
+            return False
+
+    chunk_files = sorted(chunk_dir.glob("chunk_*.npy"))
+    if not chunk_files:
+        print(f"No chunk files found in {chunk_dir}")
+        return False
+
+    print(f"Found {len(chunk_files)} chunk files to recover")
+
+    # Remove corrupted dataset if exists
+    if os.path.exists(train_path):
+        print(f"Removing corrupted dataset at {train_path}")
+        shutil.rmtree(train_path)
+    if os.path.exists(val_path):
+        print(f"Removing old validation set at {val_path}")
+        shutil.rmtree(val_path)
+
+    # Merge chunks into dataset (keep chunks in case it fails again)
+    dataset = merge_chunks_to_dataset(chunk_dir, train_path, ctx_len, keep_chunks=True)
+
+    if dataset is None:
+        print("Failed to merge chunks")
+        return False
+
+    # Create validation split
+    print(f"Creating validation split...")
+    full_dataset = Dataset.load_from_disk(train_path)
+    val_size = max(1, min(1000, len(full_dataset) // 100))
+    splits = full_dataset.train_test_split(test_size=val_size, seed=42)
+
+    # Save to temp paths first
+    train_temp = f"{output_dir}/train_temp"
+    splits['train'].save_to_disk(train_temp)
+    splits['test'].save_to_disk(val_path)
+
+    # Delete original and rename temp
+    del full_dataset, splits
+    shutil.rmtree(train_path)
+    shutil.move(train_temp, train_path)
+
+    # Now clean up chunks
+    print("Cleaning up chunk files...")
+    for chunk_path in chunk_files:
+        chunk_path.unlink()
+    try:
+        chunk_dir.rmdir()
+    except OSError:
+        pass  # Directory might not be empty
+
+    # Verify
+    final_train = Dataset.load_from_disk(train_path)
+    final_val = Dataset.load_from_disk(val_path)
+    print(f"\n✓ Recovery complete!")
+    print(f"  Train: {len(final_train)} sequences")
+    print(f"  Val: {len(final_val)} sequences")
+
+    return True
 
 
 def pack_sequences(context_lengths=[2048], input_dir="data/processed", output_dir="data/packed"):
@@ -234,9 +327,37 @@ if __name__ == "__main__":
     parser.add_argument('--input-dir', type=str, default='data/processed', help='Input directory')
     parser.add_argument('--output-dir', type=str, default='data/packed', help='Output directory')
     parser.add_argument('--skip-tokenizer', action='store_true', help='Skip tokenizer training')
+    parser.add_argument('--recover', action='store_true',
+                        help='Recover from existing .npy chunks (use if dataset creation was interrupted)')
+    parser.add_argument('--force', action='store_true',
+                        help='Force re-tokenization even if output exists')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # Recovery mode - rebuild dataset from existing chunks
+    if args.recover:
+        print("=" * 50)
+        print("RECOVERY MODE: Rebuilding dataset from chunks")
+        print("=" * 50)
+        success = recover_from_chunks(args.output_dir, args.ctx_len)
+        if success:
+            print("\nRecovery successful! You can now run pretraining.")
+        else:
+            print("\nRecovery failed. You may need to re-run tokenization with --force")
+        exit(0 if success else 1)
+
+    # Force mode - delete existing output and re-run
+    if args.force:
+        import shutil
+        train_path = f"{args.output_dir}/train"
+        val_path = f"{args.output_dir}/val"
+        if os.path.exists(train_path):
+            print(f"Removing existing {train_path}")
+            shutil.rmtree(train_path)
+        if os.path.exists(val_path):
+            print(f"Removing existing {val_path}")
+            shutil.rmtree(val_path)
 
     if not args.skip_tokenizer and not os.path.exists("configs/tokenizer"):
         train_tokenizer()

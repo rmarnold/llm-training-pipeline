@@ -367,6 +367,8 @@ class GPUDataPipeline:
         if skip_stage1:
             print("\n[Stage 1/4] SKIPPED (already complete)")
             stats['after_cleaning'] = self._count_docs_in_dir(cleaned_dir)
+            # When resuming, input_docs is unknown - use after_cleaning as baseline
+            stats['input_docs'] = stats['after_cleaning']
             print(f"  Found {stats['after_cleaning']:,} cleaned docs in cache")
         else:
             print("\n[Stage 1/4] Loading and cleaning text (streaming mode)...")
@@ -794,16 +796,22 @@ class GPUDataPipeline:
         stats['end_time'] = time.time()
         stats['total_time'] = stats['end_time'] - stats['start_time']
 
+        # Use a reasonable baseline for percentages (first non-zero count)
+        baseline = stats['input_docs']
+        if baseline == 0:
+            # Find the first non-zero count to use as baseline
+            baseline = stats['after_cleaning'] or stats['after_quality'] or stats['after_toxicity'] or 1
+
         print("\n" + "=" * 60)
         print("PIPELINE COMPLETE")
         print("=" * 60)
         print(f"Input documents:    {stats['input_docs']:,}")
-        print(f"After cleaning:     {stats['after_cleaning']:,} ({100*stats['after_cleaning']/max(1,stats['input_docs']):.1f}%)")
-        print(f"After quality:      {stats['after_quality']:,} ({100*stats['after_quality']/max(1,stats['input_docs']):.1f}%)")
-        print(f"After toxicity:     {stats['after_toxicity']:,} ({100*stats['after_toxicity']/max(1,stats['input_docs']):.1f}%)")
-        print(f"After dedup:        {stats['after_dedup']:,} ({100*stats['after_dedup']/max(1,stats['input_docs']):.1f}%)")
+        print(f"After cleaning:     {stats['after_cleaning']:,} ({100*stats['after_cleaning']/baseline:.1f}%)")
+        print(f"After quality:      {stats['after_quality']:,} ({100*stats['after_quality']/baseline:.1f}%)")
+        print(f"After toxicity:     {stats['after_toxicity']:,} ({100*stats['after_toxicity']/baseline:.1f}%)")
+        print(f"After dedup:        {stats['after_dedup']:,} ({100*stats['after_dedup']/baseline:.1f}%)")
         print(f"Total time:         {stats['total_time']:.1f}s ({stats['total_time']/60:.1f} min)")
-        print(f"Throughput:         {stats['input_docs']/stats['total_time']:.0f} docs/sec")
+        print(f"Throughput:         {baseline/max(1, stats['total_time']):.0f} docs/sec")
         print(f"Output:             {self.output_dir / 'processed.parquet'}")
         print("=" * 60)
 
