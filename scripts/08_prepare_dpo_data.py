@@ -174,22 +174,61 @@ def prepare_dpo_dataset(skip_safety_filter=False, validate_only=False, output_di
     if not skip_safety_filter:
         print("\n[3/4] Applying safety filter...")
         try:
+            import torch
             from detoxify import Detoxify
-            toxicity_model = Detoxify('original')
 
-            def is_safe(example):
-                try:
-                    chosen_toxic = toxicity_model.predict(example["chosen"])
-                    rejected_toxic = toxicity_model.predict(example["rejected"])
-                    # Keep if chosen is less toxic than rejected
-                    return chosen_toxic["toxicity"] < rejected_toxic["toxicity"]
-                except Exception:
-                    return True  # Keep on error
+            # Use GPU if available with fp16 for speed
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"  Using device: {device}")
 
+            toxicity_model = Detoxify('original', device=device)
+
+            # Convert to fp16 for 2-3x faster inference on GPU
+            if device == "cuda":
+                toxicity_model.model.half()
+                print("  Using fp16 for faster inference")
+
+            # Batch processing for massive speedup (100x faster than single examples)
+            batch_size = 256 if device == "cuda" else 32
             before_filter = len(dpo_dataset)
-            dpo_dataset = dpo_dataset.filter(is_safe)
-            after_filter = len(dpo_dataset)
-            print(f"  Safety filter: {after_filter}/{before_filter} examples kept")
+
+            # Extract all texts for batch processing
+            print(f"  Processing {before_filter * 2:,} texts in batches of {batch_size}...")
+            chosen_texts = dpo_dataset["chosen"]
+            rejected_texts = dpo_dataset["rejected"]
+
+            # Batch predict toxicity scores
+            def batch_predict(texts, batch_size=256):
+                """Predict toxicity for a list of texts in batches."""
+                all_scores = []
+                for i in range(0, len(texts), batch_size):
+                    batch = texts[i:i + batch_size]
+                    with torch.no_grad():
+                        results = toxicity_model.predict(batch)
+                    all_scores.extend(results["toxicity"])
+                    if (i // batch_size) % 10 == 0:
+                        print(f"    Processed {min(i + batch_size, len(texts)):,}/{len(texts):,} texts", end="\r")
+                print()  # New line after progress
+                return all_scores
+
+            print("  Scoring chosen responses...")
+            chosen_scores = batch_predict(chosen_texts, batch_size)
+
+            print("  Scoring rejected responses...")
+            rejected_scores = batch_predict(rejected_texts, batch_size)
+
+            # Create mask: keep if chosen is less toxic than rejected
+            keep_mask = [c < r for c, r in zip(chosen_scores, rejected_scores)]
+            after_filter = sum(keep_mask)
+
+            # Filter dataset
+            dpo_dataset = dpo_dataset.select([i for i, keep in enumerate(keep_mask) if keep])
+            print(f"  Safety filter: {after_filter}/{before_filter} examples kept ({100*after_filter/before_filter:.1f}%)")
+
+            # Clean up GPU memory
+            if device == "cuda":
+                del toxicity_model
+                torch.cuda.empty_cache()
 
         except ImportError:
             print("  Warning: detoxify not installed, skipping safety filter")
