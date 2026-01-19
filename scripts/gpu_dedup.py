@@ -368,8 +368,10 @@ def _gpu_dedup_workflow_api(
             print("  MinHash + LSH complete, loading duplicate IDs...")
 
         # Load duplicate IDs from workflow output
+        # NeMo Curator outputs internal `_curator_dedup_id` values in FuzzyDuplicateIds
+        # We need to map these back to our original document IDs
         dup_ids_path = id_output / "FuzzyDuplicateIds"
-        dup_ids = set()
+        dup_curator_ids = set()
 
         if dup_ids_path.exists():
             dup_files = list(dup_ids_path.glob("*.parquet"))
@@ -379,14 +381,49 @@ def _gpu_dedup_workflow_api(
             for dup_file in dup_files:
                 try:
                     dup_df = pd.read_parquet(dup_file)
-                    # NeMo Curator uses various ID column names
-                    for col in ['_curator_dedup_id', 'duplicate_id', 'id', id_column]:
-                        if col in dup_df.columns:
-                            dup_ids.update(dup_df[col].astype(str).tolist())
-                            break
+                    if show_progress and len(dup_curator_ids) == 0:
+                        print(f"    Duplicate file columns: {list(dup_df.columns)}")
+                    # The FuzzyDuplicateIds files contain '_curator_dedup_id' (internal int IDs)
+                    if '_curator_dedup_id' in dup_df.columns:
+                        dup_curator_ids.update(dup_df['_curator_dedup_id'].tolist())
+                    elif 'id' in dup_df.columns:
+                        dup_curator_ids.update(dup_df['id'].tolist())
                 except Exception as e:
                     if show_progress:
                         print(f"    Warning: Could not read {dup_file.name}: {e}")
+
+        if show_progress:
+            print(f"  Found {len(dup_curator_ids):,} duplicate curator IDs")
+
+        # Now we need to map _curator_dedup_id back to original document IDs
+        # The minhash cache contains this mapping
+        dup_ids = set()
+        minhash_cache = workflow_cache / "minhash_cache" / "MinHashStage"
+        if minhash_cache.exists() and len(dup_curator_ids) > 0:
+            minhash_files = list(minhash_cache.glob("*.parquet"))
+            if show_progress:
+                print(f"  Mapping {len(dup_curator_ids):,} curator IDs to original IDs using {len(minhash_files)} minhash files...")
+
+            for mf in minhash_files:
+                try:
+                    # Read minhash file which has both _curator_dedup_id and original id
+                    mh_df = pd.read_parquet(mf, columns=['_curator_dedup_id', id_column] if id_column != '_curator_dedup_id' else ['_curator_dedup_id'])
+                    # Find rows where curator ID is in our duplicate set
+                    mask = mh_df['_curator_dedup_id'].isin(dup_curator_ids)
+                    if mask.any():
+                        if id_column in mh_df.columns and id_column != '_curator_dedup_id':
+                            # Map to original IDs
+                            dup_ids.update(mh_df.loc[mask, id_column].astype(str).tolist())
+                        else:
+                            # Use curator IDs directly if no separate ID column
+                            dup_ids.update(mh_df.loc[mask, '_curator_dedup_id'].astype(str).tolist())
+                    del mh_df
+                except Exception as e:
+                    if show_progress:
+                        print(f"    Warning: Could not read minhash file {mf.name}: {e}")
+        else:
+            # Fallback - use curator IDs directly (won't match unless files have _curator_dedup_id)
+            dup_ids = set(str(x) for x in dup_curator_ids)
 
         if show_progress:
             print(f"  Found {len(dup_ids):,} duplicate document IDs")
