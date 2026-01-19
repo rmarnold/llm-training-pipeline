@@ -89,6 +89,7 @@ class GPUDataPipeline:
         skip_quality: bool = False,
         skip_toxicity: bool = False,
         skip_dedup: bool = False,
+        cleanup_intermediate: bool = False,
         toxicity_threshold: float = 0.7,
         dedup_threshold: float = 0.85,
         batch_size: int = 500_000,
@@ -106,6 +107,7 @@ class GPUDataPipeline:
             skip_quality: Skip ALL quality filtering (fastest)
             skip_toxicity: Skip toxicity filtering
             skip_dedup: Skip deduplication
+            cleanup_intermediate: Delete intermediate directories after each stage to save disk space
             toxicity_threshold: Threshold for toxicity detection
             dedup_threshold: Jaccard similarity threshold for deduplication
             batch_size: Batch size for GPU processing
@@ -119,6 +121,7 @@ class GPUDataPipeline:
         self.skip_quality = skip_quality
         self.skip_toxicity = skip_toxicity
         self.skip_dedup = skip_dedup
+        self.cleanup_intermediate = cleanup_intermediate
         self.toxicity_threshold = toxicity_threshold
         self.dedup_threshold = dedup_threshold
         self.batch_size = batch_size
@@ -524,19 +527,30 @@ class GPUDataPipeline:
             stats['after_quality'] = self._count_docs_in_dir(quality_dir)
             print(f"  Found {stats['after_quality']:,} quality-filtered docs in cache")
         elif self.skip_quality:
-            # Fast mode: skip quality filtering entirely, just copy files
-            print("\n[Stage 2/4] SKIPPED (--skip-quality mode)")
+            # Fast mode: skip quality filtering entirely, use symlinks to save disk space
+            print("\n[Stage 2/4] SKIPPED (--skip-quality mode) - using symlinks")
             quality_dir.mkdir(parents=True, exist_ok=True)
             cleaned_files = sorted(cleaned_dir.glob("*.parquet"))
             total_after_quality = 0
-            for cf in tqdm(cleaned_files, desc="  Copying files", disable=not self.show_progress):
-                df = pd.read_parquet(cf)
-                total_after_quality += len(df)
-                df.to_parquet(quality_dir / cf.name, compression='snappy')
-                del df
+            import shutil
+            import os as os_link
+            import pyarrow.parquet as pq_meta
+            for cf in tqdm(cleaned_files, desc="  Linking files", disable=not self.show_progress):
+                target = quality_dir / cf.name
+                if not target.exists():
+                    try:
+                        target.symlink_to(cf.resolve())
+                    except OSError:
+                        try:
+                            os_link.link(str(cf.resolve()), str(target))
+                        except OSError:
+                            # Last resort: copy the file
+                            shutil.copy2(cf, target)
+                # Count rows without loading into memory
+                total_after_quality += pq_meta.read_metadata(cf).num_rows
             stats['after_quality'] = total_after_quality
             stage2_time = time.time() - stage2_start
-            print(f"  Stage 2 complete: {stats['after_quality']:,} docs copied ({stage2_time:.1f}s)")
+            print(f"  Stage 2 complete: {stats['after_quality']:,} docs linked ({stage2_time:.1f}s)")
         else:
             print("\n[Stage 2/4] Quality filtering (streaming mode)...")
             quality_dir.mkdir(parents=True, exist_ok=True)
@@ -578,13 +592,22 @@ class GPUDataPipeline:
                     except Exception as e:
                         print(f"  Warning: Quality filter failed on {cf}: {e}")
             else:
-                print("  Skipping quality filters (datatrove not available)")
-                # Just copy files
+                print("  Skipping quality filters (datatrove not available) - using symlinks")
+                # Use symlinks instead of copying to save disk space
+                import shutil
+                import os as os_link
+                import pyarrow.parquet as pq_meta
                 for cf in cleaned_files:
-                    df = pd.read_parquet(cf)
-                    total_after_quality += len(df)
-                    df.to_parquet(quality_dir / cf.name, compression='snappy')
-                    del df
+                    target = quality_dir / cf.name
+                    if not target.exists():
+                        try:
+                            target.symlink_to(cf.resolve())
+                        except OSError:
+                            try:
+                                os_link.link(str(cf.resolve()), str(target))
+                            except OSError:
+                                shutil.copy2(cf, target)
+                    total_after_quality += pq_meta.read_metadata(cf).num_rows
 
             stats['after_quality'] = total_after_quality
             stage2_time = time.time() - stage2_start
@@ -636,19 +659,41 @@ class GPUDataPipeline:
                         except Exception as e:
                             print(f"  Warning: Toxicity filter failed on {qf}: {e}")
                 else:
-                    print("  Skipping (model not available)")
+                    print("  Skipping (model not available) - using symlinks")
+                    import shutil
+                    import os as os_link
                     for qf in quality_files:
-                        df = pd.read_parquet(qf)
-                        total_after_toxicity += len(df)
-                        df.to_parquet(toxicity_dir / qf.name, compression='snappy')
-                        del df
+                        target = toxicity_dir / qf.name
+                        if not target.exists():
+                            try:
+                                target.symlink_to(qf.resolve())
+                            except OSError:
+                                try:
+                                    os_link.link(str(qf.resolve()), str(target))
+                                except OSError:
+                                    shutil.copy2(qf, target)
+                        import pyarrow.parquet as pq_meta
+                        total_after_toxicity += pq_meta.read_metadata(qf).num_rows
             else:
-                print("  Skipping (disabled)")
+                print("  Skipping (disabled) - using symlinks to save disk space")
+                import shutil
+                import os as os_link
                 for qf in quality_files:
-                    df = pd.read_parquet(qf)
-                    total_after_toxicity += len(df)
-                    df.to_parquet(toxicity_dir / qf.name, compression='snappy')
-                    del df
+                    # Use symlink instead of copying to save disk space
+                    target = toxicity_dir / qf.name
+                    if not target.exists():
+                        try:
+                            target.symlink_to(qf.resolve())
+                        except OSError:
+                            # Fallback to hardlink if symlink fails
+                            try:
+                                os_link.link(str(qf.resolve()), str(target))
+                            except OSError:
+                                # Last resort: copy the file
+                                shutil.copy2(qf, target)
+                    # Count rows without loading into memory
+                    import pyarrow.parquet as pq_meta
+                    total_after_toxicity += pq_meta.read_metadata(qf).num_rows
 
             stats['after_toxicity'] = total_after_toxicity
             stage3_time = time.time() - stage3_start
