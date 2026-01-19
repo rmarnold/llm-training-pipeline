@@ -320,13 +320,26 @@ def get_curriculum_data_path(
 
     # If CLI provides train path, derive eval path from it if not specified
     if cli_train_path:
+        # Auto-detect train/val subdirectories if path points to parent directory
+        # e.g., /content/local_data/packed -> /content/local_data/packed/train
+        train_subdir = os.path.join(cli_train_path, 'train')
+        val_subdir = os.path.join(cli_train_path, 'val')
+        if os.path.exists(train_subdir) and os.path.isdir(train_subdir):
+            # Check if train_subdir is a valid HuggingFace Dataset (has state.json)
+            if os.path.exists(os.path.join(train_subdir, 'state.json')):
+                print(f"Auto-detected HuggingFace Dataset at {train_subdir}")
+                cli_train_path = train_subdir
+                if cli_eval_path is None and os.path.exists(val_subdir):
+                    cli_eval_path = val_subdir
+
         if cli_eval_path:
             return cli_train_path, cli_eval_path
-        # Derive eval path: /path/to/packed -> /path/to/packed (check for val subdirectory)
-        eval_path = cli_eval_path or os.path.join(os.path.dirname(cli_train_path.rstrip('/')), 'val')
+        # Derive eval path: /path/to/packed/train -> /path/to/packed/val
+        parent_dir = os.path.dirname(cli_train_path.rstrip('/'))
+        eval_path = os.path.join(parent_dir, 'val')
         if not os.path.exists(eval_path):
-            # Try train path with _val suffix or val subdirectory inside
-            eval_path = cli_train_path.rstrip('/') + '_val'
+            # Try train path with _val suffix
+            eval_path = cli_train_path.rstrip('/').replace('/train', '/val')
         if not os.path.exists(eval_path):
             # Use train path as eval (will subset during loading)
             eval_path = cli_train_path
