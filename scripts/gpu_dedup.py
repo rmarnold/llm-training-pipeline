@@ -261,8 +261,8 @@ def _gpu_dedup_workflow_api(
     workflow_cache = cache_path / "workflow_cache"
     workflow_cache.mkdir(parents=True, exist_ok=True)
 
-    # Output goes directly to our output path
-    dedup_output = output_path / "deduplicated"
+    # Output goes directly to our output path (caller creates the directory)
+    dedup_output = output_path
     dedup_output.mkdir(parents=True, exist_ok=True)
 
     if show_progress:
