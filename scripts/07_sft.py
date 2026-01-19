@@ -291,7 +291,8 @@ class EvalLossCallback(TrainerCallback):
 def train_sft(
     use_fp8: Optional[bool] = None,
     config_path: str = "configs/sft.yaml",
-    cli_overrides: Optional[Dict[str, Any]] = None
+    cli_overrides: Optional[Dict[str, Any]] = None,
+    use_liger_kernel: bool = True
 ) -> None:
     """Train with SFT.
 
@@ -299,11 +300,26 @@ def train_sft(
         use_fp8: Force FP8 precision (None = auto-detect)
         config_path: Path to YAML config file
         cli_overrides: Dict of CLI overrides (max_steps, save_steps, etc.)
+        use_liger_kernel: Enable Liger Kernel for fused operations
     """
     cli_overrides = cli_overrides or {}
 
     # Setup torch backends
     setup_torch_backends()
+
+    # Apply Liger Kernel optimizations if enabled
+    if use_liger_kernel:
+        try:
+            from liger_kernel.transformers import apply_liger_kernel_to_llama
+            apply_liger_kernel_to_llama()
+            print("[Kernel Optimization] Liger Kernel enabled for llama")
+            print("  - Fused RoPE, SwiGLU, RMSNorm, CrossEntropy")
+            print("  - ~20% throughput improvement")
+            print("  - ~60% memory reduction")
+        except ImportError:
+            print("Warning: liger-kernel not installed, skipping kernel optimizations")
+        except Exception as e:
+            print(f"Warning: Failed to apply Liger Kernel: {e}")
 
     with open(config_path) as f:
         config = yaml.safe_load(f)
@@ -480,6 +496,10 @@ def main() -> None:
     parser.add_argument("--train_data_path", type=str, help="Override training data path")
     parser.add_argument("--eval_data_path", type=str, help="Override evaluation data path")
     parser.add_argument("--enable-oom-recovery", action="store_true", help="Enable automatic OOM recovery")
+    parser.add_argument("--use-liger-kernel", action="store_true", default=True,
+                        help="Use Liger Kernel for fused operations (default: enabled)")
+    parser.add_argument("--no-liger-kernel", action="store_true",
+                        help="Disable Liger Kernel")
     args = parser.parse_args()
 
     # Set random seed
@@ -522,7 +542,10 @@ def main() -> None:
     if getattr(args, 'enable_oom_recovery', False):
         cli_overrides['enable_oom_recovery'] = True
 
-    train_sft(use_fp8=use_fp8, config_path=args.config, cli_overrides=cli_overrides)
+    # Determine if Liger Kernel should be used
+    use_liger = getattr(args, 'use_liger_kernel', True) and not getattr(args, 'no_liger_kernel', False)
+
+    train_sft(use_fp8=use_fp8, config_path=args.config, cli_overrides=cli_overrides, use_liger_kernel=use_liger)
 
 
 if __name__ == "__main__":

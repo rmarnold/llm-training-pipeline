@@ -314,15 +314,30 @@ def get_curriculum_data_path(
     """
     cli_overrides = cli_overrides or {}
 
-    # CLI overrides take precedence
-    if cli_overrides.get('train_data_path') and cli_overrides.get('eval_data_path'):
-        return cli_overrides['train_data_path'], cli_overrides['eval_data_path']
+    # CLI overrides take precedence - check each path independently
+    cli_train_path = cli_overrides.get('train_data_path')
+    cli_eval_path = cli_overrides.get('eval_data_path')
+
+    # If CLI provides train path, derive eval path from it if not specified
+    if cli_train_path:
+        if cli_eval_path:
+            return cli_train_path, cli_eval_path
+        # Derive eval path: /path/to/packed -> /path/to/packed (check for val subdirectory)
+        eval_path = cli_eval_path or os.path.join(os.path.dirname(cli_train_path.rstrip('/')), 'val')
+        if not os.path.exists(eval_path):
+            # Try train path with _val suffix or val subdirectory inside
+            eval_path = cli_train_path.rstrip('/') + '_val'
+        if not os.path.exists(eval_path):
+            # Use train path as eval (will subset during loading)
+            eval_path = cli_train_path
+            print(f"Note: Using train data for evaluation (no separate val found)")
+        return cli_train_path, eval_path
 
     curriculum = config.get('curriculum', {})
     if not curriculum.get('enabled', False):
-        # No curriculum - use default paths (with CLI override support)
-        train_path = cli_overrides.get('train_data_path') or config['data'].get('train_path', "data/packed/train")
-        val_path = cli_overrides.get('eval_data_path') or config['data'].get('val_path', "data/packed/val")
+        # No curriculum - use default paths
+        train_path = config['data'].get('train_path', "data/packed/train")
+        val_path = config['data'].get('val_path', "data/packed/val")
         return train_path, val_path
 
     schedule = curriculum.get('schedule', [])
