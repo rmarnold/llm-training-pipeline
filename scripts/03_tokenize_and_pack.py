@@ -378,6 +378,10 @@ if __name__ == "__main__":
                         help='Recover from existing .npy chunks (use if dataset creation was interrupted)')
     parser.add_argument('--force', action='store_true',
                         help='Force re-tokenization even if output exists')
+    parser.add_argument('--cleanup', action='store_true',
+                        help='Delete source parquet files after tokenization to save disk space')
+    parser.add_argument('--cleanup-cache', action='store_true',
+                        help='Delete GPU cache and HuggingFace cache after tokenization')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -416,3 +420,44 @@ if __name__ == "__main__":
         input_dir=args.input_dir,
         output_dir=args.output_dir
     )
+
+    # Cleanup after tokenization completes
+    if args.cleanup or args.cleanup_cache:
+        import shutil
+        print("\n" + "=" * 50)
+        print("CLEANUP: Freeing disk space")
+        print("=" * 50)
+        total_freed = 0
+
+        if args.cleanup:
+            # Delete source parquet files (they're now tokenized)
+            parquet_files = list(Path(args.input_dir).glob("*.parquet"))
+            for pf in parquet_files:
+                try:
+                    size = pf.stat().st_size
+                    pf.unlink()
+                    total_freed += size
+                except Exception as e:
+                    print(f"  Warning: Could not delete {pf.name}: {e}")
+            if parquet_files:
+                print(f"  Deleted {len(parquet_files)} source parquet files: {total_freed / (1024**3):.2f} GB freed")
+
+        if args.cleanup_cache:
+            # Clean up GPU cache directories
+            cache_dirs = [
+                Path(args.input_dir).parent / ".gpu_cache",
+                Path("/content/.gpu_cache") if Path("/content").exists() else None,
+                Path.home() / ".cache" / "huggingface" / "datasets",
+            ]
+
+            for cache_dir in cache_dirs:
+                if cache_dir and cache_dir.exists():
+                    try:
+                        size = sum(f.stat().st_size for f in cache_dir.rglob('*') if f.is_file())
+                        shutil.rmtree(cache_dir)
+                        total_freed += size
+                        print(f"  Deleted {cache_dir}: {size / (1024**3):.2f} GB freed")
+                    except Exception as e:
+                        print(f"  Warning: Could not delete {cache_dir}: {e}")
+
+        print(f"\nTotal disk space freed: {total_freed / (1024**3):.2f} GB")

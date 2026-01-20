@@ -792,6 +792,10 @@ class GPUDataPipeline:
             stage4_time = time.time() - stage4_start
             print(f"  Stage 4 complete: {stats['after_dedup']:,} docs ({stage4_time:.1f}s)")
 
+        # Cleanup intermediate files if requested
+        if self.cleanup_intermediate:
+            self._cleanup_intermediate_files(stats)
+
         # Summary
         stats['end_time'] = time.time()
         stats['total_time'] = stats['end_time'] - stats['start_time']
@@ -816,6 +820,57 @@ class GPUDataPipeline:
         print("=" * 60)
 
         return stats
+
+    def _cleanup_intermediate_files(self, stats: dict) -> None:
+        """Clean up intermediate files to save disk space.
+
+        Called after all stages complete successfully.
+        Only deletes directories that are no longer needed.
+        """
+        import shutil
+
+        print("\n[Cleanup] Removing intermediate files to save disk space...")
+        total_freed = 0
+
+        # Directories to clean up (in order of size, largest first)
+        cleanup_targets = [
+            (self.cache_dir / "dedup_cache", "dedup cache"),
+            (self.cache_dir / "cleaned", "cleaned text cache"),
+            (self.cache_dir / "quality_filtered", "quality filter cache"),
+            (self.cache_dir / "toxicity_filtered", "toxicity filter cache"),
+        ]
+
+        for path, name in cleanup_targets:
+            if path.exists():
+                try:
+                    # Calculate size before deletion
+                    size = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
+                    size_gb = size / (1024**3)
+
+                    # Delete the directory
+                    shutil.rmtree(path)
+                    total_freed += size
+                    print(f"  Deleted {name}: {size_gb:.2f} GB freed")
+                except Exception as e:
+                    print(f"  Warning: Could not delete {name}: {e}")
+
+        # Also clean up HuggingFace datasets cache if it exists
+        hf_cache = Path.home() / ".cache" / "huggingface" / "datasets"
+        if hf_cache.exists():
+            try:
+                # Only delete temporary files, not downloaded datasets
+                temp_dirs = list(hf_cache.glob("**/tmp*"))
+                for temp_dir in temp_dirs:
+                    if temp_dir.is_dir():
+                        size = sum(f.stat().st_size for f in temp_dir.rglob('*') if f.is_file())
+                        shutil.rmtree(temp_dir)
+                        total_freed += size
+            except Exception:
+                pass
+
+        total_freed_gb = total_freed / (1024**3)
+        print(f"  Total freed: {total_freed_gb:.2f} GB")
+        stats['disk_freed_gb'] = total_freed_gb
 
     def _apply_quality_filters(self, texts: list[str]) -> list[bool]:
         """Apply quality filters to texts.
@@ -986,6 +1041,11 @@ def main():
         action="store_true",
         help="Disable resume mode (re-run all stages from scratch)"
     )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Delete intermediate files after each stage completes to save disk space"
+    )
 
     args = parser.parse_args()
 
@@ -1012,6 +1072,7 @@ def main():
         skip_quality=args.skip_quality,
         skip_toxicity=args.no_toxicity,
         skip_dedup=args.no_dedup,
+        cleanup_intermediate=args.cleanup,
         toxicity_threshold=args.toxicity_threshold,
         dedup_threshold=args.dedup_threshold,
         batch_size=args.batch_size,
