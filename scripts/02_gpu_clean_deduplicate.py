@@ -615,6 +615,10 @@ class GPUDataPipeline:
             stage2_time = time.time() - stage2_start
             print(f"  Stage 2 complete: {stats['after_quality']:,} docs ({stage2_time:.1f}s)")
 
+        # Incremental cleanup after stage 2 (if not using symlinks)
+        if self.cleanup_intermediate and not self.skip_quality and not skip_stage2:
+            self._cleanup_stage_files(cleaned_dir, "cleaned text cache")
+
         # Stage 3: Toxicity filtering (streaming)
         skip_stage3 = resume and self._check_stage_complete(3)
         stage3_start = time.time()
@@ -700,6 +704,20 @@ class GPUDataPipeline:
             stats['after_toxicity'] = total_after_toxicity
             stage3_time = time.time() - stage3_start
             print(f"  Stage 3 complete: {stats['after_toxicity']:,} docs ({stage3_time:.1f}s)")
+
+        # Incremental cleanup after stage 3: can now delete cleaned + quality (toxicity uses real files or copies)
+        if self.cleanup_intermediate and not skip_stage3:
+            # Delete cleaned dir (quality may have symlinks to it, but toxicity has real files)
+            if self.skip_quality:
+                # Quality used symlinks, so toxicity also uses symlinks to cleaned - can't delete yet
+                pass
+            elif self.skip_toxicity:
+                # Toxicity used symlinks to quality - can delete cleaned but not quality
+                self._cleanup_stage_files(cleaned_dir, "cleaned text cache")
+            else:
+                # Both quality and toxicity produced real files, safe to delete cleaned and quality
+                self._cleanup_stage_files(cleaned_dir, "cleaned text cache")
+                self._cleanup_stage_files(quality_dir, "quality filter cache")
 
         # Stage 4: Deduplication
         skip_stage4 = resume and self._check_stage_complete(4)
@@ -821,15 +839,50 @@ class GPUDataPipeline:
 
         return stats
 
-    def _cleanup_intermediate_files(self, stats: dict) -> None:
-        """Clean up intermediate files to save disk space.
+    def _cleanup_stage_files(self, dir_path: Path, name: str) -> float:
+        """Clean up a single stage directory.
 
-        Called after all stages complete successfully.
-        Only deletes directories that are no longer needed.
+        Args:
+            dir_path: Directory to delete
+            name: Human-readable name for logging
+
+        Returns:
+            Bytes freed
         """
         import shutil
 
-        print("\n[Cleanup] Removing intermediate files to save disk space...")
+        if not dir_path.exists():
+            return 0
+
+        try:
+            # Calculate size before deletion (handle symlinks gracefully)
+            size = 0
+            for f in dir_path.rglob('*'):
+                if f.is_file() and not f.is_symlink():
+                    try:
+                        size += f.stat().st_size
+                    except (OSError, FileNotFoundError):
+                        pass
+
+            size_gb = size / (1024**3)
+
+            # Delete the directory
+            shutil.rmtree(dir_path)
+            print(f"  [Cleanup] Deleted {name}: {size_gb:.2f} GB freed")
+            return size
+        except Exception as e:
+            print(f"  [Cleanup] Warning: Could not delete {name}: {e}")
+            return 0
+
+    def _cleanup_intermediate_files(self, stats: dict) -> None:
+        """Clean up remaining intermediate files to save disk space.
+
+        Called after all stages complete successfully.
+        Only deletes directories that haven't been cleaned up yet.
+        """
+        import shutil
+
+        print("\n[Cleanup] Removing remaining intermediate files...")
         total_freed = 0
 
         # Directories to clean up (in order of size, largest first)
@@ -841,18 +894,7 @@ class GPUDataPipeline:
         ]
 
         for path, name in cleanup_targets:
-            if path.exists():
-                try:
-                    # Calculate size before deletion
-                    size = sum(f.stat().st_size for f in path.rglob('*') if f.is_file())
-                    size_gb = size / (1024**3)
-
-                    # Delete the directory
-                    shutil.rmtree(path)
-                    total_freed += size
-                    print(f"  Deleted {name}: {size_gb:.2f} GB freed")
-                except Exception as e:
-                    print(f"  Warning: Could not delete {name}: {e}")
+            total_freed += self._cleanup_stage_files(path, name)
 
         # Also clean up HuggingFace datasets cache if it exists
         hf_cache = Path.home() / ".cache" / "huggingface" / "datasets"

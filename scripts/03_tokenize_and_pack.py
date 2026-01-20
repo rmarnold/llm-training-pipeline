@@ -16,6 +16,25 @@ CHUNK_SIZE = 50000
 # 50K docs at ~500 tokens avg = ~100MB, well within memory limits
 TOKENIZE_BATCH_SIZE = 50000
 
+# Global tokenizer for worker processes (initialized lazily)
+_worker_tokenizer = None
+
+def _init_worker_tokenizer():
+    """Initialize tokenizer in worker process."""
+    global _worker_tokenizer
+    if _worker_tokenizer is None:
+        _worker_tokenizer = AutoTokenizer.from_pretrained("configs/tokenizer")
+    return _worker_tokenizer
+
+def _tokenize_texts_worker(texts_batch):
+    """Tokenize a batch of texts in a worker process."""
+    tokenizer = _init_worker_tokenizer()
+    return [
+        tokenizer(t, add_special_tokens=True, truncation=False,
+                 padding=False, return_attention_mask=False)['input_ids']
+        for t in texts_batch
+    ]
+
 
 def train_tokenizer():
     """Train custom BPE tokenizer on mixed data"""
@@ -75,35 +94,41 @@ def pack_sequences_streaming(ctx_len: int, tokenizer, input_dir: str = "data/pro
         print(f"  Processing {file}...")
         file_path = f"{input_dir}/{file}"
 
-        # Load as HuggingFace dataset for fast parallel processing
-        print(f"    Loading dataset...")
-        ds = load_dataset('parquet', data_files=file_path, split='train')
-        total_docs = len(ds)
+        # Load directly with PyArrow to avoid HuggingFace cache duplication
+        # This is critical for disk space - HF datasets creates a full copy in cache
+        # Stream in batches to avoid loading entire file into memory
+        print(f"    Loading dataset (direct PyArrow streaming, no cache)...")
+        import pyarrow.parquet as pq
+
+        parquet_file = pq.ParquetFile(file_path)
+        total_docs = parquet_file.metadata.num_rows
         print(f"    Tokenizing {total_docs:,} documents with {num_workers} workers...")
 
-        # Tokenize using HuggingFace datasets map() - MUCH faster with multiprocessing
-        def tokenize_fn(examples):
-            return tokenizer(
-                examples['text'],
-                add_special_tokens=True,
-                truncation=False,
-                padding=False,
-                return_attention_mask=False,
-            )
+        # Process in streaming batches to avoid memory issues
+        BATCH_SIZE = 50_000  # Process 50K docs at a time
 
-        tokenized = ds.map(
-            tokenize_fn,
-            batched=True,
-            batch_size=10000,
-            num_proc=num_workers,
-            remove_columns=ds.column_names,
-            desc="    Tokenizing",
-        )
+        processed_docs = 0
+        for batch in tqdm(parquet_file.iter_batches(batch_size=BATCH_SIZE, columns=['text']),
+                         desc="    Tokenizing batches",
+                         total=(total_docs + BATCH_SIZE - 1) // BATCH_SIZE):
+            texts = batch.column('text').to_pylist()
+            del batch
 
-        # Collect all token IDs
-        print(f"    Collecting token IDs...")
-        all_token_ids.extend(tokenized['input_ids'])
-        del ds, tokenized  # Free memory
+            # Split batch into chunks for parallel processing
+            chunk_size = max(1000, len(texts) // num_workers)
+            text_chunks = [texts[i:i + chunk_size] for i in range(0, len(texts), chunk_size)]
+            del texts
+
+            # Process chunks in parallel using module-level function (picklable)
+            with Pool(processes=num_workers) as pool:
+                results = pool.map(_tokenize_texts_worker, text_chunks)
+                for result in results:
+                    all_token_ids.extend(result)
+
+            del text_chunks, results
+            processed_docs += BATCH_SIZE
+
+        del parquet_file
 
     print(f"  Packing {len(all_token_ids):,} documents into sequences...")
 
