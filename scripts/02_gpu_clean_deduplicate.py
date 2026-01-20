@@ -706,11 +706,17 @@ class GPUDataPipeline:
             print(f"  Stage 3 complete: {stats['after_toxicity']:,} docs ({stage3_time:.1f}s)")
 
         # Incremental cleanup after stage 3: can now delete cleaned + quality (toxicity uses real files or copies)
+        # NOTE: When skip_quality AND skip_toxicity are both True, we have symlink chains:
+        #   toxicity_filtered -> quality_filtered -> cleaned (all symlinks to same data)
+        # In this case, we must wait until AFTER stage 4 to delete (dedup reads from toxicity_filtered)
         if self.cleanup_intermediate and not skip_stage3:
-            # Delete cleaned dir (quality may have symlinks to it, but toxicity has real files)
-            if self.skip_quality:
-                # Quality used symlinks, so toxicity also uses symlinks to cleaned - can't delete yet
-                pass
+            if self.skip_quality and self.skip_toxicity:
+                # Symlink chain - can't delete until after dedup reads from toxicity_filtered
+                print("  [Cleanup] Deferring cleanup (symlink chain in use by dedup)")
+            elif self.skip_quality:
+                # Quality used symlinks to cleaned, toxicity used symlinks to quality
+                # Can't delete yet - dedup will read from toxicity_filtered
+                print("  [Cleanup] Deferring cleanup (symlinks in use by dedup)")
             elif self.skip_toxicity:
                 # Toxicity used symlinks to quality - can delete cleaned but not quality
                 self._cleanup_stage_files(cleaned_dir, "cleaned text cache")
@@ -886,11 +892,14 @@ class GPUDataPipeline:
         total_freed = 0
 
         # Directories to clean up (in order of size, largest first)
+        # NOTE: cleaned dir is the source of truth for symlink chains, so delete it LAST
+        # to properly account for disk space freed
         cleanup_targets = [
             (self.cache_dir / "dedup_cache", "dedup cache"),
-            (self.cache_dir / "cleaned", "cleaned text cache"),
-            (self.cache_dir / "quality_filtered", "quality filter cache"),
+            (self.output_dir / "deduplicated", "deduplicated temp files"),
             (self.cache_dir / "toxicity_filtered", "toxicity filter cache"),
+            (self.cache_dir / "quality_filtered", "quality filter cache"),
+            (self.cache_dir / "cleaned", "cleaned text cache"),
         ]
 
         for path, name in cleanup_targets:

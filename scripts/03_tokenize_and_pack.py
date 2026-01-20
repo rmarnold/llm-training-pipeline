@@ -435,6 +435,32 @@ if __name__ == "__main__":
             print(f"Removing existing {val_path}")
             shutil.rmtree(val_path)
 
+    # Pre-tokenization cleanup: clear GPU cache and HF cache to free space
+    if args.cleanup_cache:
+        import shutil
+        print("\n" + "=" * 50)
+        print("PRE-TOKENIZATION CLEANUP: Freeing disk space")
+        print("=" * 50)
+        pre_freed = 0
+
+        cache_dirs = [
+            (Path(args.input_dir).parent / ".gpu_cache", "GPU cache"),
+            (Path("/content/.gpu_cache") if Path("/content").exists() else None, "Colab GPU cache"),
+            (Path.home() / ".cache" / "huggingface" / "datasets", "HuggingFace datasets cache"),
+        ]
+
+        for cache_dir, name in cache_dirs:
+            if cache_dir and cache_dir.exists():
+                try:
+                    size = sum(f.stat().st_size for f in cache_dir.rglob('*') if f.is_file() and not f.is_symlink())
+                    shutil.rmtree(cache_dir)
+                    pre_freed += size
+                    print(f"  Deleted {name}: {size / (1024**3):.2f} GB freed")
+                except Exception as e:
+                    print(f"  Warning: Could not delete {name}: {e}")
+
+        print(f"  Total pre-tokenization cleanup: {pre_freed / (1024**3):.2f} GB freed")
+
     if not args.skip_tokenizer and not os.path.exists("configs/tokenizer"):
         train_tokenizer()
     else:
@@ -450,38 +476,62 @@ if __name__ == "__main__":
     if args.cleanup or args.cleanup_cache:
         import shutil
         print("\n" + "=" * 50)
-        print("CLEANUP: Freeing disk space")
+        print("POST-TOKENIZATION CLEANUP: Freeing disk space")
         print("=" * 50)
         total_freed = 0
 
         if args.cleanup:
             # Delete source parquet files (they're now tokenized)
             parquet_files = list(Path(args.input_dir).glob("*.parquet"))
+            parquet_freed = 0
             for pf in parquet_files:
                 try:
                     size = pf.stat().st_size
                     pf.unlink()
+                    parquet_freed += size
                     total_freed += size
                 except Exception as e:
                     print(f"  Warning: Could not delete {pf.name}: {e}")
             if parquet_files:
-                print(f"  Deleted {len(parquet_files)} source parquet files: {total_freed / (1024**3):.2f} GB freed")
+                print(f"  Deleted {len(parquet_files)} source parquet files: {parquet_freed / (1024**3):.2f} GB freed")
+
+            # Also delete deduplicated temp directory if it exists
+            dedup_dir = Path(args.input_dir) / "deduplicated"
+            if dedup_dir.exists():
+                try:
+                    size = sum(f.stat().st_size for f in dedup_dir.rglob('*') if f.is_file() and not f.is_symlink())
+                    shutil.rmtree(dedup_dir)
+                    total_freed += size
+                    print(f"  Deleted deduplicated temp dir: {size / (1024**3):.2f} GB freed")
+                except Exception as e:
+                    print(f"  Warning: Could not delete deduplicated dir: {e}")
+
+            # Delete chunk files after they've been merged into the dataset
+            chunk_dir = Path(args.output_dir) / "chunks"
+            if chunk_dir.exists():
+                try:
+                    size = sum(f.stat().st_size for f in chunk_dir.rglob('*') if f.is_file())
+                    shutil.rmtree(chunk_dir)
+                    total_freed += size
+                    print(f"  Deleted chunk files: {size / (1024**3):.2f} GB freed")
+                except Exception as e:
+                    print(f"  Warning: Could not delete chunks dir: {e}")
 
         if args.cleanup_cache:
-            # Clean up GPU cache directories
+            # Clean up any remaining GPU cache directories (may have been recreated)
             cache_dirs = [
-                Path(args.input_dir).parent / ".gpu_cache",
-                Path("/content/.gpu_cache") if Path("/content").exists() else None,
-                Path.home() / ".cache" / "huggingface" / "datasets",
+                (Path(args.input_dir).parent / ".gpu_cache", "GPU cache"),
+                (Path("/content/.gpu_cache") if Path("/content").exists() else None, "Colab GPU cache"),
+                (Path.home() / ".cache" / "huggingface" / "datasets", "HuggingFace datasets cache"),
             ]
 
-            for cache_dir in cache_dirs:
+            for cache_dir, name in cache_dirs:
                 if cache_dir and cache_dir.exists():
                     try:
-                        size = sum(f.stat().st_size for f in cache_dir.rglob('*') if f.is_file())
+                        size = sum(f.stat().st_size for f in cache_dir.rglob('*') if f.is_file() and not f.is_symlink())
                         shutil.rmtree(cache_dir)
                         total_freed += size
-                        print(f"  Deleted {cache_dir}: {size / (1024**3):.2f} GB freed")
+                        print(f"  Deleted {name}: {size / (1024**3):.2f} GB freed")
                     except Exception as e:
                         print(f"  Warning: Could not delete {cache_dir}: {e}")
 
