@@ -1,17 +1,20 @@
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "true"  # Enable parallel tokenization
+
 import pandas as pd
 from transformers import AutoTokenizer
 import numpy as np
 from tqdm import tqdm
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from pathlib import Path
 from multiprocessing import Pool, cpu_count
 
 # Chunk size for streaming - save every N sequences to avoid OOM
 CHUNK_SIZE = 50000
 
-# Batch size for tokenization (much faster than one-by-one)
-TOKENIZE_BATCH_SIZE = 10000
+# Batch size for tokenization - larger = faster but more memory
+# 50K docs at ~500 tokens avg = ~100MB, well within memory limits
+TOKENIZE_BATCH_SIZE = 50000
 
 
 def train_tokenizer():
@@ -49,7 +52,7 @@ def pack_sequences_streaming(ctx_len: int, tokenizer, input_dir: str = "data/pro
     Saves chunks to disk as we go instead of accumulating everything in memory.
     Final output is a HuggingFace Dataset for compatibility with Trainer.
 
-    Uses batch tokenization for 10-50x speedup over single-document tokenization.
+    Uses HuggingFace datasets map() with multiprocessing for maximum speed.
     """
     chunk_dir = Path(output_dir) / f"chunks_ctx{ctx_len}"
     chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -59,72 +62,85 @@ def pack_sequences_streaming(ctx_len: int, tokenizer, input_dir: str = "data/pro
     if existing_chunks:
         print(f"  Found {len(existing_chunks)} existing chunks, resuming...")
 
-    current_pack = []
-    current_length = 0
-    packed_buffer = []
-    chunk_idx = len(existing_chunks)
-    total_sequences = 0
-
     # Use multiple workers for tokenization if available
     if num_workers is None:
-        num_workers = min(cpu_count(), 8)
+        num_workers = min(cpu_count(), 12)  # Use more workers for better parallelism
 
     files = sorted([f for f in os.listdir(input_dir) if f.endswith('.parquet')])
 
+    # Collect all tokenized sequences first using fast parallel tokenization
+    all_token_ids = []
+
     for file in files:
         print(f"  Processing {file}...")
-        df = pd.read_parquet(f"{input_dir}/{file}")
-        texts = df['text'].tolist()
-        total_docs = len(texts)
+        file_path = f"{input_dir}/{file}"
 
-        # Process in batches for much faster tokenization
-        print(f"    Tokenizing {total_docs:,} documents in batches of {TOKENIZE_BATCH_SIZE}...")
+        # Load as HuggingFace dataset for fast parallel processing
+        print(f"    Loading dataset...")
+        ds = load_dataset('parquet', data_files=file_path, split='train')
+        total_docs = len(ds)
+        print(f"    Tokenizing {total_docs:,} documents with {num_workers} workers...")
 
-        processed_docs = 0
-        for batch_start in tqdm(range(0, total_docs, TOKENIZE_BATCH_SIZE),
-                                desc="    Tokenizing batches",
-                                unit="batch"):
-            batch_end = min(batch_start + TOKENIZE_BATCH_SIZE, total_docs)
-            batch_texts = texts[batch_start:batch_end]
-
-            # Batch tokenization is MUCH faster (10-50x)
-            batch_encodings = tokenizer(
-                batch_texts,
+        # Tokenize using HuggingFace datasets map() - MUCH faster with multiprocessing
+        def tokenize_fn(examples):
+            return tokenizer(
+                examples['text'],
                 add_special_tokens=True,
                 truncation=False,
                 padding=False,
                 return_attention_mask=False,
             )
 
-            # Pack each document's tokens
-            for tokens in batch_encodings['input_ids']:
-                if current_length + len(tokens) <= ctx_len:
-                    current_pack.extend(tokens)
-                    current_length += len(tokens)
-                else:
-                    # Pad and save current pack
-                    if current_length > 0:
-                        current_pack.extend([tokenizer.pad_token_id] * (ctx_len - current_length))
-                        packed_buffer.append(current_pack)
+        tokenized = ds.map(
+            tokenize_fn,
+            batched=True,
+            batch_size=10000,
+            num_proc=num_workers,
+            remove_columns=ds.column_names,
+            desc="    Tokenizing",
+        )
 
-                        # Save chunk when buffer is full
-                        if len(packed_buffer) >= CHUNK_SIZE:
-                            chunk_path = chunk_dir / f"chunk_{chunk_idx:04d}.npy"
-                            np.save(chunk_path, np.array(packed_buffer, dtype=np.int32))
-                            print(f"\n    [Saved chunk {chunk_idx}: {len(packed_buffer)} sequences]")
-                            total_sequences += len(packed_buffer)
-                            packed_buffer = []
-                            chunk_idx += 1
+        # Collect all token IDs
+        print(f"    Collecting token IDs...")
+        all_token_ids.extend(tokenized['input_ids'])
+        del ds, tokenized  # Free memory
 
-                    # Start new pack with truncated tokens if needed
-                    current_pack = tokens[:ctx_len]
-                    current_length = len(current_pack)
+    print(f"  Packing {len(all_token_ids):,} documents into sequences...")
 
-            processed_docs += len(batch_texts)
+    # Now pack sequences
+    current_pack = []
+    current_length = 0
+    packed_buffer = []
+    chunk_idx = len(existing_chunks)
+    total_sequences = 0
+    pad_token_id = tokenizer.pad_token_id
+
+    for tokens in tqdm(all_token_ids, desc="    Packing", unit="doc"):
+        if current_length + len(tokens) <= ctx_len:
+            current_pack.extend(tokens)
+            current_length += len(tokens)
+        else:
+            # Pad and save current pack
+            if current_length > 0:
+                current_pack.extend([pad_token_id] * (ctx_len - current_length))
+                packed_buffer.append(current_pack)
+
+                # Save chunk when buffer is full
+                if len(packed_buffer) >= CHUNK_SIZE:
+                    chunk_path = chunk_dir / f"chunk_{chunk_idx:04d}.npy"
+                    np.save(chunk_path, np.array(packed_buffer, dtype=np.int32))
+                    print(f"\n    [Saved chunk {chunk_idx}: {len(packed_buffer)} sequences]")
+                    total_sequences += len(packed_buffer)
+                    packed_buffer = []
+                    chunk_idx += 1
+
+            # Start new pack with truncated tokens if needed
+            current_pack = tokens[:ctx_len]
+            current_length = len(current_pack)
 
     # Save final pack and remaining buffer
     if current_length > 0:
-        current_pack.extend([tokenizer.pad_token_id] * (ctx_len - current_length))
+        current_pack.extend([pad_token_id] * (ctx_len - current_length))
         packed_buffer.append(current_pack)
 
     if packed_buffer:
