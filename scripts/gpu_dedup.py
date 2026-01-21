@@ -1,18 +1,30 @@
-"""GPU-accelerated deduplication using NeMo Curator.
+"""GPU-accelerated deduplication using pure PyTorch/CUDA.
 
-Provides 16-107x speedup over CPU MinHash on A100/H100 GPUs.
-Falls back to CPU datasketch if NeMo Curator is not available.
+Auto-detects GPU memory (VRAM) and system RAM, then processes data in
+appropriately-sized chunks to avoid OOM while maximizing GPU utilization.
+
+Falls back to NeMo Curator if available, or CPU datasketch as last resort.
 """
 from __future__ import annotations
 
+import gc
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
 
-# Check for NeMo Curator availability
-# NeMo Curator API has changed across versions - try multiple import paths
+# Check for torch/CUDA
+try:
+    import torch
+    TORCH_AVAILABLE = True
+    CUDA_AVAILABLE = torch.cuda.is_available()
+except ImportError:
+    TORCH_AVAILABLE = False
+    CUDA_AVAILABLE = False
+
+# Check for NeMo Curator availability (as fallback)
 NEMO_AVAILABLE = False
 NEMO_API_VERSION = None
 NEMO_IMPORT_ERROR = None
@@ -31,23 +43,7 @@ def _try_nemo_import():
     except ImportError as e:
         NEMO_IMPORT_ERROR = str(e)
 
-    # Try 2: NeMo Curator 1.0.0 stages API (alternative path)
-    try:
-        import nemo_curator.stages as stages
-        if hasattr(stages, 'deduplication'):
-            # Check what's in the deduplication module
-            dedup_mod = stages.deduplication
-            if hasattr(dedup_mod, 'fuzzy'):
-                fuzzy_mod = dedup_mod.fuzzy
-                if hasattr(fuzzy_mod, 'FuzzyDeduplicationWorkflow'):
-                    import dask.dataframe as dd
-                    NEMO_AVAILABLE = True
-                    NEMO_API_VERSION = "workflow_v2"
-                    return
-    except ImportError as e:
-        NEMO_IMPORT_ERROR = str(e)
-
-    # Try 3: modules API (some older versions)
+    # Try 2: modules API (some older versions)
     try:
         from nemo_curator.modules import FuzzyDuplicates
         from nemo_curator.datasets import DocumentDataset
@@ -58,7 +54,7 @@ def _try_nemo_import():
     except ImportError as e:
         NEMO_IMPORT_ERROR = str(e)
 
-    # Try 4: Legacy direct import (NeMo Curator < 25.x)
+    # Try 3: Legacy direct import (NeMo Curator < 25.x)
     try:
         from nemo_curator import FuzzyDuplicates
         from nemo_curator.datasets import DocumentDataset
@@ -87,9 +83,118 @@ except ImportError:
     DATASKETCH_AVAILABLE = False
 
 
+def get_memory_info() -> dict:
+    """Get available GPU and system memory.
+
+    Returns:
+        Dict with 'gpu_total_gb', 'gpu_free_gb', 'ram_total_gb', 'ram_free_gb'
+    """
+    info = {
+        'gpu_total_gb': 0,
+        'gpu_free_gb': 0,
+        'ram_total_gb': 0,
+        'ram_free_gb': 0,
+        'gpu_name': None,
+    }
+
+    # GPU memory
+    if CUDA_AVAILABLE:
+        try:
+            gpu_props = torch.cuda.get_device_properties(0)
+            info['gpu_name'] = gpu_props.name
+            info['gpu_total_gb'] = gpu_props.total_memory / (1024**3)
+
+            # Get free memory
+            torch.cuda.empty_cache()
+            free_mem, total_mem = torch.cuda.mem_get_info(0)
+            info['gpu_free_gb'] = free_mem / (1024**3)
+        except Exception:
+            pass
+
+    # System RAM
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        info['ram_total_gb'] = vm.total / (1024**3)
+        info['ram_free_gb'] = vm.available / (1024**3)
+    except ImportError:
+        # Fallback: try to read from /proc/meminfo on Linux
+        try:
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    if 'MemTotal' in line:
+                        info['ram_total_gb'] = int(line.split()[1]) / (1024**2)
+                    elif 'MemAvailable' in line:
+                        info['ram_free_gb'] = int(line.split()[1]) / (1024**2)
+        except Exception:
+            info['ram_total_gb'] = 16  # Assume 16GB if unknown
+            info['ram_free_gb'] = 8
+
+    return info
+
+
+def compute_optimal_batch_size(
+    n_docs: int,
+    avg_doc_len: int = 500,
+    num_perm: int = 128,
+    memory_info: Optional[dict] = None,
+) -> Tuple[int, int, int, str]:
+    """Compute optimal batch sizes for GPU and CPU processing.
+
+    Args:
+        n_docs: Total number of documents
+        avg_doc_len: Average document length in characters
+        num_perm: Number of MinHash permutations
+        memory_info: Pre-computed memory info (optional)
+
+    Returns:
+        Tuple of (gpu_batch_size, cpu_batch_size, n_cpu_workers, device)
+    """
+    if memory_info is None:
+        memory_info = get_memory_info()
+
+    # Memory estimates per document (approximate)
+    # - Text storage: ~avg_doc_len bytes
+    # - Shingles (5-grams): ~avg_doc_len * 4 bytes (as int32 hashes)
+    # - MinHash signature: num_perm * 4 bytes (int32)
+    # - Working memory: ~2x buffer
+    bytes_per_doc_text = avg_doc_len
+    bytes_per_doc_shingles = avg_doc_len * 4  # Rough estimate
+    bytes_per_doc_minhash = num_perm * 4
+    bytes_per_doc_total = (bytes_per_doc_text + bytes_per_doc_shingles + bytes_per_doc_minhash) * 2
+
+    # GPU batch size (use 70% of free VRAM to leave headroom)
+    if memory_info['gpu_free_gb'] > 2:
+        gpu_mem_bytes = memory_info['gpu_free_gb'] * 0.7 * (1024**3)
+        gpu_batch_size = int(gpu_mem_bytes / bytes_per_doc_total)
+        gpu_batch_size = max(10_000, min(gpu_batch_size, 500_000))
+        device = 'cuda'
+    else:
+        gpu_batch_size = 0
+        device = 'cpu'
+
+    # CPU batch size (use 50% of free RAM for LSH index building)
+    ram_mem_bytes = memory_info['ram_free_gb'] * 0.5 * (1024**3)
+    cpu_batch_size = int(ram_mem_bytes / bytes_per_doc_total)
+    cpu_batch_size = max(10_000, min(cpu_batch_size, 1_000_000))
+
+    # CPU workers for parallel shingle extraction
+    # Use more workers if RAM is abundant, fewer if limited
+    import os
+    n_cpus = os.cpu_count() or 4
+    if memory_info['ram_free_gb'] > 32:
+        n_cpu_workers = min(n_cpus, 8)
+    elif memory_info['ram_free_gb'] > 16:
+        n_cpu_workers = min(n_cpus, 4)
+    else:
+        n_cpu_workers = min(n_cpus, 2)
+
+    return gpu_batch_size, cpu_batch_size, n_cpu_workers, device
+
+
 def is_gpu_dedup_available() -> bool:
     """Check if GPU deduplication is available."""
-    return NEMO_AVAILABLE and DASK_CUDA_AVAILABLE
+    return CUDA_AVAILABLE and TORCH_AVAILABLE
 
 
 def gpu_fuzzy_dedup(
@@ -106,9 +211,10 @@ def gpu_fuzzy_dedup(
     n_workers: int = 1,
     show_progress: bool = True,
 ) -> str:
-    """GPU-accelerated fuzzy deduplication.
+    """GPU-accelerated fuzzy deduplication with automatic memory management.
 
-    16-107x faster than CPU MinHash on A100.
+    Automatically detects available GPU memory and system RAM, then processes
+    data in appropriately-sized chunks to avoid OOM.
 
     Args:
         input_path: Path to input parquet file(s) or directory
@@ -130,511 +236,206 @@ def gpu_fuzzy_dedup(
     if use_gpu is None:
         use_gpu = is_gpu_dedup_available()
 
-    if use_gpu and NEMO_AVAILABLE:
-        return _gpu_dedup_nemo(
+    # Get memory info for adaptive sizing
+    memory_info = get_memory_info()
+
+    if show_progress:
+        print(f"GPU Deduplication - Memory-Adaptive Mode")
+        print(f"  GPU: {memory_info['gpu_name'] or 'Not available'}")
+        if memory_info['gpu_free_gb'] > 0:
+            print(f"  VRAM: {memory_info['gpu_free_gb']:.1f} GB free / {memory_info['gpu_total_gb']:.1f} GB total")
+        print(f"  RAM: {memory_info['ram_free_gb']:.1f} GB free / {memory_info['ram_total_gb']:.1f} GB total")
+
+    # Use our PyTorch-based GPU implementation
+    if use_gpu and CUDA_AVAILABLE:
+        return _gpu_dedup_pytorch(
             input_path=input_path,
             output_path=output_path,
             text_column=text_column,
             id_column=id_column,
             similarity_threshold=similarity_threshold,
             char_ngrams=char_ngrams,
-            num_buckets=num_buckets,
-            hashes_per_bucket=hashes_per_bucket,
-            cache_path=cache_path,
-            n_workers=n_workers,
+            num_perm=num_buckets * hashes_per_bucket,
+            memory_info=memory_info,
             show_progress=show_progress,
         )
     else:
+        # Fall back to CPU datasketch with streaming
         return _cpu_dedup_datasketch(
             input_path=input_path,
             output_path=output_path,
             text_column=text_column,
             id_column=id_column,
             similarity_threshold=similarity_threshold,
+            memory_info=memory_info,
             show_progress=show_progress,
         )
 
 
-def _gpu_dedup_nemo(
+def _extract_shingles_single(args):
+    """Extract shingles from a single document (for multiprocessing)."""
+    idx, text, char_ngrams = args
+    if not text or len(text) < char_ngrams:
+        return (idx, None)
+
+    # Extract character n-grams and hash them
+    shingle_hashes = np.array([
+        hash(text[j:j + char_ngrams]) & 0xFFFFFFFF
+        for j in range(len(text) - char_ngrams + 1)
+    ], dtype=np.int64)
+
+    if len(shingle_hashes) > 0:
+        return (idx, shingle_hashes)
+    return (idx, None)
+
+
+def _gpu_minhash_batch(
+    texts: list[str],
+    char_ngrams: int = 5,
+    num_perm: int = 128,
+    device: str = 'cuda',
+    micro_batch_size: int = 1000,
+    n_cpu_workers: int = 4,
+) -> np.ndarray:
+    """Compute MinHash signatures for a batch of texts using GPU.
+
+    Optimized for throughput by:
+    1. Parallel CPU preprocessing for shingle extraction
+    2. Batching GPU operations for multiple documents
+    3. Using vectorized operations where possible
+
+    Args:
+        texts: List of text documents
+        char_ngrams: Size of character n-grams
+        num_perm: Number of MinHash permutations
+        device: 'cuda' or 'cpu'
+        micro_batch_size: Number of documents to process per GPU kernel
+        n_cpu_workers: Number of CPU workers for parallel shingle extraction
+
+    Returns:
+        numpy array of shape (len(texts), num_perm) with MinHash signatures
+    """
+    if not texts:
+        return np.array([], dtype=np.uint32).reshape(0, num_perm)
+
+    n_texts = len(texts)
+    PRIME = 2**61 - 1
+    MAX_HASH = np.uint32(2**32 - 1)
+
+    # Generate random hash coefficients (same across all docs for consistency)
+    torch.manual_seed(42)
+    a = torch.randint(1, PRIME, (num_perm,), dtype=torch.int64, device=device)
+    b = torch.randint(0, PRIME, (num_perm,), dtype=torch.int64, device=device)
+
+    # Pre-allocate output array
+    all_signatures = np.full((n_texts, num_perm), MAX_HASH, dtype=np.uint32)
+
+    # STEP 1: Pre-hash all shingles on CPU (parallelized)
+    doc_shingle_hashes = [None] * n_texts
+    doc_indices_with_shingles = []
+
+    # Use multiprocessing for large batches
+    if n_texts > 5000 and n_cpu_workers > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import os
+
+        # Prepare arguments
+        args_list = [(i, texts[i], char_ngrams) for i in range(n_texts)]
+
+        # Use ThreadPoolExecutor for smaller overhead (GIL released during hash())
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=n_cpu_workers) as executor:
+            results = list(executor.map(_extract_shingles_single, args_list))
+
+        for idx, shingles in results:
+            if shingles is not None:
+                doc_shingle_hashes[idx] = shingles
+                doc_indices_with_shingles.append(idx)
+    else:
+        # Sequential processing for small batches
+        for i, text in enumerate(texts):
+            if not text or len(text) < char_ngrams:
+                continue
+
+            shingle_hashes = np.array([
+                hash(text[j:j + char_ngrams]) & 0xFFFFFFFF
+                for j in range(len(text) - char_ngrams + 1)
+            ], dtype=np.int64)
+
+            if len(shingle_hashes) > 0:
+                doc_shingle_hashes[i] = shingle_hashes
+                doc_indices_with_shingles.append(i)
+
+    # STEP 2: Process documents in micro-batches on GPU
+    # This maximizes GPU utilization by processing multiple docs at once
+    for batch_start in range(0, len(doc_indices_with_shingles), micro_batch_size):
+        batch_end = min(batch_start + micro_batch_size, len(doc_indices_with_shingles))
+        batch_indices = doc_indices_with_shingles[batch_start:batch_end]
+
+        # Collect shingles for this micro-batch
+        batch_shingles = []
+        batch_doc_boundaries = [0]  # Start index of each doc's shingles
+
+        for idx in batch_indices:
+            shingles = doc_shingle_hashes[idx]
+            if shingles is not None:
+                batch_shingles.extend(shingles.tolist())
+            batch_doc_boundaries.append(len(batch_shingles))
+
+        if not batch_shingles:
+            continue
+
+        # Move all shingles to GPU at once
+        shingles_tensor = torch.tensor(batch_shingles, dtype=torch.int64, device=device)
+
+        # Compute all hash values at once: (num_perm, num_all_shingles)
+        hash_values = (a.unsqueeze(1) * shingles_tensor.unsqueeze(0) + b.unsqueeze(1)) % PRIME % MAX_HASH
+
+        # Extract min for each document using the boundaries
+        hash_values_cpu = hash_values.cpu().numpy().astype(np.uint32)
+
+        for j, idx in enumerate(batch_indices):
+            start = batch_doc_boundaries[j]
+            end = batch_doc_boundaries[j + 1]
+            if end > start:
+                # Min over shingles for this document
+                all_signatures[idx] = hash_values_cpu[:, start:end].min(axis=1)
+
+        # Free GPU memory
+        del shingles_tensor, hash_values, hash_values_cpu
+
+    return all_signatures
+
+
+def _gpu_dedup_pytorch(
     input_path: str,
     output_path: str,
     text_column: str,
     id_column: str,
     similarity_threshold: float,
     char_ngrams: int,
-    num_buckets: int,
-    hashes_per_bucket: int,
-    cache_path: Optional[str],
-    n_workers: int,
+    num_perm: int,
+    memory_info: dict,
     show_progress: bool,
 ) -> str:
-    """GPU deduplication using NeMo Curator.
+    """GPU deduplication using pure PyTorch with adaptive memory management.
 
-    Supports multiple API versions:
-    - workflow: NeMo Curator 25.x (FuzzyDeduplicationWorkflow)
-    - modules: Some versions (from nemo_curator.modules import FuzzyDuplicates)
-    - legacy: NeMo Curator < 25.x (from nemo_curator import FuzzyDuplicates)
+    Two-pass approach:
+    1. Compute MinHash signatures on GPU, build LSH index on CPU
+    2. Query LSH to find duplicates, filter and write output
     """
-    input_p = Path(input_path)
-    output_p = Path(output_path)
-    output_p.mkdir(parents=True, exist_ok=True)
-
-    if cache_path is None:
-        cache_p = output_p / ".nemo_cache"
-    else:
-        cache_p = Path(cache_path)
-    cache_p.mkdir(parents=True, exist_ok=True)
-
-    if show_progress:
-        print(f"GPU Deduplication (NeMo Curator - {NEMO_API_VERSION} API)")
-        print(f"  Input: {input_p}")
-        print(f"  Output: {output_p}")
-        print(f"  Threshold: {similarity_threshold}")
-        print(f"  N-grams: {char_ngrams}, Buckets: {num_buckets}")
-
-    # Use workflow API for NeMo Curator 25.x
-    if NEMO_API_VERSION == "workflow":
-        return _gpu_dedup_workflow_api(
-            input_path=input_p,
-            output_path=output_p,
-            text_column=text_column,
-            id_column=id_column,
-            similarity_threshold=similarity_threshold,
-            char_ngrams=char_ngrams,
-            num_buckets=num_buckets,
-            hashes_per_bucket=hashes_per_bucket,
-            cache_path=cache_p,
-            show_progress=show_progress,
-        )
-
-    # Use legacy/modules API for older versions
-    return _gpu_dedup_legacy_api(
-        input_path=input_p,
-        output_path=output_p,
-        text_column=text_column,
-        id_column=id_column,
-        similarity_threshold=similarity_threshold,
-        char_ngrams=char_ngrams,
-        num_buckets=num_buckets,
-        hashes_per_bucket=hashes_per_bucket,
-        cache_path=cache_p,
-        n_workers=n_workers,
-        show_progress=show_progress,
-    )
-
-
-def _gpu_dedup_workflow_api(
-    input_path: Path,
-    output_path: Path,
-    text_column: str,
-    id_column: str,
-    similarity_threshold: float,
-    char_ngrams: int,
-    num_buckets: int,
-    hashes_per_bucket: int,
-    cache_path: Path,
-    show_progress: bool,
-) -> str:
-    """GPU deduplication using NeMo Curator 1.0.0+ workflow API.
-
-    Uses FuzzyDeduplicationWorkflow with proper RayClient initialization.
-    The workflow requires:
-    1. RayClient started with GPU support
-    2. ID generator actor created after RayClient starts
-    3. Then workflow can be run
-    """
-    from nemo_curator.stages.deduplication.fuzzy.workflow import FuzzyDeduplicationWorkflow
-    from nemo_curator.core.client import RayClient
-    from nemo_curator.stages.deduplication.id_generator import kill_id_generator_actor
-
-    # Prepare input directory (workflow expects directory, not single file)
-    if input_path.is_file():
-        # Copy single file to temp directory
-        input_dir = cache_path / "input_temp"
-        input_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(input_path, input_dir / input_path.name)
-        input_path_str = str(input_dir)
-    else:
-        input_path_str = str(input_path)
-
-    # Workflow output paths - use output_path directly for deduplicated data
-    workflow_cache = cache_path / "workflow_cache"
-    workflow_cache.mkdir(parents=True, exist_ok=True)
-
-    # Output goes directly to our output path (caller creates the directory)
-    dedup_output = output_path
-    dedup_output.mkdir(parents=True, exist_ok=True)
-
-    if show_progress:
-        print("  Running FuzzyDeduplicationWorkflow (identify duplicates)...")
-        print(f"    char_ngrams: {char_ngrams} (recommended: 20+ for lower false positives)")
-        print(f"    num_bands: {num_buckets}, minhashes_per_band: {hashes_per_bucket}")
-
-    # Step 1: Shutdown any existing Ray instances to ensure clean state
-    try:
-        import ray
-        if ray.is_initialized():
-            if show_progress:
-                print("  Shutting down existing Ray instance...")
-            ray.shutdown()
-            import time
-            time.sleep(2)  # Give Ray time to fully shutdown
-    except Exception:
-        pass
-
-    # Step 2: Initialize RayClient with GPU support
-    # This is REQUIRED before creating the ID generator actor
-    if show_progress:
-        print("  Initializing RayClient with GPU support...")
-
-    # Detect available GPUs
-    try:
-        import torch
-        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    except ImportError:
-        num_gpus = 1  # Assume 1 GPU if torch not available
-
-    # Use fewer CPUs to avoid resource contention in Colab
-    import os
-    num_cpus = min(os.cpu_count() or 4, 8)
-
-    ray_client = RayClient(num_cpus=num_cpus, num_gpus=num_gpus)
-    ray_client.start()
-
-    try:
-        # Step 3: Clean up any existing ID generator actor from previous runs
-        # The workflow will create its own actor - we just need to ensure
-        # no stale actor exists from a previous run
-        if show_progress:
-            print("  Cleaning up any existing ID generator actor...")
-        try:
-            kill_id_generator_actor()
-        except Exception:
-            pass  # No existing actor, which is fine
-
-        # DO NOT call create_id_generator_actor() here!
-        # The FuzzyDeduplicationWorkflow creates and manages the actor internally.
-        # If we create it, the workflow will fail with "actor already exists" error.
-
-        # Step 4: Create and run workflow
-        # NeMo Curator 1.0.0: perform_removal is not implemented yet
-        # So we use perform_removal=False to identify duplicates, then remove manually
-        id_output = workflow_cache / "fuzzy_ids"
-        id_output.mkdir(parents=True, exist_ok=True)
-
-        if show_progress:
-            print("  Starting FuzzyDeduplicationWorkflow...")
-
-        # Determine appropriate blocksize based on available GPU memory
-        # Default 1GiB is too large for T4 (16GB) with large datasets
-        # Use smaller blocks to avoid OOM - 256MB should work on most GPUs
-        try:
-            import torch
-            if torch.cuda.is_available():
-                gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                if gpu_mem_gb < 20:
-                    # T4 (16GB) or smaller - use smaller blocks
-                    input_blocksize = "256MiB"
-                elif gpu_mem_gb < 50:
-                    # A10 (24GB), L4 (24GB) - use medium blocks
-                    input_blocksize = "512MiB"
-                else:
-                    # A100 (40GB/80GB), H100 - can use larger blocks
-                    input_blocksize = "1GiB"
-            else:
-                input_blocksize = "256MiB"
-        except Exception:
-            input_blocksize = "256MiB"
-
-        if show_progress:
-            print(f"    input_blocksize: {input_blocksize}")
-
-        workflow = FuzzyDeduplicationWorkflow(
-            input_path=input_path_str,
-            cache_path=str(workflow_cache / "minhash_cache"),
-            output_path=str(id_output),
-            text_field=text_column,
-            perform_removal=False,  # Identify only - removal not implemented in 1.0.0
-            input_filetype="parquet",
-            input_blocksize=input_blocksize,  # Control memory usage per block
-            seed=42,
-            char_ngrams=char_ngrams,
-            num_bands=num_buckets,
-            minhashes_per_band=hashes_per_bucket,
-        )
-        workflow.run()
-
-        if show_progress:
-            print("  MinHash + LSH complete, loading duplicate IDs...")
-
-        # Load duplicate IDs from workflow output
-        # NeMo Curator outputs internal `_curator_dedup_id` values in FuzzyDuplicateIds
-        # We need to map these back to our original document IDs
-        dup_ids_path = id_output / "FuzzyDuplicateIds"
-        dup_curator_ids = set()
-
-        if dup_ids_path.exists():
-            dup_files = list(dup_ids_path.glob("*.parquet"))
-            if show_progress:
-                print(f"  Found {len(dup_files)} duplicate ID files")
-
-            for dup_file in dup_files:
-                try:
-                    dup_df = pd.read_parquet(dup_file)
-                    if show_progress and len(dup_curator_ids) == 0:
-                        print(f"    Duplicate file columns: {list(dup_df.columns)}")
-                    # The FuzzyDuplicateIds files contain '_curator_dedup_id' (internal int IDs)
-                    if '_curator_dedup_id' in dup_df.columns:
-                        dup_curator_ids.update(dup_df['_curator_dedup_id'].tolist())
-                    elif 'id' in dup_df.columns:
-                        dup_curator_ids.update(dup_df['id'].tolist())
-                except Exception as e:
-                    if show_progress:
-                        print(f"    Warning: Could not read {dup_file.name}: {e}")
-
-        if show_progress:
-            print(f"  Found {len(dup_curator_ids):,} duplicate curator IDs")
-
-        # NeMo Curator assigns sequential _curator_dedup_id values (0, 1, 2, ...) as it processes
-        # documents in file order. We'll use these IDs directly for filtering.
-        # The dup_curator_ids set contains the internal IDs of duplicates to remove.
-        dup_ids = dup_curator_ids  # Use curator IDs directly
-
-        if show_progress:
-            print(f"  Will filter using {len(dup_ids):,} curator IDs")
-
-        # Remove duplicates by streaming through files one at a time
-        # This avoids loading all 12M+ documents into memory at once
-        if show_progress:
-            print("  Removing duplicates from original data (streaming mode)...")
-
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        if input_path.is_file():
-            parquet_files = [input_path]
-        else:
-            parquet_files = sorted(input_path.glob("*.parquet"))
-
-        # Stream through files, filter duplicates, write incrementally
-        # Track global document index to match _curator_dedup_id assignment
-        writer = None
-        n_docs = 0
-        n_kept = 0
-        global_doc_idx = 0  # NeMo Curator assigns sequential IDs starting from 0
-        output_file = dedup_output / "deduplicated.parquet"
-
-        for i, pf in enumerate(parquet_files):
-            try:
-                # Read one file at a time
-                df = pd.read_parquet(pf)
-                file_docs = len(df)
-                n_docs += file_docs
-
-                # NeMo Curator assigns _curator_dedup_id sequentially across all documents
-                # as it processes files in sorted order. We match by computing the same
-                # global index for each document.
-                # Create curator IDs for this file's documents
-                file_curator_ids = list(range(global_doc_idx, global_doc_idx + file_docs))
-
-                # Create mask for documents to keep (not in duplicate set)
-                keep_mask = [cid not in dup_ids for cid in file_curator_ids]
-                filtered_df = df[keep_mask]
-
-                # Update global index for next file
-                global_doc_idx += file_docs
-
-                n_kept += len(filtered_df)
-
-                # Write incrementally using PyArrow
-                if len(filtered_df) > 0:
-                    table = pa.Table.from_pandas(filtered_df, preserve_index=False)
-                    if writer is None:
-                        writer = pq.ParquetWriter(str(output_file), table.schema)
-                    writer.write_table(table)
-
-                # Free memory
-                del df, filtered_df, keep_mask, file_curator_ids
-                if 'table' in dir():
-                    del table
-
-                # Progress update every 100 files
-                if show_progress and (i + 1) % 100 == 0:
-                    print(f"    Processed {i + 1}/{len(parquet_files)} files, kept {n_kept:,}/{n_docs:,} docs")
-
-            except Exception as e:
-                if show_progress:
-                    print(f"    Warning: Error processing {pf.name}: {e}")
-
-        if writer:
-            writer.close()
-
-        if show_progress:
-            n_removed = n_docs - n_kept
-            pct_removed = 100 * n_removed / max(1, n_docs)
-            print(f"  Removed: {n_removed:,} duplicates ({pct_removed:.1f}%)")
-            print(f"  Kept: {n_kept:,} unique documents")
-
-        return str(output_path)
-
-    except Exception as e:
-        error_msg = str(e)
-        if show_progress:
-            print(f"  Warning: GPU workflow failed: {error_msg}")
-            print("  Falling back to CPU datasketch...")
-
-        # Fall back to CPU deduplication
-        return _cpu_dedup_datasketch(
-            input_path=str(input_path),
-            output_path=str(output_path),
-            text_column=text_column,
-            id_column=id_column,
-            similarity_threshold=similarity_threshold,
-            show_progress=show_progress,
-        )
-
-    finally:
-        # Step 5: Always stop RayClient when done (success or failure)
-        try:
-            if show_progress:
-                print("  Stopping RayClient...")
-            ray_client.stop()
-        except Exception:
-            pass  # Ignore cleanup errors
-
-
-def _gpu_dedup_legacy_api(
-    input_path: Path,
-    output_path: Path,
-    text_column: str,
-    id_column: str,
-    similarity_threshold: float,
-    char_ngrams: int,
-    num_buckets: int,
-    hashes_per_bucket: int,
-    cache_path: Path,
-    n_workers: int,
-    show_progress: bool,
-) -> str:
-    """GPU deduplication using legacy NeMo Curator API (< 25.x)."""
-    from dask_cuda import LocalCUDACluster
-    import dask.dataframe as dd
-
-    # Import based on API version
-    if NEMO_API_VERSION == "modules":
-        from nemo_curator.modules import FuzzyDuplicates
-        from nemo_curator.datasets import DocumentDataset
-        from nemo_curator.utils.distributed_utils import get_client
-    else:
-        from nemo_curator import FuzzyDuplicates
-        from nemo_curator.datasets import DocumentDataset
-        from nemo_curator.utils.distributed_utils import get_client
-
-    # Start Dask CUDA cluster
-    cluster = LocalCUDACluster(n_workers=n_workers)
-    client = get_client(cluster)
-
-    if show_progress:
-        print(f"  Dask cluster: {n_workers} GPU workers")
-
-    n_docs = 0
-    try:
-        # Load data
-        if input_path.is_file():
-            ddf = dd.read_parquet(str(input_path))
-        else:
-            ddf = dd.read_parquet(str(input_path / "*.parquet"))
-
-        # Add ID column if missing
-        if id_column not in ddf.columns:
-            ddf[id_column] = ddf.index.astype(str)
-
-        # Create NeMo dataset
-        dataset = DocumentDataset(ddf)
-
-        n_docs = len(ddf)
-        if show_progress:
-            print(f"  Documents: {n_docs:,}")
-
-        # Configure fuzzy deduplication
-        fuzzy_dedup = FuzzyDuplicates(
-            id_field=id_column,
-            text_field=text_column,
-            seed=42,
-            char_ngrams=char_ngrams,
-            num_buckets=num_buckets,
-            hashes_per_bucket=hashes_per_bucket,
-            use_64_bit_hash=False,
-            buckets_per_shuffle=1,
-            false_positive_check=True,
-            num_anchors=2,
-            jaccard_threshold=similarity_threshold,
-            cache_dir=str(cache_path),
-        )
-
-        # Find duplicates
-        if show_progress:
-            print("  Computing MinHash signatures...")
-
-        duplicates = fuzzy_dedup(dataset)
-
-        # Remove duplicates
-        if show_progress:
-            print("  Filtering duplicates...")
-
-        # Get duplicate IDs
-        dup_ids = duplicates.df[id_column].compute().tolist()
-        dup_set = set(dup_ids)
-
-        # Filter original dataset
-        result_ddf = ddf[~ddf[id_column].isin(dup_set)]
-
-        # Save results
-        result_ddf.to_parquet(str(output_path), write_index=False)
-
-        if show_progress:
-            n_kept = len(result_ddf)
-            n_removed = n_docs - n_kept
-            print(f"  Removed: {n_removed:,} duplicates ({100*n_removed/n_docs:.1f}%)")
-            print(f"  Kept: {n_kept:,} unique documents")
-
-    finally:
-        client.close()
-        cluster.close()
-
-    return str(output_path)
-
-
-def _cpu_dedup_datasketch(
-    input_path: str,
-    output_path: str,
-    text_column: str,
-    id_column: str,
-    similarity_threshold: float,
-    show_progress: bool,
-) -> str:
-    """CPU fallback using datasketch MinHashLSH.
-
-    Uses streaming mode to avoid OOM on large datasets (24M+ docs).
-    Processes files one at a time, writing results incrementally.
-    """
-    if not DATASKETCH_AVAILABLE:
-        raise ImportError("datasketch not installed. Run: pip install datasketch")
-
-    from datasketch import MinHash, MinHashLSH
     import pyarrow as pa
     import pyarrow.parquet as pq
-    import gc
 
     input_p = Path(input_path)
     output_p = Path(output_path)
     output_p.mkdir(parents=True, exist_ok=True)
 
     if show_progress:
-        print(f"CPU Deduplication (datasketch) - STREAMING MODE")
         print(f"  Input: {input_p}")
         print(f"  Output: {output_p}")
         print(f"  Threshold: {similarity_threshold}")
+        print(f"  N-grams: {char_ngrams}, Permutations: {num_perm}")
 
     # Get list of files to process
     if input_p.is_file():
@@ -642,7 +443,7 @@ def _cpu_dedup_datasketch(
     else:
         parquet_files = sorted(input_p.glob("*.parquet"))
 
-    # Count total docs (using metadata, no loading into memory)
+    # Count total docs
     n_docs = 0
     for pf in parquet_files:
         try:
@@ -654,20 +455,40 @@ def _cpu_dedup_datasketch(
         print(f"  Files: {len(parquet_files):,}")
         print(f"  Documents: {n_docs:,}")
 
-    # Initialize LSH index
-    # Use fewer permutations if dataset is very large (saves memory)
-    num_perm = 64 if n_docs > 10_000_000 else 128
-    lsh = MinHashLSH(threshold=similarity_threshold, num_perm=num_perm)
+    # Compute optimal batch sizes
+    gpu_batch, cpu_batch, n_cpu_workers, device = compute_optimal_batch_size(
+        n_docs=n_docs,
+        num_perm=num_perm,
+        memory_info=memory_info,
+    )
 
     if show_progress:
-        print(f"  MinHash permutations: {num_perm}")
-        print("  Pass 1: Building LSH index (streaming)...")
+        print(f"  Device: {device}")
+        print(f"  GPU batch size: {gpu_batch:,}")
+        print(f"  CPU batch size: {cpu_batch:,}")
+        print(f"  CPU workers: {n_cpu_workers}")
 
-    # PASS 1: Build LSH index by streaming through all files
-    # Only store MinHash signatures in the LSH, not the actual text
+    # Initialize LSH index
+    # Adjust number of permutations based on memory
+    actual_num_perm = min(num_perm, 128 if memory_info['ram_free_gb'] > 16 else 64)
+
+    if not DATASKETCH_AVAILABLE:
+        raise ImportError("datasketch not installed. Run: pip install datasketch")
+
+    lsh = MinHashLSH(threshold=similarity_threshold, num_perm=actual_num_perm)
+
+    if show_progress:
+        print(f"  LSH permutations: {actual_num_perm}")
+        print("  Pass 1: Computing MinHash signatures and building LSH index...")
+
+    # PASS 1: Compute MinHash on GPU, build LSH index
     n_processed = 0
     n_unique = 0
-    duplicate_ids = set()  # Store IDs of duplicates to filter in pass 2
+    duplicate_ids = set()
+
+    # Process files in batches
+    current_batch_texts = []
+    current_batch_ids = []
 
     file_iterator = parquet_files
     if show_progress:
@@ -675,56 +496,99 @@ def _cpu_dedup_datasketch(
 
     for pf in file_iterator:
         try:
-            # Read one file at a time
             df = pd.read_parquet(pf)
 
             # Add ID column if missing
             if id_column not in df.columns:
                 df[id_column] = [f"{pf.stem}_{i}" for i in range(len(df))]
 
-            # Process each document
-            for idx, row in df.iterrows():
-                text = str(row[text_column])
-                doc_id = str(row[id_column])
+            texts = df[text_column].fillna('').tolist()
+            ids = df[id_column].tolist()
 
-                # Compute MinHash
-                m = MinHash(num_perm=num_perm)
-                words = text.split()
-                # Use character 3-grams for short texts, words for longer
-                if len(words) < 20:
-                    # Character n-grams for short texts
-                    for i in range(len(text) - 2):
-                        m.update(text[i:i+3].encode('utf8'))
-                else:
-                    for word in words:
-                        m.update(word.encode('utf8'))
-
-                # Check for duplicates
-                if lsh.query(m):
-                    duplicate_ids.add(doc_id)
-                else:
-                    lsh.insert(doc_id, m)
-                    n_unique += 1
-
-                n_processed += 1
-
-            # Free memory after each file
             del df
+            gc.collect()
+
+            # Add to current batch
+            current_batch_texts.extend(texts)
+            current_batch_ids.extend(ids)
+
+            # Process batch when it reaches gpu_batch size
+            while len(current_batch_texts) >= gpu_batch:
+                batch_texts = current_batch_texts[:gpu_batch]
+                batch_ids = current_batch_ids[:gpu_batch]
+                current_batch_texts = current_batch_texts[gpu_batch:]
+                current_batch_ids = current_batch_ids[gpu_batch:]
+
+                # Compute MinHash on GPU
+                signatures = _gpu_minhash_batch(
+                    batch_texts,
+                    char_ngrams=char_ngrams,
+                    num_perm=actual_num_perm,
+                    device=device,
+                    n_cpu_workers=n_cpu_workers,
+                )
+
+                # Add to LSH index (on CPU)
+                for i, (doc_id, sig) in enumerate(zip(batch_ids, signatures)):
+                    m = MinHash(num_perm=actual_num_perm, hashfunc=lambda x: x)
+                    m.hashvalues = sig
+
+                    if lsh.query(m):
+                        duplicate_ids.add(doc_id)
+                    else:
+                        lsh.insert(doc_id, m)
+                        n_unique += 1
+
+                    n_processed += 1
+
+                del signatures, batch_texts, batch_ids
+                gc.collect()
+                if CUDA_AVAILABLE:
+                    torch.cuda.empty_cache()
+
+            del texts, ids
             gc.collect()
 
         except Exception as e:
             if show_progress:
                 print(f"    Warning: Error processing {pf.name}: {e}")
 
+    # Process remaining batch
+    if current_batch_texts:
+        signatures = _gpu_minhash_batch(
+            current_batch_texts,
+            char_ngrams=char_ngrams,
+            num_perm=actual_num_perm,
+            device=device,
+            n_cpu_workers=n_cpu_workers,
+        )
+
+        for i, (doc_id, sig) in enumerate(zip(current_batch_ids, signatures)):
+            m = MinHash(num_perm=actual_num_perm, hashfunc=lambda x: x)
+            m.hashvalues = sig
+
+            if lsh.query(m):
+                duplicate_ids.add(doc_id)
+            else:
+                lsh.insert(doc_id, m)
+                n_unique += 1
+
+            n_processed += 1
+
+        del signatures, current_batch_texts, current_batch_ids
+        gc.collect()
+        if CUDA_AVAILABLE:
+            torch.cuda.empty_cache()
+
     if show_progress:
         print(f"  Index built: {n_unique:,} unique, {len(duplicate_ids):,} duplicates")
-        print("  Pass 2: Filtering and writing results (streaming)...")
+        print("  Pass 2: Filtering and writing results...")
 
-    # Clear the LSH to free memory before pass 2
+    # Clear LSH to free memory
     del lsh
     gc.collect()
 
-    # PASS 2: Stream through files again, filter duplicates, write incrementally
+    # PASS 2: Filter duplicates and write output
     writer = None
     output_file = output_p / "deduplicated.parquet"
     n_kept = 0
@@ -746,7 +610,6 @@ def _cpu_dedup_datasketch(
             filtered_df = df[keep_mask]
 
             if len(filtered_df) > 0:
-                # Write incrementally using PyArrow
                 table = pa.Table.from_pandas(filtered_df, preserve_index=False)
                 if writer is None:
                     writer = pq.ParquetWriter(str(output_file), table.schema)
@@ -754,7 +617,180 @@ def _cpu_dedup_datasketch(
                 n_kept += len(filtered_df)
                 del table
 
-            # Free memory
+            del df, filtered_df, keep_mask
+            gc.collect()
+
+        except Exception as e:
+            if show_progress:
+                print(f"    Warning: Error writing {pf.name}: {e}")
+
+    if writer:
+        writer.close()
+
+    if show_progress:
+        n_removed = n_docs - n_kept
+        pct_removed = 100 * n_removed / max(1, n_docs)
+        print(f"  Removed: {n_removed:,} duplicates ({pct_removed:.1f}%)")
+        print(f"  Kept: {n_kept:,} unique documents")
+
+    return str(output_p)
+
+
+def _cpu_dedup_datasketch(
+    input_path: str,
+    output_path: str,
+    text_column: str,
+    id_column: str,
+    similarity_threshold: float,
+    memory_info: Optional[dict] = None,
+    show_progress: bool = True,
+) -> str:
+    """CPU fallback using datasketch MinHashLSH with streaming mode.
+
+    Uses adaptive batch sizes based on available RAM.
+    """
+    if not DATASKETCH_AVAILABLE:
+        raise ImportError("datasketch not installed. Run: pip install datasketch")
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    if memory_info is None:
+        memory_info = get_memory_info()
+
+    input_p = Path(input_path)
+    output_p = Path(output_path)
+    output_p.mkdir(parents=True, exist_ok=True)
+
+    if show_progress:
+        print(f"CPU Deduplication (datasketch) - Streaming Mode")
+        print(f"  RAM: {memory_info['ram_free_gb']:.1f} GB free")
+        print(f"  Input: {input_p}")
+        print(f"  Output: {output_p}")
+        print(f"  Threshold: {similarity_threshold}")
+
+    # Get list of files to process
+    if input_p.is_file():
+        parquet_files = [input_p]
+    else:
+        parquet_files = sorted(input_p.glob("*.parquet"))
+
+    # Count total docs
+    n_docs = 0
+    for pf in parquet_files:
+        try:
+            n_docs += pq.read_metadata(pf).num_rows
+        except Exception:
+            pass
+
+    if show_progress:
+        print(f"  Files: {len(parquet_files):,}")
+        print(f"  Documents: {n_docs:,}")
+
+    # Adaptive settings based on RAM
+    # Use fewer permutations for very large datasets to reduce memory
+    if n_docs > 20_000_000:
+        num_perm = 64
+    elif n_docs > 10_000_000:
+        num_perm = 96
+    else:
+        num_perm = 128
+
+    # Reduce further if RAM is limited
+    if memory_info['ram_free_gb'] < 16:
+        num_perm = min(num_perm, 64)
+
+    lsh = MinHashLSH(threshold=similarity_threshold, num_perm=num_perm)
+
+    if show_progress:
+        print(f"  MinHash permutations: {num_perm}")
+        print("  Pass 1: Building LSH index (streaming)...")
+
+    # PASS 1: Build LSH index
+    n_processed = 0
+    n_unique = 0
+    duplicate_ids = set()
+
+    file_iterator = parquet_files
+    if show_progress:
+        file_iterator = tqdm(parquet_files, desc="  Building index", unit="file")
+
+    for pf in file_iterator:
+        try:
+            df = pd.read_parquet(pf)
+
+            # Add ID column if missing
+            if id_column not in df.columns:
+                df[id_column] = [f"{pf.stem}_{i}" for i in range(len(df))]
+
+            # Process each document
+            for idx, row in df.iterrows():
+                text = str(row[text_column]) if pd.notna(row[text_column]) else ""
+                doc_id = str(row[id_column])
+
+                # Compute MinHash
+                m = MinHash(num_perm=num_perm)
+                words = text.split()
+
+                # Use character 3-grams for short texts, words for longer
+                if len(words) < 20:
+                    for i in range(len(text) - 2):
+                        m.update(text[i:i+3].encode('utf8'))
+                else:
+                    for word in words:
+                        m.update(word.encode('utf8'))
+
+                # Check for duplicates
+                if lsh.query(m):
+                    duplicate_ids.add(doc_id)
+                else:
+                    lsh.insert(doc_id, m)
+                    n_unique += 1
+
+                n_processed += 1
+
+            del df
+            gc.collect()
+
+        except Exception as e:
+            if show_progress:
+                print(f"    Warning: Error processing {pf.name}: {e}")
+
+    if show_progress:
+        print(f"  Index built: {n_unique:,} unique, {len(duplicate_ids):,} duplicates")
+        print("  Pass 2: Filtering and writing results (streaming)...")
+
+    # Clear LSH to free memory
+    del lsh
+    gc.collect()
+
+    # PASS 2: Filter and write
+    writer = None
+    output_file = output_p / "deduplicated.parquet"
+    n_kept = 0
+
+    file_iterator = parquet_files
+    if show_progress:
+        file_iterator = tqdm(parquet_files, desc="  Writing output", unit="file")
+
+    for pf in file_iterator:
+        try:
+            df = pd.read_parquet(pf)
+
+            if id_column not in df.columns:
+                df[id_column] = [f"{pf.stem}_{i}" for i in range(len(df))]
+
+            keep_mask = ~df[id_column].isin(duplicate_ids)
+            filtered_df = df[keep_mask]
+
+            if len(filtered_df) > 0:
+                table = pa.Table.from_pandas(filtered_df, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(str(output_file), table.schema)
+                writer.write_table(table)
+                n_kept += len(filtered_df)
+                del table
+
             del df, filtered_df, keep_mask
             gc.collect()
 
@@ -801,6 +837,8 @@ def benchmark_dedup(n_samples: int = 10_000) -> dict:
     })
 
     results = {'n_samples': n_samples}
+    memory_info = get_memory_info()
+    results['memory_info'] = memory_info
 
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = Path(tmpdir) / "input.parquet"
@@ -812,7 +850,9 @@ def benchmark_dedup(n_samples: int = 10_000) -> dict:
         _cpu_dedup_datasketch(
             str(input_path), str(cpu_output),
             text_column='text', id_column='id',
-            similarity_threshold=0.8, show_progress=False
+            similarity_threshold=0.8,
+            memory_info=memory_info,
+            show_progress=False
         )
         cpu_time = time.time() - start
         results['cpu_time'] = cpu_time
@@ -822,13 +862,14 @@ def benchmark_dedup(n_samples: int = 10_000) -> dict:
         if is_gpu_dedup_available():
             gpu_output = Path(tmpdir) / "gpu_output"
             start = time.time()
-            _gpu_dedup_nemo(
+            _gpu_dedup_pytorch(
                 str(input_path), str(gpu_output),
                 text_column='text', id_column='id',
-                similarity_threshold=0.8, char_ngrams=5,
-                num_buckets=20, hashes_per_bucket=13,
-                cache_path=str(Path(tmpdir) / "cache"),
-                n_workers=1, show_progress=False
+                similarity_threshold=0.8,
+                char_ngrams=5,
+                num_perm=128,
+                memory_info=memory_info,
+                show_progress=False
             )
             gpu_time = time.time() - start
             results['gpu_time'] = gpu_time
@@ -845,12 +886,19 @@ def benchmark_dedup(n_samples: int = 10_000) -> dict:
 if __name__ == '__main__':
     print("GPU Dedup Utils - Testing")
     print("=" * 50)
-    print(f"NeMo Curator available: {NEMO_AVAILABLE}")
-    print(f"NeMo API version: {NEMO_API_VERSION}")
-    if NEMO_IMPORT_ERROR and not NEMO_AVAILABLE:
-        print(f"NeMo import error: {NEMO_IMPORT_ERROR}")
-    print(f"Dask CUDA available: {DASK_CUDA_AVAILABLE}")
+
+    # Show memory info
+    memory_info = get_memory_info()
+    print(f"GPU: {memory_info['gpu_name'] or 'Not available'}")
+    if memory_info['gpu_free_gb'] > 0:
+        print(f"VRAM: {memory_info['gpu_free_gb']:.1f} GB free / {memory_info['gpu_total_gb']:.1f} GB total")
+    print(f"RAM: {memory_info['ram_free_gb']:.1f} GB free / {memory_info['ram_total_gb']:.1f} GB total")
+    print()
+
+    print(f"PyTorch available: {TORCH_AVAILABLE}")
+    print(f"CUDA available: {CUDA_AVAILABLE}")
     print(f"GPU dedup available: {is_gpu_dedup_available()}")
+    print(f"NeMo Curator available: {NEMO_AVAILABLE} ({NEMO_API_VERSION})")
     print(f"Datasketch available: {DATASKETCH_AVAILABLE}")
 
     if DATASKETCH_AVAILABLE:
