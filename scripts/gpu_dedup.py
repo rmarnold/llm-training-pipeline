@@ -613,72 +613,162 @@ def _cpu_dedup_datasketch(
     similarity_threshold: float,
     show_progress: bool,
 ) -> str:
-    """CPU fallback using datasketch MinHashLSH."""
+    """CPU fallback using datasketch MinHashLSH.
+
+    Uses streaming mode to avoid OOM on large datasets (24M+ docs).
+    Processes files one at a time, writing results incrementally.
+    """
     if not DATASKETCH_AVAILABLE:
         raise ImportError("datasketch not installed. Run: pip install datasketch")
 
     from datasketch import MinHash, MinHashLSH
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import gc
 
     input_p = Path(input_path)
     output_p = Path(output_path)
     output_p.mkdir(parents=True, exist_ok=True)
 
     if show_progress:
-        print(f"CPU Deduplication (datasketch)")
+        print(f"CPU Deduplication (datasketch) - STREAMING MODE")
         print(f"  Input: {input_p}")
         print(f"  Output: {output_p}")
         print(f"  Threshold: {similarity_threshold}")
 
-    # Load data
+    # Get list of files to process
     if input_p.is_file():
-        df = pd.read_parquet(input_p)
+        parquet_files = [input_p]
     else:
-        parquet_files = list(input_p.glob("*.parquet"))
-        dfs = [pd.read_parquet(f) for f in parquet_files]
-        df = pd.concat(dfs, ignore_index=True)
+        parquet_files = sorted(input_p.glob("*.parquet"))
 
-    # Add ID column if missing
-    if id_column not in df.columns:
-        df[id_column] = df.index.astype(str)
+    # Count total docs (using metadata, no loading into memory)
+    n_docs = 0
+    for pf in parquet_files:
+        try:
+            n_docs += pq.read_metadata(pf).num_rows
+        except Exception:
+            pass
 
-    n_docs = len(df)
     if show_progress:
+        print(f"  Files: {len(parquet_files):,}")
         print(f"  Documents: {n_docs:,}")
 
-    # Initialize LSH
-    lsh = MinHashLSH(threshold=similarity_threshold, num_perm=128)
-    keep_mask = []
+    # Initialize LSH index
+    # Use fewer permutations if dataset is very large (saves memory)
+    num_perm = 64 if n_docs > 10_000_000 else 128
+    lsh = MinHashLSH(threshold=similarity_threshold, num_perm=num_perm)
 
-    # Process documents
-    iterator = df.iterrows()
     if show_progress:
-        iterator = tqdm(iterator, total=n_docs, desc="  Deduplicating", unit="doc")
+        print(f"  MinHash permutations: {num_perm}")
+        print("  Pass 1: Building LSH index (streaming)...")
 
-    for idx, row in iterator:
-        text = str(row[text_column])
-        doc_id = str(row[id_column])
+    # PASS 1: Build LSH index by streaming through all files
+    # Only store MinHash signatures in the LSH, not the actual text
+    n_processed = 0
+    n_unique = 0
+    duplicate_ids = set()  # Store IDs of duplicates to filter in pass 2
 
-        # Compute MinHash
-        m = MinHash(num_perm=128)
-        for word in text.split():
-            m.update(word.encode('utf8'))
+    file_iterator = parquet_files
+    if show_progress:
+        file_iterator = tqdm(parquet_files, desc="  Building index", unit="file")
 
-        # Check for duplicates
-        if lsh.query(m):
-            keep_mask.append(False)
-        else:
-            lsh.insert(doc_id, m)
-            keep_mask.append(True)
+    for pf in file_iterator:
+        try:
+            # Read one file at a time
+            df = pd.read_parquet(pf)
 
-    # Filter and save
-    result_df = df[keep_mask]
+            # Add ID column if missing
+            if id_column not in df.columns:
+                df[id_column] = [f"{pf.stem}_{i}" for i in range(len(df))]
+
+            # Process each document
+            for idx, row in df.iterrows():
+                text = str(row[text_column])
+                doc_id = str(row[id_column])
+
+                # Compute MinHash
+                m = MinHash(num_perm=num_perm)
+                words = text.split()
+                # Use character 3-grams for short texts, words for longer
+                if len(words) < 20:
+                    # Character n-grams for short texts
+                    for i in range(len(text) - 2):
+                        m.update(text[i:i+3].encode('utf8'))
+                else:
+                    for word in words:
+                        m.update(word.encode('utf8'))
+
+                # Check for duplicates
+                if lsh.query(m):
+                    duplicate_ids.add(doc_id)
+                else:
+                    lsh.insert(doc_id, m)
+                    n_unique += 1
+
+                n_processed += 1
+
+            # Free memory after each file
+            del df
+            gc.collect()
+
+        except Exception as e:
+            if show_progress:
+                print(f"    Warning: Error processing {pf.name}: {e}")
+
+    if show_progress:
+        print(f"  Index built: {n_unique:,} unique, {len(duplicate_ids):,} duplicates")
+        print("  Pass 2: Filtering and writing results (streaming)...")
+
+    # Clear the LSH to free memory before pass 2
+    del lsh
+    gc.collect()
+
+    # PASS 2: Stream through files again, filter duplicates, write incrementally
+    writer = None
     output_file = output_p / "deduplicated.parquet"
-    result_df.to_parquet(output_file, index=False)
+    n_kept = 0
+
+    file_iterator = parquet_files
+    if show_progress:
+        file_iterator = tqdm(parquet_files, desc="  Writing output", unit="file")
+
+    for pf in file_iterator:
+        try:
+            df = pd.read_parquet(pf)
+
+            # Add ID column if missing (same logic as pass 1)
+            if id_column not in df.columns:
+                df[id_column] = [f"{pf.stem}_{i}" for i in range(len(df))]
+
+            # Filter out duplicates
+            keep_mask = ~df[id_column].isin(duplicate_ids)
+            filtered_df = df[keep_mask]
+
+            if len(filtered_df) > 0:
+                # Write incrementally using PyArrow
+                table = pa.Table.from_pandas(filtered_df, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(str(output_file), table.schema)
+                writer.write_table(table)
+                n_kept += len(filtered_df)
+                del table
+
+            # Free memory
+            del df, filtered_df, keep_mask
+            gc.collect()
+
+        except Exception as e:
+            if show_progress:
+                print(f"    Warning: Error writing {pf.name}: {e}")
+
+    if writer:
+        writer.close()
 
     if show_progress:
-        n_kept = len(result_df)
         n_removed = n_docs - n_kept
-        print(f"  Removed: {n_removed:,} duplicates ({100*n_removed/n_docs:.1f}%)")
+        pct_removed = 100 * n_removed / max(1, n_docs)
+        print(f"  Removed: {n_removed:,} duplicates ({pct_removed:.1f}%)")
         print(f"  Kept: {n_kept:,} unique documents")
 
     return str(output_p)
