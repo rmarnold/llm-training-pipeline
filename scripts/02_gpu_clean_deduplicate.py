@@ -47,7 +47,7 @@ from scripts.gpu_text_utils import (
 from scripts.gpu_dedup import (
     gpu_fuzzy_dedup,
     is_gpu_dedup_available,
-    NEMO_AVAILABLE,
+    CUDA_AVAILABLE,
 )
 
 # Import existing utilities from original script
@@ -139,7 +139,7 @@ class GPUDataPipeline:
             self.use_gpu_dedup = is_gpu_dedup_available()
         else:
             self.use_gpu_text = use_gpu and RAPIDS_AVAILABLE
-            self.use_gpu_dedup = use_gpu and NEMO_AVAILABLE
+            self.use_gpu_dedup = use_gpu and CUDA_AVAILABLE
 
         # Create directories
         self.output_dir.mkdir(parents=True, exist_ok=True)
