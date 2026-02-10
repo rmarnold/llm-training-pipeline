@@ -47,8 +47,8 @@ class TestDataCleaning:
         # Too short
         assert filter_quality("short text", min_words=50) is False
 
-        # Good length with variety
-        good_text = " ".join(["word"] * 100) + " variety characters mixed"
+        # Good length with variety (needs >= 20 unique chars)
+        good_text = " ".join(["the", "quick", "brown", "fox", "jumps"] * 20)
         assert filter_quality(good_text, min_words=50) is True
 
         # Gibberish (low char variety)

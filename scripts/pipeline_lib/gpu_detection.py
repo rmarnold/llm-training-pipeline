@@ -84,12 +84,14 @@ def setup_torch_backends() -> None:
         torch.backends.cudnn.benchmark = True
 
     # Configure torch.compile/dynamo for better compatibility with custom kernels
-    _dynamo = torch._dynamo
-    # Capture scalar outputs like .item() to avoid graph breaks from Liger kernels
-    _dynamo.config.capture_scalar_outputs = True
-    # Treat layer_idx as dynamic to avoid recompilation per layer (32 layers = 32 recompiles)
-    _dynamo.config.assume_static_by_default = False
-    # Suppress excessive recompilation warnings
-    _dynamo.config.suppress_errors = False
-    # Increase cache size limit to handle more graph variations
-    _dynamo.config.cache_size_limit = 64
+    # torch._dynamo requires PyTorch >= 2.1
+    if hasattr(torch, '_dynamo'):
+        _dynamo = torch._dynamo
+        # Capture scalar outputs like .item() to avoid graph breaks from Liger kernels
+        _dynamo.config.capture_scalar_outputs = True
+        # Treat layer_idx as dynamic to avoid recompilation per layer (32 layers = 32 recompiles)
+        _dynamo.config.assume_static_by_default = False
+        # Suppress excessive recompilation warnings
+        _dynamo.config.suppress_errors = False
+        # Increase cache size limit to handle more graph variations
+        _dynamo.config.cache_size_limit = 64
