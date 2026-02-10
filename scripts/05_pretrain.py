@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 # Default wandb to offline mode (avoids interactive prompt)
 # Set WANDB_MODE=online explicitly to enable cloud sync
@@ -15,293 +15,27 @@ import wandb
 from transformers import (
     Trainer,
     TrainingArguments,
-    TrainerCallback,
-    TrainerControl,
-    TrainerState,
     AutoTokenizer,
     AutoModelForCausalLM,
     DataCollatorForLanguageModeling
 )
 from datasets import load_from_disk
 
-# Kernel optimization flags (set before model loading)
-_CCE_PATCHED = False
-
-
-def setup_kernel_optimizations(
-    use_liger_kernel: bool = False,
-    use_cce: bool = False,
-    model_type: str = "llama"
-) -> Dict[str, bool]:
-    """Setup kernel optimizations before model loading.
-
-    IMPORTANT: Must be called BEFORE loading the model, as these optimizations
-    patch the model classes.
-
-    Args:
-        use_liger_kernel: Enable Liger Kernel (LinkedIn's Triton kernels)
-            - ~20% throughput improvement
-            - ~60% memory reduction
-            - Fused RMSNorm, RoPE, SwiGLU, CrossEntropy
-            - Compatible with torch.compile (Liger uses Triton)
-        use_cce: Enable Cut Cross-Entropy (Apple's memory-efficient CE)
-            - ~95% memory reduction on loss computation
-            - Especially useful for large vocab/seq lengths
-        model_type: Model architecture type (llama, mistral, gemma, etc.)
-
-    Returns:
-        Dict with actual enabled status of each optimization
-    """
-    global _CCE_PATCHED
-    enabled = {"liger_kernel": False, "cce": False}
-
-    # Liger Kernel must be applied BEFORE model loading (patches model classes)
-    # Liger is Triton-based and works with torch.compile
-    # NOTE: fused_linear_cross_entropy=False because it uses .item() which breaks torch.compile
-    if use_liger_kernel:
-        try:
-            if model_type == "llama":
-                from liger_kernel.transformers import apply_liger_kernel_to_llama
-                apply_liger_kernel_to_llama(
-                    rope=True,              # Fused RoPE (~5% speedup)
-                    swiglu=True,            # Fused SwiGLU (~10% speedup)
-                    rms_norm=True,          # Fused RMSNorm (~5% speedup)
-                    cross_entropy=True,     # Triton CE kernel (compatible with torch.compile)
-                    fused_linear_cross_entropy=False,  # Disabled: uses .item() breaking compile
-                )
-            elif model_type == "mistral":
-                from liger_kernel.transformers import apply_liger_kernel_to_mistral
-                apply_liger_kernel_to_mistral(fused_linear_cross_entropy=False)
-            elif model_type == "gemma":
-                from liger_kernel.transformers import apply_liger_kernel_to_gemma
-                apply_liger_kernel_to_gemma(fused_linear_cross_entropy=False)
-            elif model_type == "qwen2":
-                from liger_kernel.transformers import apply_liger_kernel_to_qwen2
-                apply_liger_kernel_to_qwen2(fused_linear_cross_entropy=False)
-            else:
-                print(f"Warning: Liger Kernel not available for model type '{model_type}'")
-                use_liger_kernel = False
-
-            if use_liger_kernel:
-                enabled["liger_kernel"] = True
-                print(f"[Kernel Optimization] Liger Kernel enabled for {model_type}")
-                print(f"  - Fused RoPE, SwiGLU, RMSNorm, CrossEntropy")
-                print(f"  - ~20% throughput improvement")
-                print(f"  - ~60% memory reduction")
-                print(f"  - Compatible with torch.compile")
-        except ImportError:
-            print("Warning: liger-kernel not installed. Install with:")
-            print("  pip install liger-kernel")
-        except Exception as e:
-            print(f"Warning: Failed to enable Liger Kernel: {e}")
-
-    # Cut Cross-Entropy - only if Liger Kernel not enabled
-    # (they're mutually exclusive - both optimize cross-entropy computation)
-    if use_cce and not enabled["liger_kernel"] and not _CCE_PATCHED:
-        try:
-            from cut_cross_entropy.transformers import cce_patch
-            cce_patch(model_type)
-            _CCE_PATCHED = True
-            enabled["cce"] = True
-            print(f"[Kernel Optimization] Cut Cross-Entropy enabled for {model_type}")
-            print(f"  - ~95% memory reduction on cross-entropy loss")
-        except ImportError:
-            print("Warning: cut-cross-entropy not installed. Install with:")
-            print("  pip install cut-cross-entropy")
-        except Exception as e:
-            print(f"Warning: Failed to enable Cut Cross-Entropy: {e}")
-    elif use_cce and _CCE_PATCHED:
-        enabled["cce"] = True
-    elif use_cce and enabled["liger_kernel"]:
-        print("Note: CCE skipped - Liger's CrossEntropy kernel already optimizes CE")
-
-    return enabled
-
-
-def get_optimizer_name(config_optim: str) -> str:
-    """Get optimizer name with fallback for unavailable optimizers.
-
-    Args:
-        config_optim: Optimizer name from config (e.g., "adamw_bnb_8bit")
-
-    Returns:
-        Actual optimizer name to use (may fallback if dependency missing)
-    """
-    if config_optim == "adamw_bnb_8bit":
-        try:
-            import bitsandbytes
-            print("[Optimizer] Using 8-bit AdamW (bitsandbytes)")
-            print("  - ~4x optimizer memory reduction (~30GB saved for 7B model)")
-            return "adamw_bnb_8bit"
-        except ImportError:
-            print("Warning: bitsandbytes not installed, falling back to adamw_torch_fused")
-            print("  Install for 4x memory reduction: pip install bitsandbytes")
-            return "adamw_torch_fused"
-    return config_optim
-
-# Import GPU utilities
 from gpu_utils import (
     detect_gpu_type, print_gpu_info, setup_torch_backends,
     check_tokenizer_exists, check_checkpoint_exists, GPUInfo,
-    OOMHandler, get_safe_batch_size
+    OOMHandler,
 )
-
-
-def unwrap_compiled_model(model: torch.nn.Module) -> torch.nn.Module:
-    """Unwrap a torch.compile() wrapped model.
-
-    When a model is wrapped with torch.compile(), the original model is stored
-    in the _orig_mod attribute. This function returns the original model if
-    compiled, or the same model if not.
-
-    Args:
-        model: A potentially compiled model
-
-    Returns:
-        The unwrapped model (or the same model if not compiled)
-    """
-    if hasattr(model, '_orig_mod'):
-        return model._orig_mod
-    return model
-
-
-class OOMRecoveryCallback(TrainerCallback):
-    """Callback for automatic OOM recovery during training.
-
-    When an OOM error occurs during training, this callback:
-    1. Catches the error and clears GPU memory
-    2. Increases gradient accumulation steps (effectively reducing memory usage)
-    3. Allows training to continue
-
-    Note: This works best with gradient accumulation. The callback doubles
-    accumulation steps on OOM, which halves effective per-step memory usage.
-    """
-
-    def __init__(self, max_accumulation: int = 64) -> None:
-        self.max_accumulation = max_accumulation
-        self.handler = OOMHandler()
-        self.oom_occurred = False
-
-    def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any) -> None:
-        # Reset OOM flag at start of each step
-        self.oom_occurred = False
-
-    def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
-        # Log OOM recovery info if it occurred
-        if self.handler.oom_count > 0 and logs is not None:
-            logs["oom_recovery/total_events"] = self.handler.oom_count
-
-
-class CurriculumCallback(TrainerCallback):
-    """Callback for curriculum learning - gradually increases sequence length.
-
-    This callback monitors training steps and triggers checkpoint saves at
-    curriculum stage boundaries. When a stage boundary is reached, training
-    stops so data can be reloaded with the new sequence length.
-
-    For curriculum learning to work:
-    1. Prepare data at different sequence lengths:
-       - data/packed/train_512/
-       - data/packed/train_1024/
-       - data/packed/train_2048/
-    2. Set curriculum.data_pattern in config to use placeholders:
-       - data_pattern: "data/packed/train_{seq_length}"
-    3. Use --curriculum-stage to resume at specific stages
-
-    The callback saves curriculum state to allow seamless resumption.
-    """
-
-    def __init__(self, curriculum_config: Dict[str, Any], output_dir: str = "checkpoints/pretrain") -> None:
-        self.schedule = curriculum_config.get('schedule', [])
-        self.data_pattern = curriculum_config.get('data_pattern', "data/packed/train_{seq_length}")
-        self.auto_stop = curriculum_config.get('auto_stop_at_boundary', True)
-        self.output_dir = output_dir
-        self.current_idx = 0
-        self.stage_changed = False
-
-        # Determine current stage based on schedule
-        if self.schedule:
-            self.current_seq_length = self.schedule[0]['seq_length']
-        else:
-            self.current_seq_length = 2048
-
-    def get_current_stage(self, global_step: int) -> Tuple[int, int]:
-        """Get the curriculum stage for a given step."""
-        for i, stage in enumerate(self.schedule):
-            if global_step < stage['steps']:
-                return i, stage['seq_length']
-        # Past all stages, use the last one
-        if self.schedule:
-            return len(self.schedule) - 1, self.schedule[-1]['seq_length']
-        return 0, 2048
-
-    def get_data_path(self, seq_length: int) -> str:
-        """Get data path for a given sequence length."""
-        return self.data_pattern.format(seq_length=seq_length)
-
-    def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any) -> None:
-        if not self.schedule:
-            return
-
-        new_idx, new_seq_length = self.get_current_stage(state.global_step)
-
-        if new_idx > self.current_idx:
-            self.current_idx = new_idx
-            self.current_seq_length = new_seq_length
-            self.stage_changed = True
-
-            print(f"\n{'='*60}")
-            print(f"CURRICULUM STAGE BOUNDARY REACHED")
-            print(f"{'='*60}")
-            print(f"Stage {self.current_idx + 1}/{len(self.schedule)}")
-            print(f"New sequence length: {new_seq_length} tokens")
-            print(f"Step: {state.global_step}")
-
-            if self.auto_stop:
-                # Save curriculum state
-                self._save_curriculum_state(state.global_step)
-                print(f"\nSaving checkpoint and stopping for data reload...")
-                print(f"Resume with: python scripts/05_pretrain.py --resume_from_checkpoint {args.output_dir}")
-                control.should_save = True
-                control.should_training_stop = True
-
-    def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any) -> None:
-        if self.schedule:
-            # Determine starting stage based on resumed step
-            start_idx, start_seq = self.get_current_stage(state.global_step)
-            self.current_idx = start_idx
-            self.current_seq_length = start_seq
-
-            print(f"\n{'='*60}")
-            print(f"CURRICULUM LEARNING")
-            print(f"{'='*60}")
-            print(f"Current stage: {self.current_idx + 1}/{len(self.schedule)}")
-            print(f"Current sequence length: {self.current_seq_length}")
-            print(f"Data pattern: {self.data_pattern}")
-            print(f"\nSchedule:")
-            for i, stage in enumerate(self.schedule):
-                marker = ">>>" if i == self.current_idx else "   "
-                print(f"{marker} Stage {i+1}: {stage['seq_length']} tokens @ step {stage['steps']}")
-
-    def _save_curriculum_state(self, global_step: int) -> None:
-        """Save curriculum state for resumption."""
-        import json
-        state_path = os.path.join(self.output_dir, "curriculum_state.json")
-        os.makedirs(self.output_dir, exist_ok=True)
-        with open(state_path, "w") as f:
-            json.dump({
-                "current_stage": self.current_idx,
-                "current_seq_length": self.current_seq_length,
-                "global_step": global_step,
-                "schedule": self.schedule
-            }, f, indent=2)
+from pipeline_lib.model_utils import unwrap_compiled_model
+from pipeline_lib.training_callbacks import OOMRecoveryCallback, CurriculumCallback
+from pipeline_lib.kernel_optimizations import setup_kernel_optimizations, get_optimizer_name
 
 
 def get_curriculum_data_path(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     global_step: int = 0,
-    cli_overrides: Optional[Dict[str, Any]] = None
-) -> Tuple[str, str]:
+    cli_overrides: dict[str, Any] | None = None
+) -> tuple[str, str]:
     """Get the appropriate data path based on curriculum stage.
 
     Args:
@@ -406,13 +140,14 @@ def get_curriculum_data_path(
 
     return train_path, val_path
 
+
 def setup_training(
-    use_fp8: Optional[bool] = None,
+    use_fp8: bool | None = None,
     config_path: str = "configs/pretrain.yaml",
-    cli_overrides: Optional[Dict[str, Any]] = None,
+    cli_overrides: dict[str, Any] | None = None,
     use_liger_kernel: bool = False,
     use_cce: bool = False
-) -> Tuple[Trainer, GPUInfo]:
+) -> tuple[Trainer, GPUInfo]:
     """Setup training with automatic GPU optimization.
 
     Args:
@@ -425,7 +160,7 @@ def setup_training(
     cli_overrides = cli_overrides or {}
 
     # Setup kernel optimizations BEFORE model loading
-    kernel_status = setup_kernel_optimizations(
+    setup_kernel_optimizations(
         use_liger_kernel=use_liger_kernel,
         use_cce=use_cce,
         model_type="llama"  # Default to llama architecture
@@ -642,8 +377,9 @@ def setup_training(
 
     return trainer, gpu_info
 
+
 def train_with_fp8(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     gpu_info: GPUInfo,
     enable_oom_recovery: bool = False,
     use_liger_kernel: bool = False,
@@ -656,7 +392,7 @@ def train_with_fp8(
     from tqdm import tqdm
 
     # Setup kernel optimizations BEFORE model loading
-    kernel_status = setup_kernel_optimizations(
+    setup_kernel_optimizations(
         use_liger_kernel=use_liger_kernel,
         use_cce=use_cce,
         model_type="llama"
@@ -804,6 +540,7 @@ def train_with_fp8(
         save_function=accelerator.save,
     )
     print("✓ FP8 Pretraining complete!")
+
 
 def main() -> None:
     import argparse
