@@ -152,6 +152,8 @@ rust_repos:
     error_handling:
       - "dtolnay/thiserror"
       - "dtolnay/anyhow"
+      - repo: "eyre-rs/eyre"
+        package: "eyre"
     utilities:
       - "matklad/once_cell"
       - "bitflags/bitflags"
@@ -166,6 +168,19 @@ rust_repos:
       - "Manishearth/unicode-segmentation"
     serialization:
       - "serde-rs/json"
+      - repo: "serde-rs/serde"
+        package: "serde"
+    cli:
+      - repo: "clap-rs/clap"
+        package: "clap"
+    macros:
+      - repo: "dtolnay/syn"
+        package: "syn"
+      - repo: "dtolnay/quote"
+        package: "quote"
+    testing:
+      - repo: "proptest-rs/proptest"
+        package: "proptest"
     # --- Workspace repos (use package: to target core crate only) ---
     async_core:
       - repo: "tokio-rs/tokio"
@@ -173,6 +188,10 @@ rust_repos:
       - repo: "tokio-rs/bytes"
     web:
       - repo: "hyperium/http"
+      - repo: "tokio-rs/axum"
+        package: "axum-core"
+      - repo: "hyperium/hyper"
+        package: "hyper"
     concurrency:
       - repo: "crossbeam-rs/crossbeam"
         package: "crossbeam-channel"
