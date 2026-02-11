@@ -97,8 +97,12 @@ def run_cargo_mutants(
     timeout_per_mutation: int = 300,
     max_mutations: int = 100,
     jobs: int = 4,
+    package: str | None = None,
 ) -> list[MutationResult]:
     """Run cargo-mutants on a Rust repository.
+
+    Skips the separate pre-check step — cargo-mutants performs its own
+    baseline test before mutating and handles failures gracefully.
 
     Args:
         repo_path: Path to the Rust repository.
@@ -106,6 +110,7 @@ def run_cargo_mutants(
         timeout_per_mutation: Timeout per mutation test in seconds.
         max_mutations: Maximum number of mutations to generate.
         jobs: Number of parallel mutation tests.
+        package: Specific package to mutate (for workspace repos).
 
     Returns:
         List of MutationResult objects.
@@ -113,22 +118,10 @@ def run_cargo_mutants(
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="mutants_")
 
-    # Verify the repo compiles (including test targets) before mutating.
-    # We use `cargo check --tests` instead of `cargo test` because full test
-    # suites on large repos (tokio, hyper, etc.) can timeout or fail due to
-    # missing system deps / network access.  cargo-mutants runs tests itself.
-    check = subprocess.run(
-        ["cargo", "check", "--tests"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    if check.returncode != 0:
-        print(f"  Warning: cargo check --tests failed for {repo_path}, skipping")
-        return []
-
-    # Run cargo-mutants
+    # Build cargo-mutants command.
+    # No separate pre-check — cargo-mutants runs its own baseline test
+    # and reports failures clearly. This avoids the problem of large
+    # workspace repos timing out or failing due to system deps.
     cmd = [
         "cargo", "mutants",
         "--timeout", str(timeout_per_mutation),
@@ -137,16 +130,32 @@ def run_cargo_mutants(
         "--json",
     ]
 
+    # For workspace repos, target a specific package to avoid compiling
+    # the entire workspace (which often has heavy/unrelated deps).
+    if package:
+        cmd.extend(["--package", package])
+
+    total_timeout = max(timeout_per_mutation * max_mutations, 1800)
+
     try:
-        subprocess.run(
+        result = subprocess.run(
             cmd,
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=timeout_per_mutation * max_mutations,
+            timeout=total_timeout,
         )
+        # cargo-mutants returns non-zero if mutations were caught (expected).
+        # Only log stderr if it looks like a real error (not just warnings).
+        if result.returncode != 0 and result.stderr:
+            stderr_lines = result.stderr.strip().split("\n")
+            error_lines = [l for l in stderr_lines if "error" in l.lower()]
+            if error_lines:
+                print(f"  cargo-mutants errors:")
+                for line in error_lines[:5]:
+                    print(f"    {line}")
     except subprocess.TimeoutExpired:
-        print(f"  Warning: cargo-mutants timed out for {repo_path}")
+        print(f"  Warning: cargo-mutants timed out after {total_timeout}s for {repo_path}")
 
     # Parse results from JSON output
     return _parse_mutants_output(repo_path, output_dir, max_mutations)
@@ -167,7 +176,27 @@ def _parse_mutants_output(
         outcomes_path = os.path.join(output_dir, "mutants.json")
 
     if not os.path.exists(outcomes_path):
-        print(f"  No outcomes file found in {output_dir}")
+        # Check if there's a log dir with useful info
+        log_dir = os.path.join(output_dir, "log")
+        if os.path.isdir(log_dir):
+            # Look for baseline failure
+            for fname in os.listdir(log_dir):
+                if "baseline" in fname and fname.endswith(".log"):
+                    log_path = os.path.join(log_dir, fname)
+                    try:
+                        with open(log_path) as f:
+                            content = f.read()
+                        # Show last few lines of baseline failure
+                        lines = content.strip().split("\n")
+                        tail = lines[-min(5, len(lines)):]
+                        print(f"  Baseline failed:")
+                        for line in tail:
+                            print(f"    {line}")
+                    except IOError:
+                        pass
+                    break
+        else:
+            print(f"  No outcomes file found in {output_dir}")
         return results
 
     try:

@@ -125,7 +125,14 @@ datasets:
       weight: 1.0
       format: "harmony_task"
 
-# Curated Rust repositories for cargo-mutants data generation
+# Curated Rust repositories for cargo-mutants data generation.
+#
+# Repos should be single-crate or have a clear primary package so that
+# `cargo-mutants` can compile and test them on a vanilla Colab instance
+# (no system C libs beyond what rustup provides).
+#
+# Large workspace repos (tokio, axum, hyper) are listed with an explicit
+# `package:` key so that only the core crate is compiled/mutated.
 rust_repos:
   quality_criteria:
     min_stars: 50
@@ -136,36 +143,38 @@ rust_repos:
     active_last_12_months: true
 
   categories:
-    async_runtime:
-      - "tokio-rs/tokio"
-      - "async-rs/async-std"
-      - "smol-rs/smol"
-    web:
-      - "tokio-rs/axum"
-      - "actix/actix-web"
-      - "seanmonstar/warp"
-      - "hyperium/hyper"
-    cli:
-      - "clap-rs/clap"
-    serialization:
-      - "serde-rs/serde"
-      - "serde-rs/json"
+    # --- Single-crate repos (fast to compile, no system deps) ---
+    data_structures:
+      - "BurntSushi/memchr"
+      - "BurntSushi/bstr"
+      - "contain-rs/linked-hash-map"
+      - "indexmap-rs/indexmap"
     error_handling:
       - "dtolnay/thiserror"
       - "dtolnay/anyhow"
-      - "eyre-rs/eyre"
+    utilities:
+      - "matklad/once_cell"
+      - "bitflags/bitflags"
+      - "rust-lang/log"
+      - "BurntSushi/walkdir"
+      - "BurntSushi/byteorder"
+    parsing:
+      - "pest-parser/pest"
+      - "Geal/nom"
+    string_handling:
+      - "BurntSushi/regex-lite"
+      - "Manishearth/unicode-segmentation"
+    serialization:
+      - "serde-rs/json"
+    # --- Workspace repos (use package: to target core crate only) ---
+    async_core:
+      - repo: "tokio-rs/tokio"
+        package: "tokio"
+      - repo: "tokio-rs/bytes"
+    web:
+      - repo: "hyperium/http"
     concurrency:
-      - "crossbeam-rs/crossbeam"
-      - "rayon-rs/rayon"
-    database:
-      - "launchbadge/sqlx"
-      - "diesel-rs/diesel"
-    crypto:
-      - "briansmith/ring"
-      - "rustls/rustls"
-    testing:
-      - "proptest-rs/proptest"
-      - "asomers/mockall"
-    macros:
-      - "dtolnay/syn"
-      - "dtolnay/quote"
+      - repo: "crossbeam-rs/crossbeam"
+        package: "crossbeam-channel"
+      - repo: "rayon-rs/rayon"
+        package: "rayon"

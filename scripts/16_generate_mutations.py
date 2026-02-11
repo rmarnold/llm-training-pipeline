@@ -24,6 +24,8 @@ import os
 
 import yaml
 
+from dataclasses import dataclass
+
 from pipeline_lib.cargo_mutants_runner import (
     check_cargo_mutants_installed,
     clone_rust_repo,
@@ -32,28 +34,48 @@ from pipeline_lib.cargo_mutants_runner import (
 )
 
 
-def load_repos_from_config(config_path: str) -> list[str]:
+@dataclass
+class RepoEntry:
+    """A repo entry from the config, with optional package targeting."""
+    url: str
+    package: str | None = None
+
+
+def load_repos_from_config(config_path: str) -> list[RepoEntry]:
     """Load curated Rust repo list from config.
+
+    Supports both simple string entries and dict entries with package targeting:
+        - "dtolnay/anyhow"                          # simple
+        - {repo: "tokio-rs/tokio", package: "tokio"} # workspace package
 
     Args:
         config_path: Path to data_sources_rust.yaml.
 
     Returns:
-        List of repo URLs (https://github.com/org/repo).
+        List of RepoEntry objects.
     """
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
-    repos = []
+    entries = []
     categories = config.get("rust_repos", {}).get("categories", {})
     for repo_list in categories.values():
-        for repo in repo_list:
-            if "/" in repo and not repo.startswith("http"):
-                repos.append(f"https://github.com/{repo}")
+        for item in repo_list:
+            if isinstance(item, dict):
+                repo = item.get("repo", "")
+                package = item.get("package")
             else:
-                repos.append(repo)
+                repo = item
+                package = None
 
-    return repos
+            if "/" in repo and not repo.startswith("http"):
+                url = f"https://github.com/{repo}"
+            else:
+                url = repo
+
+            entries.append(RepoEntry(url=url, package=package))
+
+    return entries
 
 
 def generate_mutations(
@@ -89,27 +111,33 @@ def generate_mutations(
         print("Install with: cargo install cargo-mutants")
         return ""
 
-    # Load repos
-    if repos is None:
-        if os.path.exists(config_path):
-            repos = load_repos_from_config(config_path)
-            print(f"\nLoaded {len(repos)} repos from {config_path}")
-        else:
-            print(f"\nConfig not found: {config_path}")
-            print("Use --repos to specify repositories manually.")
-            return ""
+    # Load repo entries
+    if repos is not None:
+        # CLI override — simple URLs, no package targeting
+        entries = [RepoEntry(url=r) for r in repos]
+    elif os.path.exists(config_path):
+        entries = load_repos_from_config(config_path)
+    else:
+        print(f"\nConfig not found: {config_path}")
+        print("Use --repos to specify repositories manually.")
+        return ""
+
+    print(f"\nLoaded {len(entries)} repos")
 
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "mutations.jsonl")
 
     all_training_data: list[dict[str, str]] = []
 
-    for i, repo_url in enumerate(repos):
-        print(f"\n[{i+1}/{len(repos)}] Processing {repo_url}...")
+    for i, entry in enumerate(entries):
+        label = entry.url
+        if entry.package:
+            label += f" (package: {entry.package})"
+        print(f"\n[{i+1}/{len(entries)}] Processing {label}...")
 
         try:
             # Clone
-            repo_path = clone_rust_repo(repo_url, clone_dir)
+            repo_path = clone_rust_repo(entry.url, clone_dir)
 
             # Run mutations
             mutations = run_cargo_mutants(
@@ -117,6 +145,7 @@ def generate_mutations(
                 timeout_per_mutation=timeout_per_mutation,
                 max_mutations=max_mutations_per_repo,
                 jobs=jobs,
+                package=entry.package,
             )
             print(f"  Got {len(mutations)} mutations")
 
@@ -127,7 +156,7 @@ def generate_mutations(
             all_training_data.extend(training_data)
 
         except Exception as e:
-            print(f"  Error processing {repo_url}: {e}")
+            print(f"  Error processing {entry.url}: {e}")
             continue
 
     # Save as JSONL
