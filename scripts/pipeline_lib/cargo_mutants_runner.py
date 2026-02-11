@@ -131,10 +131,10 @@ def run_cargo_mutants(
     # --in-place: mutate in the original directory instead of copying to a
     # temp dir.  The copy causes "ambiguous package" errors when a crate
     # has itself as a dev-dependency (e.g. memchr, serde).
+    # --in-place is incompatible with --jobs, so mutations run sequentially.
     cmd = [
         "cargo", "mutants",
         "--timeout", str(timeout_per_mutation),
-        "--jobs", str(jobs),
         "--output", output_dir,
         "--json",
         "--in-place",
