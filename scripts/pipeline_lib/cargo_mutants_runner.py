@@ -118,10 +118,31 @@ def run_cargo_mutants(
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="mutants_")
 
+    # --- Diagnostic: manual cargo build to capture the actual error ---
+    build_cmd = ["cargo", "build"]
+    if package:
+        build_cmd.extend(["--package", package])
+    print(f"  Running: {' '.join(build_cmd)} (in {repo_path})")
+    diag = subprocess.run(
+        build_cmd,
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if diag.returncode != 0:
+        print(f"  DIAGNOSTIC: cargo build failed (exit {diag.returncode})")
+        if diag.stderr:
+            for line in diag.stderr.strip().split("\n")[-20:]:
+                print(f"    ERR: {line}")
+        if diag.stdout:
+            for line in diag.stdout.strip().split("\n")[-10:]:
+                print(f"    OUT: {line}")
+        return []
+    else:
+        print(f"  Diagnostic cargo build: OK")
+
     # Build cargo-mutants command.
-    # Repos must be on a local filesystem (not FUSE/noexec like Google Drive)
-    # for build scripts to execute. The clone_dir default was changed to /tmp
-    # to ensure this.
     cmd = [
         "cargo", "mutants",
         "--timeout", str(timeout_per_mutation),
@@ -136,6 +157,7 @@ def run_cargo_mutants(
         cmd.extend(["--package", package])
 
     total_timeout = max(timeout_per_mutation * max_mutations, 1800)
+    print(f"  Running: {' '.join(cmd)}")
 
     try:
         result = subprocess.run(
@@ -145,16 +167,44 @@ def run_cargo_mutants(
             text=True,
             timeout=total_timeout,
         )
-        # cargo-mutants returns non-zero if mutations were caught (expected).
-        # Log stderr if it contains build failures.
-        if result.returncode != 0 and result.stderr:
-            stderr_lines = result.stderr.strip().split("\n")
-            # Show all stderr, not just error lines — important for diagnosing
-            print(f"  cargo-mutants stderr (last 15 lines):")
-            for line in stderr_lines[-15:]:
-                print(f"    {line}")
+        if result.returncode != 0:
+            # Show ALL stderr and stdout
+            if result.stderr:
+                print(f"  cargo-mutants stderr:")
+                for line in result.stderr.strip().split("\n")[-20:]:
+                    print(f"    {line}")
+            if result.stdout:
+                print(f"  cargo-mutants stdout:")
+                for line in result.stdout.strip().split("\n")[-20:]:
+                    print(f"    {line}")
     except subprocess.TimeoutExpired:
-        print(f"  Warning: cargo-mutants timed out after {total_timeout}s for {repo_path}")
+        print(f"  Warning: cargo-mutants timed out after {total_timeout}s")
+
+    # List output directory contents for debugging
+    if os.path.isdir(output_dir):
+        contents = []
+        for root, _dirs, files in os.walk(output_dir):
+            for f in files:
+                rel = os.path.relpath(os.path.join(root, f), output_dir)
+                contents.append(rel)
+        if contents:
+            print(f"  Output dir contents: {contents[:20]}")
+
+    # Check for baseline build log
+    log_dir = os.path.join(output_dir, "log")
+    if os.path.isdir(log_dir):
+        for fname in sorted(os.listdir(log_dir)):
+            if "baseline" in fname.lower():
+                log_path = os.path.join(log_dir, fname)
+                try:
+                    with open(log_path) as f:
+                        content = f.read()
+                    lines = content.strip().split("\n")
+                    print(f"  Baseline log ({fname}, last 20 lines):")
+                    for line in lines[-20:]:
+                        print(f"    {line}")
+                except IOError:
+                    pass
 
     # Parse results from JSON output
     return _parse_mutants_output(repo_path, output_dir, max_mutations)
