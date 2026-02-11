@@ -39,19 +39,21 @@ bash scripts/run_full_pipeline.sh
 bash START_PRODUCTION_TRAINING.sh
 ```
 
-### Interactive Notebook
+### Interactive Notebooks
 
-For an interactive experience, use the companion Colab notebook:
+For an interactive experience, use the companion Colab notebooks:
 
-```
-notebooks/training_pipeline.ipynb
-```
+| Notebook | Target | Description |
+|----------|--------|-------------|
+| `notebooks/training_pipeline.ipynb` | 7B LLaMA-style | Full pipeline (Pretrain → SFT → DPO → LoRA) |
+| `notebooks/train_1b_reasoning_model.ipynb` | 1B Reasoning Agent | Configurable model type & size with GPU-accelerated data prep |
+| `notebooks/train_gpt_oss_rust_agent.ipynb` | GPT-OSS 20B Rust Agent | 4-phase Rust coding agent (Lang Adapter → Core Agent → IPO → GRPO) |
 
-The notebook provides:
-- Step-by-step execution of all training stages
-- Configurable parameters (FP8, batch size, steps)
-- Pre-flight validation before each stage
-- GPU monitoring and checkpoint management
+All notebooks provide:
+- Step-by-step execution with `#@param` widgets for configuration
+- Google Drive persistence with local SSD acceleration
+- GPU auto-detection and tier-specific batch/sequence configs
+- Verification cells after major operations
 - Model inference and generation testing
 
 ### Run Individual Stages
@@ -88,6 +90,19 @@ python scripts/12_check_gates.py dpo
 | **Evaluation** | `scripts/11_evaluate.py` | Full eval suite with timeouts |
 | **Pre-flight Check** | `scripts/preflight_check.py` | Validate prerequisites |
 
+**GPT-OSS 20B Rust Agent Pipeline** (scripts 13-19):
+
+| Task | Script | Notes |
+|------|--------|-------|
+| **Lang Adapter** | `scripts/13_train_lang_adapter.py` | QLoRA (rank 64) for Rust domain |
+| **Core Agent SFT** | `scripts/14_train_core_agent.py` | Agent trajectory training (rank 128) |
+| **Trajectory Gen** | `scripts/15_generate_trajectories.py` | Synthetic agent trajectories |
+| **Mutation Gen** | `scripts/16_generate_mutations.py` | `cargo-mutants` on curated repos |
+| **IPO Preference** | `scripts/17_ipo_preference.py` | Identity Preference Optimisation |
+| **GRPO RL** | `scripts/18_grpo_rl.py` | RL with execution rewards |
+| **Merge Adapter** | `scripts/19_merge_adapter.py` | Merge LoRA + export GGUF |
+| **Rust Eval** | `scripts/eval_rust_agent.py` | Execution-based eval (cargo check/test/clippy) |
+
 **Deprecated scripts** (kept for backwards compatibility):
 - `production_pretrain.py` → use `05_pretrain.py --fp8`
 - `full_model_pretrain.py` → use `05_pretrain.py` or `demo_pretrain.py`
@@ -114,6 +129,17 @@ python scripts/12_check_gates.py dpo
 - Domain-specific adaptation
 - Trainable parameter efficient (LoRA rank 64)
 - Supports mixing domain + general data
+
+### GPT-OSS 20B Rust Agent (Scripts 13-19)
+
+A separate 4-phase pipeline for training a Rust coding agent on GPT-OSS 20B (MoE, ~3.6B active params):
+
+1. **Lang Adapter** — QLoRA (rank 64) for Rust syntax, stdlib, and idioms
+2. **Core Agent SFT** — Higher-rank LoRA (128) on agent trajectories with tool use (Harmony format)
+3. **IPO** — Identity Preference Optimisation on ranked pairs (very low LR, 1 epoch)
+4. **GRPO RL** — Group Relative Policy Optimisation with execution rewards (cargo check/test/clippy)
+
+See `notebooks/train_gpt_oss_rust_agent.ipynb` for the interactive Colab walkthrough.
 
 ## GPU Support
 
@@ -186,6 +212,14 @@ bash scripts/resume_pipeline.sh pretrain
 | `configs/dpo.yaml` | DPO preference optimization |
 | `configs/lora_finetune.yaml` | LoRA domain adaptation |
 | `configs/promotion_gates.yaml` | Quality thresholds between stages |
+| `configs/gpt_oss_20b.py` | GPT-OSS 20B MoE architecture |
+| `configs/lang_rust.yaml` | Rust language adapter training |
+| `configs/core_agent.yaml` | Core agent SFT training |
+| `configs/ipo.yaml` | IPO preference optimisation |
+| `configs/grpo.yaml` | GRPO RL training |
+| `configs/merge_adapter.yaml` | Adapter merge + export |
+| `configs/rust_eval.yaml` | Rust evaluation targets |
+| `configs/data_sources_rust.yaml` | Rust data sources + curated repos |
 
 ### Model Architecture
 
@@ -229,18 +263,27 @@ llm-training-pipeline/
 │   ├── model_7b.py
 │   └── tokenizer/     # Tokenizer files (created at runtime)
 ├── scripts/           # Training and utility scripts
-│   ├── 01_download_data.py
-│   ├── 02_clean_deduplicate.py
-│   ├── 03_tokenize_and_pack.py
-│   ├── 04_init_model.py
-│   ├── 05_pretrain.py
-│   ├── 07_sft.py
-│   ├── 09_dpo.py
-│   ├── 10_lora_finetune.py
-│   ├── 11_evaluate.py
-│   ├── 12_check_gates.py
+│   ├── 01_download_data.py      # Data download
+│   ├── 02_clean_deduplicate*.py # Data cleaning
+│   ├── 03_tokenize_and_pack.py  # Tokenization
+│   ├── 04_init_model.py         # Model init
+│   ├── 05_pretrain.py           # Pretraining
+│   ├── 07_sft.py                # SFT
+│   ├── 09_dpo.py                # DPO
+│   ├── 10_lora_finetune.py      # LoRA
+│   ├── 11_evaluate.py           # Evaluation
+│   ├── 12_check_gates.py        # Promotion gates
+│   ├── 13_train_lang_adapter.py # Rust lang adapter
+│   ├── 14_train_core_agent.py   # Rust agent SFT
+│   ├── 15_generate_trajectories.py
+│   ├── 16_generate_mutations.py
+│   ├── 17_ipo_preference.py     # IPO training
+│   ├── 18_grpo_rl.py            # GRPO RL
+│   ├── 19_merge_adapter.py      # Merge + export
+│   ├── eval_rust_agent.py       # Rust eval
 │   ├── gpu_utils.py
-│   └── ...
+│   ├── pipeline_lib/            # Shared utilities
+│   └── dataset_formatters/      # Harmony format etc.
 ├── tests/             # Test suite
 ├── data/              # Training data (created at runtime)
 │   ├── raw/

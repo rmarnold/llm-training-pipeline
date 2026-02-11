@@ -1,0 +1,75 @@
+run_name: "gpt-oss-20b-core-agent-v1"
+
+model:
+  base_model: "openai/gpt-oss-20b"
+  lang_adapter: "checkpoints/lang_rust"  # Merge into base before training
+  merge_lang_adapter: true  # Merge lang_rust into base weights
+  max_seq_length: 16384  # Agent sessions are multi-turn
+  load_in_4bit: true
+  dtype: null
+
+lora:
+  r: 128  # Higher rank — agent behavior needs more capacity
+  lora_alpha: 256
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  lora_dropout: 0
+  bias: "none"
+  use_gradient_checkpointing: "unsloth"
+  use_rslora: false
+
+data:
+  train_data: "data/rust/core_agent/train"
+  val_data: "data/rust/core_agent/val"
+  max_seq_length: 16384
+
+training:
+  num_train_epochs: 2
+  max_steps: -1
+  learning_rate: 3.0e-5  # Slightly more aggressive for behavioral SFT
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4  # Smaller effective batch (trajectories are long)
+
+  bf16: true
+  max_grad_norm: 0.5  # Tighter for long-context stability
+  weight_decay: 0.01
+  optim: "adamw_8bit"
+  seed: 42
+
+logging:
+  logging_steps: 5
+  eval_steps: 250
+  save_steps: 250
+  save_total_limit: 3
+  report_to: ["tensorboard"]
+
+checkpointing:
+  output_dir: "checkpoints/core_agent"
+
+# Tool definitions available to the agent during training
+tools:
+  - name: "run_command"
+    description: "Execute a shell command in the sandbox"
+  - name: "read_file"
+    description: "Read file contents"
+  - name: "apply_patch"
+    description: "Apply a unified diff"
+  - name: "repo_search"
+    description: "Semantic search across the codebase"
+  - name: "run_tests"
+    description: "Run test suite"
+  - name: "cargo_doc"
+    description: "Read crate documentation"
+  - name: "search_crates_io"
+    description: "Search for crates"
+  - name: "read_error"
+    description: "Look up Rust error code explanation"

@@ -1,0 +1,16 @@
+run_name: "merge-lang-rust"
+
+model:
+  base_model: "openai/gpt-oss-20b"
+  adapter_path: "checkpoints/lang_rust"
+
+export:
+  output_dir: "checkpoints/gpt-oss-20b-rust-merged"
+  formats:
+    - "hf"  # HuggingFace safetensors
+  dequantize: true  # Convert 4-bit to bf16 for export
+
+validation:
+  smoke_test: true
+  test_prompt: "Write a Rust function that takes a Vec<i32> and returns the sum of all even numbers."
+  max_new_tokens: 256

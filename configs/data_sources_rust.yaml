@@ -1,0 +1,171 @@
+datasets:
+  # ==========================================================================
+  # LANG_RUST ADAPTER DATA (Code Completion + Domain Knowledge)
+  # ==========================================================================
+  lang_rust:
+    - name: "the-stack-v2-rust"
+      source: "bigcode/the-stack-v2-dedup"
+      subset: "Rust"
+      license: "Apache-2.0"
+      tokens: 5B
+      weight: 0.05
+      streaming: true
+      format: "harmony_code"
+
+    - name: "strandset-rust-v1"
+      source: "Fortytwo-Network/Strandset-Rust-v1"
+      license: "Apache-2.0"
+      samples: 191K
+      weight: 1.0
+      format: "harmony_completion"
+
+    - name: "rust-stdlib-source"
+      source: "custom/rust_stdlib"
+      license: "MIT/Apache-2.0"
+      description: "Rust standard library source code"
+      samples: 5K
+      weight: 1.0
+      format: "harmony_code"
+
+    - name: "rustc-error-index"
+      source: "custom/rustc_errors"
+      license: "MIT/Apache-2.0"
+      description: "All E-codes with explanations from doc.rust-lang.org"
+      samples: 500
+      weight: 1.0
+      format: "harmony_debug"
+
+    - name: "rust-reference"
+      source: "custom/rust_reference"
+      license: "MIT/Apache-2.0"
+      description: "The Rust Reference and Rustonomicon"
+      samples: 1K
+      weight: 1.0
+      format: "harmony_code"
+
+    - name: "general-code-refresh"
+      source: "bigcode/the-stack-v2-dedup"
+      subset: "C++,Haskell,OCaml,Swift"
+      license: "Apache-2.0"
+      tokens: 2B
+      weight: 0.01
+      streaming: true
+      format: "harmony_code"
+      description: "Prevent Rust tunnel vision with related languages"
+
+  # ==========================================================================
+  # CORE_AGENT DATA (Agent Trajectories + Tool Use)
+  # ==========================================================================
+  core_agent:
+    - name: "rust-agent-trajectories"
+      source: "synthetic/generated"
+      description: "Agent trajectories from 15_generate_trajectories.py"
+      samples: 5K
+      weight: 1.0
+      format: "harmony_agent"
+      trajectory_types:
+        - "fix_failing_tests"
+        - "fix_compilation_errors"
+        - "fix_panics"
+        - "fix_clippy_warnings"
+        - "add_feature_with_tdd"
+
+    - name: "rust-mutation-debug-pairs"
+      source: "synthetic/generated"
+      description: "Debug pairs from 16_generate_mutations.py"
+      samples: 10K
+      weight: 1.0
+      format: "harmony_debug"
+
+    - name: "strandset-rust-reformatted"
+      source: "Fortytwo-Network/Strandset-Rust-v1"
+      license: "Apache-2.0"
+      samples: 5K
+      weight: 0.5
+      format: "harmony_agent"
+      description: "Strandset examples reformatted as agent traces"
+
+    - name: "hand-crafted-gold"
+      source: "custom/gold_trajectories"
+      description: "200-500 expert-written agent sessions"
+      samples: 500
+      weight: 1.0
+      format: "harmony_agent"
+
+  # ==========================================================================
+  # IPO DATA (Preference Pairs)
+  # ==========================================================================
+  ipo:
+    - name: "rust-execution-preferences"
+      source: "synthetic/generated"
+      description: "Preference pairs ranked by execution (check/test/clippy)"
+      samples: 10K
+      weight: 1.0
+      format: "harmony_preference"
+
+  # ==========================================================================
+  # GRPO TASKS (RL Training)
+  # ==========================================================================
+  grpo:
+    - name: "rust-coding-tasks"
+      source: "synthetic/generated"
+      description: "Rust tasks with test suites for RL reward"
+      samples: 1K
+      weight: 1.0
+      format: "harmony_task"
+
+  # ==========================================================================
+  # EVALUATION DATA
+  # ==========================================================================
+  evaluation:
+    - name: "rust-eval-tasks"
+      source: "custom/eval_tasks"
+      description: "200 held-out Rust tasks for evaluation"
+      samples: 200
+      weight: 1.0
+      format: "harmony_task"
+
+# Curated Rust repositories for cargo-mutants data generation
+rust_repos:
+  quality_criteria:
+    min_stars: 50
+    has_ci: true
+    cargo_test_passes: true
+    max_clippy_warnings: 5
+    uses_rustfmt: true
+    active_last_12_months: true
+
+  categories:
+    async_runtime:
+      - "tokio-rs/tokio"
+      - "async-rs/async-std"
+      - "smol-rs/smol"
+    web:
+      - "tokio-rs/axum"
+      - "actix/actix-web"
+      - "seanmonstar/warp"
+      - "hyperium/hyper"
+    cli:
+      - "clap-rs/clap"
+    serialization:
+      - "serde-rs/serde"
+      - "serde-rs/json"
+    error_handling:
+      - "dtolnay/thiserror"
+      - "dtolnay/anyhow"
+      - "eyre-rs/eyre"
+    concurrency:
+      - "crossbeam-rs/crossbeam"
+      - "rayon-rs/rayon"
+    database:
+      - "launchbadge/sqlx"
+      - "diesel-rs/diesel"
+    crypto:
+      - "briansmith/ring"
+      - "rustls/rustls"
+    testing:
+      - "proptest-rs/proptest"
+      - "asomers/mockall"
+    macros:
+      - "dtolnay/syn"
+      - "dtolnay/quote"

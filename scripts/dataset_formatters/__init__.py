@@ -5,6 +5,7 @@ Each module handles a category of datasets:
 - reasoning: CoT-Collection, LogiQA, ARC
 - function_calling: Glaive, Hermes, Gorilla, ToolBench
 - general: Alpaca, OpenOrca, OASST
+- harmony: GPT-OSS Harmony format (code, agent, preference, debug)
 """
 from dataset_formatters.math import (
     format_gsm8k,
@@ -28,6 +29,14 @@ from dataset_formatters.general import (
     format_openorca,
     format_oasst,
 )
+from dataset_formatters.harmony import (
+    format_harmony_code,
+    format_harmony_completion,
+    format_harmony_agent,
+    format_harmony_preference,
+    format_harmony_task,
+    format_harmony_debug,
+)
 
 FORMAT_HANDLERS = {
     "gsm8k": format_gsm8k,
@@ -44,6 +53,13 @@ FORMAT_HANDLERS = {
     "oasst": format_oasst,
     "metamath": format_metamath,
     "toolbench": format_toolbench,
+    # Harmony formatters for GPT-OSS
+    "harmony_code": format_harmony_code,
+    "harmony_completion": format_harmony_completion,
+    "harmony_agent": format_harmony_agent,
+    "harmony_preference": format_harmony_preference,
+    "harmony_task": format_harmony_task,
+    "harmony_debug": format_harmony_debug,
 }
 
 __all__ = [
@@ -62,4 +78,10 @@ __all__ = [
     "format_alpaca",
     "format_openorca",
     "format_oasst",
+    "format_harmony_code",
+    "format_harmony_completion",
+    "format_harmony_agent",
+    "format_harmony_preference",
+    "format_harmony_task",
+    "format_harmony_debug",
 ]

@@ -86,3 +86,72 @@ benchmarks:
     - name: "refusal_rate"
       type: "safety"
       metric: "refusal_rate"
+
+  # ==========================================================================
+  # GPT-OSS 20B RUST CODING AGENT GATES
+  # ==========================================================================
+
+  # LANG_RUST ADAPTER → CORE_AGENT
+  lang_rust_to_core_agent:
+    rust_compilation_rate: 0.75  # >75% of generated code compiles
+    rust_code_completion: 0.35  # >35% exact match on completions
+    clippy_clean_rate: 0.60  # >60% of code is clippy-clean
+    no_general_regression: true  # HumanEval Python, MMLU within 5%
+    checkpoint_valid: true
+
+  # CORE_AGENT → IPO
+  core_agent_to_ipo:
+    cargo_check_pass_rate: 0.70  # >70% compilation success in agent tasks
+    cargo_test_pass_rate: 0.50  # >50% tests pass
+    tool_call_format_accuracy: 0.95  # >95% valid JSON tool calls
+    iterations_to_green_median: 5  # Median <5 iterations
+    hallucinated_api_rate: 0.10  # <10% hallucinated APIs
+    checkpoint_valid: true
+
+  # IPO → GRPO
+  ipo_to_grpo:
+    preference_accuracy: 0.65  # >65% prefer IPO over base
+    cargo_check_pass_rate: 0.80  # >80% compilation (improved from SFT)
+    safety_refusal_rate: 0.80  # >80% refuse harmful requests
+    no_general_regression: true
+    checkpoint_valid: true
+
+  # GRPO → PRODUCTION
+  grpo_to_production:
+    cargo_check_pass_rate: 0.85  # >85% compilation
+    cargo_test_pass_rate: 0.70  # >70% tests pass
+    clippy_clean_rate: 0.80  # >80% clippy-clean
+    iterations_to_green_median: 3  # Median <3 iterations
+    diff_size_median: 50  # Median <50 lines
+    tool_call_format_accuracy: 0.99  # >99% valid tool calls
+    hallucinated_api_rate: 0.05  # <5% hallucinated APIs
+    safety_refusal_rate: 0.80
+    no_general_regression: true
+    checkpoint_valid: true
+
+rust_benchmarks:
+  code_quality:
+    - name: "cargo_check"
+      type: "compilation"
+      metric: "pass_rate"
+
+    - name: "cargo_test"
+      type: "testing"
+      metric: "pass_rate"
+
+    - name: "cargo_clippy"
+      type: "linting"
+      metric: "clean_rate"
+
+  agent_capabilities:
+    - name: "tool_call_format"
+      type: "format_validation"
+      metric: "valid_json_rate"
+
+    - name: "iterations_to_green"
+      type: "efficiency"
+      metric: "median_iterations"
+
+    - name: "hallucinated_apis"
+      type: "accuracy"
+      metric: "hallucination_rate"

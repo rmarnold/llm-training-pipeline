@@ -1,0 +1,75 @@
+run_name: "gpt-oss-20b-ipo-v1"
+
+model:
+  checkpoint: "checkpoints/core_agent"
+  max_seq_length: 16384
+  load_in_4bit: true
+  dtype: null
+
+data:
+  train_data: "data/rust/ipo/train"
+  val_data: "data/rust/ipo/val"
+
+training:
+  num_train_epochs: 1  # Single epoch only — IPO is prone to collapse
+  max_steps: -1
+  learning_rate: 5.0e-7  # Extremely low for preference optimization
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.1
+
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+
+  bf16: true
+  max_grad_norm: 1.0
+  weight_decay: 0.0
+  optim: "adamw_8bit"
+  seed: 42
+
+  # IPO-specific parameters
+  loss_type: "ipo"  # Identity Preference Optimization (vs "sigmoid" for DPO)
+  beta: 0.1  # KL penalty coefficient
+  max_length: 16384
+  max_prompt_length: 8192
+
+logging:
+  logging_steps: 5
+  eval_steps: 100
+  save_steps: 200  # Frequent checkpoints for collapse recovery
+  save_total_limit: 5
+  report_to: ["tensorboard"]
+
+checkpointing:
+  output_dir: "checkpoints/core_agent_ipo"
+
+# Preference pair generation parameters
+preference_generation:
+  num_candidates: 8  # Generate 8 candidates per task
+  temperatures: [0.2, 0.4, 0.6, 0.8]  # Sample at multiple temperatures
+  max_new_tokens: 2048
+
+  # Hard gates (binary pass/fail)
+  hard_gates:
+    - "patch_applies"
+    - "cargo_check_passes"
+    - "cargo_test_passes"
+    - "cargo_clippy_clean"
+    - "cargo_fmt_check"
+
+  # Soft ranking criteria (among passing candidates)
+  soft_ranking:
+    smaller_diff_preferred: true
+    fewer_files_preferred: true
+    idiomatic_patterns:
+      - "result_question_mark_over_unwrap"
+      - "lifetime_annotations_over_cloning"
+      - "str_ref_over_string_for_readonly"
+      - "iterators_over_manual_loops"
+      - "typed_errors_over_string_errors"
+      - "no_unnecessary_unsafe"
+
+# KL divergence monitoring
+kl_monitoring:
+  warn_threshold: 0.3
+  abort_threshold: 0.5
+  check_every_steps: 100

@@ -1,0 +1,73 @@
+run_name: "eval-rust-agent"
+
+model:
+  checkpoint: "checkpoints/core_agent_grpo"
+  max_seq_length: 16384
+  load_in_4bit: true
+  dtype: null
+
+evaluation:
+  test_set: "data/rust/eval/tasks.jsonl"
+  num_samples: 200
+  max_iterations_per_task: 10
+
+  # Timeouts (seconds)
+  timeouts:
+    cargo_check: 60
+    cargo_test: 300
+    cargo_clippy: 60
+    per_task: 600  # 10 minutes total per task
+
+generation:
+  temperature: 0.2  # Low temperature for evaluation
+  max_new_tokens: 2048
+
+output:
+  results_dir: "evals/rust_agent"
+  save_trajectories: true
+
+# Metrics and their target thresholds
+metrics:
+  cargo_check_pass_rate:
+    description: "Percentage of generated code that compiles"
+    target: 0.85
+    higher_is_better: true
+
+  cargo_test_pass_rate:
+    description: "Percentage of generated code that passes tests"
+    target: 0.70
+    higher_is_better: true
+
+  clippy_clean_rate:
+    description: "Percentage of code with no clippy warnings"
+    target: 0.80
+    higher_is_better: true
+
+  iterations_to_green_median:
+    description: "Median iterations needed to pass all tests"
+    target: 3
+    higher_is_better: false
+
+  diff_size_median:
+    description: "Median diff size in lines"
+    target: 50
+    higher_is_better: false
+
+  tool_call_format_accuracy:
+    description: "Percentage of tool calls with valid JSON"
+    target: 0.99
+    higher_is_better: true
+
+  hallucinated_api_rate:
+    description: "Percentage of calls to non-existent APIs"
+    target: 0.05
+    higher_is_better: false
+
+# General capability regression checks
+regression_checks:
+  humaneval_python:
+    description: "HumanEval Python pass@1 (should not regress >5%)"
+    max_regression: 0.05
+  mmlu_subset:
+    description: "MMLU accuracy (should not regress >5%)"
+    max_regression: 0.05

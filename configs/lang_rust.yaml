@@ -1,0 +1,63 @@
+run_name: "gpt-oss-20b-lang-rust-v1"
+
+model:
+  base_model: "openai/gpt-oss-20b"  # HuggingFace model ID
+  max_seq_length: 8192
+  load_in_4bit: true
+  dtype: null  # Auto-detect (Unsloth handles MXFP4)
+
+lora:
+  r: 64  # Rank for language adapter
+  lora_alpha: 128  # 2x rank
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  lora_dropout: 0
+  bias: "none"
+  use_gradient_checkpointing: "unsloth"  # Unsloth's optimized checkpointing
+  use_rslora: false
+
+data:
+  train_data: "data/rust/lang_rust/train"
+  val_data: "data/rust/lang_rust/val"
+  max_seq_length: 8192
+
+training:
+  num_train_epochs: 1  # Single pass to protect post-training alignment
+  max_steps: -1
+  learning_rate: 2.0e-5  # Conservative for continued pretraining
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8  # Effective batch = 8
+
+  bf16: true
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  optim: "adamw_8bit"
+  seed: 42
+
+logging:
+  logging_steps: 10
+  eval_steps: 500
+  save_steps: 500
+  save_total_limit: 3
+  report_to: ["tensorboard"]
+
+checkpointing:
+  output_dir: "checkpoints/lang_rust"
+
+# Data mix ratios (applied during data preparation, not training)
+data_mix:
+  rust_repos_curated: 0.35     # The Stack v2 Rust, curated
+  strandset_rust: 0.15         # Strandset-Rust-v1 (191K verified)
+  rust_stdlib_docs: 0.15       # Std lib + reference docs
+  debug_artifacts: 0.20        # cargo-mutants broken->fixed pairs
+  borrow_checker_patterns: 0.05  # Hand-curated lifetime puzzles
+  general_code: 0.10           # C++/Haskell/OCaml (prevent tunnel vision)

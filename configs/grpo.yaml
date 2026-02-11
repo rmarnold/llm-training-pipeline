@@ -1,0 +1,76 @@
+run_name: "gpt-oss-20b-grpo-v1"
+
+model:
+  checkpoint: "checkpoints/core_agent_ipo"
+  max_seq_length: 32768
+  load_in_4bit: true
+  dtype: null
+
+data:
+  task_source: "data/rust/grpo/tasks.jsonl"
+  num_tasks: 1000
+
+training:
+  num_train_epochs: 1
+  max_steps: 5000
+  learning_rate: 1.0e-6  # Very conservative for RL
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+
+  bf16: true
+  max_grad_norm: 0.5
+  weight_decay: 0.0
+  optim: "adamw_8bit"
+  seed: 42
+
+  # GRPO-specific
+  num_generations: 4  # Samples per prompt for group advantage
+  temperature: 0.7
+  max_new_tokens: 2048
+
+logging:
+  logging_steps: 1
+  eval_steps: 50
+  save_steps: 200
+  save_total_limit: 3
+  report_to: ["tensorboard"]
+
+checkpointing:
+  output_dir: "checkpoints/core_agent_grpo"
+
+# Rule-based reward function
+rewards:
+  all_tests_pass_clippy_clean: 1.0
+  all_tests_pass_clippy_warnings: 0.7
+  compilation_success_some_tests_fail: 0.1
+  compilation_failure: -0.3
+  invalid_tool_call_format: -1.0
+  unnecessary_unsafe: -0.3
+  infinite_retry_loop: -0.5  # >5 retries with same error
+
+# Long-context curriculum
+curriculum:
+  enabled: true
+  schedule:
+    - seq_length: 4096
+      steps: 1000
+      description: "Single-file fixes, simple bugs"
+    - seq_length: 8192
+      steps: 2000
+      description: "Multi-file with 2-3 files"
+    - seq_length: 16384
+      steps: 3500
+      description: "Full module navigation"
+    - seq_length: 32768
+      steps: 5000
+      description: "Large repo exploration"
+
+# Execution sandbox
+sandbox:
+  cargo_check_timeout: 60
+  cargo_test_timeout: 300
+  cargo_clippy_timeout: 60
+  max_concurrent_executions: 4
