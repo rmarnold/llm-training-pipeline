@@ -156,11 +156,13 @@ def run_cargo_mutants(
             text=True,
             timeout=total_timeout,
         )
-        if result.returncode != 0 and result.stderr:
-            stderr_lines = result.stderr.strip().split("\n")
-            print(f"  cargo-mutants stderr (last 10 lines):")
-            for line in stderr_lines[-10:]:
-                print(f"    {line}")
+        if result.returncode != 0:
+            if result.stderr:
+                for line in result.stderr.strip().split("\n")[-10:]:
+                    print(f"  ERR: {line}")
+            if result.stdout:
+                for line in result.stdout.strip().split("\n")[-30:]:
+                    print(f"  OUT: {line}")
     except subprocess.TimeoutExpired:
         print(f"  Warning: cargo-mutants timed out after {total_timeout}s")
 
@@ -169,6 +171,20 @@ def run_cargo_mutants(
     if not os.path.isdir(actual_output):
         # Fall back to output_dir itself (older cargo-mutants versions)
         actual_output = output_dir
+
+    # Print baseline log if the build failed (shows the actual error)
+    log_dir = os.path.join(actual_output, "log")
+    if os.path.isdir(log_dir):
+        for fname in sorted(os.listdir(log_dir)):
+            if "baseline" in fname.lower():
+                try:
+                    with open(os.path.join(log_dir, fname)) as fh:
+                        lines = fh.read().strip().split("\n")
+                    print(f"  Baseline log ({fname}, last 30 lines):")
+                    for line in lines[-30:]:
+                        print(f"    {line}")
+                except IOError:
+                    pass
 
     # Parse results from JSON output
     return _parse_mutants_output(repo_path, actual_output, max_mutations)
