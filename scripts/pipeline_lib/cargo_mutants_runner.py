@@ -113,16 +113,19 @@ def run_cargo_mutants(
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="mutants_")
 
-    # First verify the repo builds and tests pass
+    # Verify the repo compiles (including test targets) before mutating.
+    # We use `cargo check --tests` instead of `cargo test` because full test
+    # suites on large repos (tokio, hyper, etc.) can timeout or fail due to
+    # missing system deps / network access.  cargo-mutants runs tests itself.
     check = subprocess.run(
-        ["cargo", "test"],
+        ["cargo", "check", "--tests"],
         cwd=repo_path,
         capture_output=True,
         text=True,
         timeout=600,
     )
     if check.returncode != 0:
-        print(f"  Warning: cargo test failed for {repo_path}, skipping")
+        print(f"  Warning: cargo check --tests failed for {repo_path}, skipping")
         return []
 
     # Run cargo-mutants
