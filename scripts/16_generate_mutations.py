@@ -81,7 +81,7 @@ def load_repos_from_config(config_path: str) -> list[RepoEntry]:
 def generate_mutations(
     config_path: str = "configs/data_sources_rust.yaml",
     repos: list[str] | None = None,
-    clone_dir: str = "data/rust/repos",
+    clone_dir: str = "/tmp/rust_repos",
     output_dir: str = "data/rust/mutations",
     max_mutations_per_repo: int = 100,
     timeout_per_mutation: int = 300,
@@ -205,7 +205,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="configs/data_sources_rust.yaml")
     parser.add_argument("--repos", nargs="+", type=str, default=None,
                         help="Override repo URLs (e.g., tokio-rs/tokio serde-rs/serde)")
-    parser.add_argument("--clone_dir", type=str, default="data/rust/repos")
+    parser.add_argument("--clone_dir", type=str, default="/tmp/rust_repos")
     parser.add_argument("--output_dir", type=str, default="data/rust/mutations")
     parser.add_argument("--max_mutations_per_repo", type=int, default=100)
     parser.add_argument("--timeout_per_mutation", type=int, default=300)

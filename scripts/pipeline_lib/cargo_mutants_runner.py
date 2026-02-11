@@ -118,17 +118,10 @@ def run_cargo_mutants(
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="mutants_")
 
-    # Ensure cargo builds on a local filesystem with exec permissions.
-    # When repos are cloned to Google Drive (FUSE, noexec), build scripts
-    # fail with "Permission denied". CARGO_TARGET_DIR redirects all
-    # compilation to a local path while keeping sources on Drive.
-    env = os.environ.copy()
-    if "CARGO_TARGET_DIR" not in env:
-        local_target = os.path.join(tempfile.gettempdir(), "cargo-mutants-target")
-        os.makedirs(local_target, exist_ok=True)
-        env["CARGO_TARGET_DIR"] = local_target
-
     # Build cargo-mutants command.
+    # Repos must be on a local filesystem (not FUSE/noexec like Google Drive)
+    # for build scripts to execute. The clone_dir default was changed to /tmp
+    # to ensure this.
     cmd = [
         "cargo", "mutants",
         "--timeout", str(timeout_per_mutation),
@@ -144,42 +137,6 @@ def run_cargo_mutants(
 
     total_timeout = max(timeout_per_mutation * max_mutations, 1800)
 
-    # Diagnostic: run `cargo build` (not just `check`) to catch linker/codegen
-    # errors before cargo-mutants, which swallows the actual error message.
-    # `cargo check` only does type-checking; `cargo build` does full codegen
-    # and linking, which is what cargo-mutants runs internally.
-    build_cmd = ["cargo", "build", "--tests"]
-    if package:
-        build_cmd.extend(["--package", package])
-    diag = subprocess.run(
-        build_cmd,
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        timeout=900,
-        env=env,
-    )
-    if diag.returncode != 0:
-        # Show the actual build error (stderr has compiler/linker output)
-        for label, output in [("stderr", diag.stderr), ("stdout", diag.stdout)]:
-            text = output.strip()
-            if not text:
-                continue
-            lines = text.split("\n")
-            # Filter to error/warning lines, or show last 15 lines
-            important = [l for l in lines if any(kw in l.lower() for kw in
-                         ["error", "cannot find", "linker", "undefined", "fatal"])]
-            if important:
-                print(f"  cargo build {label}:")
-                for line in important[:15]:
-                    print(f"    {line}")
-            else:
-                tail = lines[-min(15, len(lines)):]
-                print(f"  cargo build {label} (last {len(tail)} lines):")
-                for line in tail:
-                    print(f"    {line}")
-        return []
-
     try:
         result = subprocess.run(
             cmd,
@@ -187,7 +144,6 @@ def run_cargo_mutants(
             capture_output=True,
             text=True,
             timeout=total_timeout,
-            env=env,
         )
         # cargo-mutants returns non-zero if mutations were caught (expected).
         # Log stderr if it contains build failures.
