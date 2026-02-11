@@ -137,6 +137,27 @@ def run_cargo_mutants(
 
     total_timeout = max(timeout_per_mutation * max_mutations, 1800)
 
+    # Run a quick diagnostic `cargo check` first to catch build issues early
+    # and show the actual compilation error (cargo-mutants swallows it).
+    diag = subprocess.run(
+        ["cargo", "check"] + (["--package", package] if package else []),
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if diag.returncode != 0:
+        # Show the actual compilation error so we can diagnose
+        stderr = diag.stderr.strip()
+        if stderr:
+            lines = stderr.split("\n")
+            # Show last 10 lines which usually contain the real error
+            tail = lines[-min(10, len(lines)):]
+            print(f"  cargo check failed:")
+            for line in tail:
+                print(f"    {line}")
+        return []
+
     try:
         result = subprocess.run(
             cmd,
@@ -146,13 +167,13 @@ def run_cargo_mutants(
             timeout=total_timeout,
         )
         # cargo-mutants returns non-zero if mutations were caught (expected).
-        # Only log stderr if it looks like a real error (not just warnings).
+        # Log stderr if it contains build failures.
         if result.returncode != 0 and result.stderr:
             stderr_lines = result.stderr.strip().split("\n")
             error_lines = [l for l in stderr_lines if "error" in l.lower()]
             if error_lines:
                 print(f"  cargo-mutants errors:")
-                for line in error_lines[:5]:
+                for line in error_lines[:10]:
                     print(f"    {line}")
     except subprocess.TimeoutExpired:
         print(f"  Warning: cargo-mutants timed out after {total_timeout}s for {repo_path}")
