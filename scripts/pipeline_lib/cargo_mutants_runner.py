@@ -237,9 +237,25 @@ def _parse_mutants_output(
 
     # Handle both list and dict formats
     if isinstance(outcomes, dict):
+        top_keys = list(outcomes.keys())
         mutations = outcomes.get("outcomes", outcomes.get("mutations", []))
+        print(f"  outcomes.json: dict with keys={top_keys}, {len(mutations)} entries")
     else:
         mutations = outcomes
+        print(f"  outcomes.json: list with {len(mutations)} entries")
+
+    # Show first entry structure for debugging
+    if mutations:
+        first = mutations[0]
+        print(f"  First entry keys: {list(first.keys())}")
+        # Show key fields
+        for key in ("outcome", "status", "scenario", "summary"):
+            if key in first:
+                val = first[key]
+                if isinstance(val, dict):
+                    print(f"    {key}: dict with keys={list(val.keys())}")
+                else:
+                    print(f"    {key}: {val!r}")
 
     for mutation in mutations[:max_mutations]:
         try:
