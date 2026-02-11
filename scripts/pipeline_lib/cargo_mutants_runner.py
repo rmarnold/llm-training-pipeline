@@ -15,7 +15,6 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from typing import Any
 
 
 @dataclass
@@ -172,20 +171,6 @@ def run_cargo_mutants(
         # Fall back to output_dir itself (older cargo-mutants versions)
         actual_output = output_dir
 
-    # Print baseline log if the build failed (shows the actual error)
-    log_dir = os.path.join(actual_output, "log")
-    if os.path.isdir(log_dir):
-        for fname in sorted(os.listdir(log_dir)):
-            if "baseline" in fname.lower():
-                try:
-                    with open(os.path.join(log_dir, fname)) as fh:
-                        lines = fh.read().strip().split("\n")
-                    print(f"  Baseline log ({fname}, last 30 lines):")
-                    for line in lines[-30:]:
-                        print(f"    {line}")
-                except IOError:
-                    pass
-
     # Parse results from JSON output
     return _parse_mutants_output(repo_path, actual_output, max_mutations)
 
@@ -195,127 +180,132 @@ def _parse_mutants_output(
     output_dir: str,
     max_mutations: int,
 ) -> list[MutationResult]:
-    """Parse cargo-mutants JSON output into MutationResult objects."""
+    """Parse cargo-mutants v26 JSON output into MutationResult objects.
+
+    cargo-mutants v26 outcomes.json format:
+    {
+      "outcomes": [
+        {
+          "scenario": "Baseline" | {"Mutant": {mutant fields}},
+          "summary": "CaughtMutant"|"MissedMutant"|"Unviable"|"Timeout"|...,
+          "log_path": "...",
+          "diff_path": "...",
+          "phase_results": [...]
+        }
+      ]
+    }
+    """
     results = []
 
-    # cargo-mutants writes outcomes to output_dir/outcomes.json
     outcomes_path = os.path.join(output_dir, "outcomes.json")
     if not os.path.exists(outcomes_path):
-        # Try alternative path
-        outcomes_path = os.path.join(output_dir, "mutants.json")
-
-    if not os.path.exists(outcomes_path):
-        # Check if there's a log dir with useful info
-        log_dir = os.path.join(output_dir, "log")
-        if os.path.isdir(log_dir):
-            # Look for baseline failure
-            for fname in os.listdir(log_dir):
-                if "baseline" in fname and fname.endswith(".log"):
-                    log_path = os.path.join(log_dir, fname)
-                    try:
-                        with open(log_path) as f:
-                            content = f.read()
-                        # Show last few lines of baseline failure
-                        lines = content.strip().split("\n")
-                        tail = lines[-min(5, len(lines)):]
-                        print(f"  Baseline failed:")
-                        for line in tail:
-                            print(f"    {line}")
-                    except IOError:
-                        pass
-                    break
-        else:
-            print(f"  No outcomes file found in {output_dir}")
+        print(f"  No outcomes.json in {output_dir}")
         return results
 
     try:
         with open(outcomes_path) as f:
-            outcomes = json.load(f)
+            data = json.load(f)
     except (json.JSONDecodeError, IOError) as e:
-        print(f"  Failed to parse outcomes: {e}")
+        print(f"  Failed to parse outcomes.json: {e}")
         return results
 
-    # Handle both list and dict formats
-    if isinstance(outcomes, dict):
-        top_keys = list(outcomes.keys())
-        mutations = outcomes.get("outcomes", outcomes.get("mutations", []))
-        print(f"  outcomes.json: dict with keys={top_keys}, {len(mutations)} entries")
+    # Extract outcomes list
+    if isinstance(data, dict):
+        entries = data.get("outcomes", [])
     else:
-        mutations = outcomes
-        print(f"  outcomes.json: list with {len(mutations)} entries")
+        entries = data
 
-    # Show first entry structure for debugging
-    if mutations:
-        first = mutations[0]
-        print(f"  First entry keys: {list(first.keys())}")
-        # Show key fields
-        for key in ("outcome", "status", "scenario", "summary"):
-            if key in first:
-                val = first[key]
-                if isinstance(val, dict):
-                    print(f"    {key}: dict with keys={list(val.keys())}")
-                else:
-                    print(f"    {key}: {val!r}")
+    # Map cargo-mutants v26 summary values to our outcome names
+    summary_map = {
+        "CaughtMutant": "caught",
+        "MissedMutant": "missed",
+        "Unviable": "unviable",
+        "Timeout": "timeout",
+    }
 
-    for mutation in mutations[:max_mutations]:
-        try:
-            result = _parse_single_mutation(mutation, repo_path)
-            if result:
-                results.append(result)
-        except Exception as e:
-            print(f"  Warning: Failed to parse mutation: {e}")
+    count = 0
+    for entry in entries:
+        if count >= max_mutations:
+            break
+
+        scenario = entry.get("scenario")
+        summary = entry.get("summary", "")
+
+        # Skip baseline and non-mutation entries
+        if scenario == "Baseline" or not isinstance(scenario, dict):
             continue
 
+        outcome = summary_map.get(summary)
+        if outcome is None:
+            continue
+
+        # Extract mutant details from scenario.Mutant
+        mutant = scenario.get("Mutant", {})
+        file_path = mutant.get("file", "")
+        replacement = mutant.get("replacement", "")
+        genre = mutant.get("genre", "FnValue")
+        name = mutant.get("name", "")
+
+        # Extract function name from the function field or the name
+        func = mutant.get("function")
+        if isinstance(func, dict):
+            function_name = func.get("function_name", func.get("name", ""))
+        elif isinstance(func, str):
+            function_name = func
+        else:
+            function_name = name
+
+        # Read the original source file
+        original_code = ""
+        full_path = os.path.join(repo_path, file_path)
+        if file_path and os.path.exists(full_path):
+            try:
+                with open(full_path) as f:
+                    original_code = f.read()
+            except IOError:
+                pass
+
+        # Read diff from diff_path if available
+        diff = ""
+        diff_path = entry.get("diff_path", "")
+        if diff_path:
+            full_diff = os.path.join(output_dir, diff_path)
+            if os.path.exists(full_diff):
+                try:
+                    with open(full_diff) as f:
+                        diff = f.read()
+                except IOError:
+                    pass
+
+        # Read log from log_path for compiler errors / test output
+        log_content = ""
+        log_path = entry.get("log_path", "")
+        if log_path:
+            full_log = os.path.join(output_dir, log_path)
+            if os.path.exists(full_log):
+                try:
+                    with open(full_log) as f:
+                        log_content = f.read()
+                except IOError:
+                    pass
+
+        compiler_error = log_content if outcome == "unviable" else ""
+        test_output = log_content if outcome == "caught" else ""
+
+        results.append(MutationResult(
+            original_code=original_code,
+            mutated_code=replacement,
+            diff=diff,
+            mutation_type=genre,
+            file_path=file_path,
+            function_name=function_name,
+            outcome=outcome,
+            compiler_error=compiler_error,
+            test_output=test_output,
+        ))
+        count += 1
+
     return results
-
-
-def _parse_single_mutation(
-    mutation: dict[str, Any],
-    repo_path: str,
-) -> MutationResult | None:
-    """Parse a single mutation entry from cargo-mutants output."""
-    outcome = mutation.get("outcome", mutation.get("status", "unknown"))
-    if outcome not in ("caught", "missed", "unviable", "timeout"):
-        return None
-
-    file_path = mutation.get("file", mutation.get("path", ""))
-    function_name = mutation.get("function", mutation.get("name", ""))
-    mutation_type = mutation.get("genre", mutation.get("type", "replace function body"))
-
-    # Read the original file if available
-    original_code = ""
-    full_path = os.path.join(repo_path, file_path)
-    if os.path.exists(full_path):
-        try:
-            with open(full_path) as f:
-                original_code = f.read()
-        except IOError:
-            pass
-
-    # Get the mutated code and diff
-    mutated_code = mutation.get("replacement", "")
-    diff = mutation.get("diff", "")
-
-    # Get compiler/test output
-    compiler_error = ""
-    test_output = ""
-    log = mutation.get("log", mutation.get("output", ""))
-    if outcome == "unviable":
-        compiler_error = log
-    elif outcome == "caught":
-        test_output = log
-
-    return MutationResult(
-        original_code=original_code,
-        mutated_code=mutated_code,
-        diff=diff,
-        mutation_type=mutation_type,
-        file_path=file_path,
-        function_name=function_name,
-        outcome=outcome,
-        compiler_error=compiler_error,
-        test_output=test_output,
-    )
 
 
 def mutations_to_training_data(

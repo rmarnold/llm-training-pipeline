@@ -142,13 +142,13 @@ rust_repos:
     uses_rustfmt: true
     active_last_12_months: true
 
+  # Repos that have self-referencing dev-dependencies (memchr, indexmap,
+  # pest, serde_json, syn, quote) hit "ambiguous package" in cargo-mutants
+  # and are excluded.  clap fails ui snapshot tests.  regex-lite 404s.
   categories:
-    # --- Single-crate repos (fast to compile, no system deps) ---
     data_structures:
-      - "BurntSushi/memchr"
       - "BurntSushi/bstr"
       - "contain-rs/linked-hash-map"
-      - "indexmap-rs/indexmap"
     error_handling:
       - "dtolnay/thiserror"
       - "dtolnay/anyhow"
@@ -161,23 +161,12 @@ rust_repos:
       - "BurntSushi/walkdir"
       - "BurntSushi/byteorder"
     parsing:
-      - "pest-parser/pest"
       - "Geal/nom"
     string_handling:
-      - "BurntSushi/regex-lite"
       - "Manishearth/unicode-segmentation"
     serialization:
-      - "serde-rs/json"
       - repo: "serde-rs/serde"
         package: "serde"
-    cli:
-      - repo: "clap-rs/clap"
-        package: "clap"
-    macros:
-      - repo: "dtolnay/syn"
-        package: "syn"
-      - repo: "dtolnay/quote"
-        package: "quote"
     testing:
       - repo: "proptest-rs/proptest"
         package: "proptest"
