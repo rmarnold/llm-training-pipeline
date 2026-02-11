@@ -137,25 +137,39 @@ def run_cargo_mutants(
 
     total_timeout = max(timeout_per_mutation * max_mutations, 1800)
 
-    # Run a quick diagnostic `cargo check` first to catch build issues early
-    # and show the actual compilation error (cargo-mutants swallows it).
+    # Diagnostic: run `cargo build` (not just `check`) to catch linker/codegen
+    # errors before cargo-mutants, which swallows the actual error message.
+    # `cargo check` only does type-checking; `cargo build` does full codegen
+    # and linking, which is what cargo-mutants runs internally.
+    build_cmd = ["cargo", "build", "--tests"]
+    if package:
+        build_cmd.extend(["--package", package])
     diag = subprocess.run(
-        ["cargo", "check"] + (["--package", package] if package else []),
+        build_cmd,
         cwd=repo_path,
         capture_output=True,
         text=True,
         timeout=900,
     )
     if diag.returncode != 0:
-        # Show the actual compilation error so we can diagnose
-        stderr = diag.stderr.strip()
-        if stderr:
-            lines = stderr.split("\n")
-            # Show last 10 lines which usually contain the real error
-            tail = lines[-min(10, len(lines)):]
-            print(f"  cargo check failed:")
-            for line in tail:
-                print(f"    {line}")
+        # Show the actual build error (stderr has compiler/linker output)
+        for label, output in [("stderr", diag.stderr), ("stdout", diag.stdout)]:
+            text = output.strip()
+            if not text:
+                continue
+            lines = text.split("\n")
+            # Filter to error/warning lines, or show last 15 lines
+            important = [l for l in lines if any(kw in l.lower() for kw in
+                         ["error", "cannot find", "linker", "undefined", "fatal"])]
+            if important:
+                print(f"  cargo build {label}:")
+                for line in important[:15]:
+                    print(f"    {line}")
+            else:
+                tail = lines[-min(15, len(lines)):]
+                print(f"  cargo build {label} (last {len(tail)} lines):")
+                for line in tail:
+                    print(f"    {line}")
         return []
 
     try:
@@ -170,11 +184,10 @@ def run_cargo_mutants(
         # Log stderr if it contains build failures.
         if result.returncode != 0 and result.stderr:
             stderr_lines = result.stderr.strip().split("\n")
-            error_lines = [l for l in stderr_lines if "error" in l.lower()]
-            if error_lines:
-                print(f"  cargo-mutants errors:")
-                for line in error_lines[:10]:
-                    print(f"    {line}")
+            # Show all stderr, not just error lines — important for diagnosing
+            print(f"  cargo-mutants stderr (last 15 lines):")
+            for line in stderr_lines[-15:]:
+                print(f"    {line}")
     except subprocess.TimeoutExpired:
         print(f"  Warning: cargo-mutants timed out after {total_timeout}s for {repo_path}")
 
