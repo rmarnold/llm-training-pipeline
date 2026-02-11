@@ -118,10 +118,17 @@ def run_cargo_mutants(
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="mutants_")
 
+    # Ensure cargo builds on a local filesystem with exec permissions.
+    # When repos are cloned to Google Drive (FUSE, noexec), build scripts
+    # fail with "Permission denied". CARGO_TARGET_DIR redirects all
+    # compilation to a local path while keeping sources on Drive.
+    env = os.environ.copy()
+    if "CARGO_TARGET_DIR" not in env:
+        local_target = os.path.join(tempfile.gettempdir(), "cargo-mutants-target")
+        os.makedirs(local_target, exist_ok=True)
+        env["CARGO_TARGET_DIR"] = local_target
+
     # Build cargo-mutants command.
-    # No separate pre-check — cargo-mutants runs its own baseline test
-    # and reports failures clearly. This avoids the problem of large
-    # workspace repos timing out or failing due to system deps.
     cmd = [
         "cargo", "mutants",
         "--timeout", str(timeout_per_mutation),
@@ -150,6 +157,7 @@ def run_cargo_mutants(
         capture_output=True,
         text=True,
         timeout=900,
+        env=env,
     )
     if diag.returncode != 0:
         # Show the actual build error (stderr has compiler/linker output)
@@ -179,6 +187,7 @@ def run_cargo_mutants(
             capture_output=True,
             text=True,
             timeout=total_timeout,
+            env=env,
         )
         # cargo-mutants returns non-zero if mutations were caught (expected).
         # Log stderr if it contains build failures.
