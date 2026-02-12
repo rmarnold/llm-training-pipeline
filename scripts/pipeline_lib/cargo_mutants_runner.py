@@ -117,26 +117,16 @@ def run_cargo_mutants(
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="mutants_")
 
-    # --in-place mutates the source tree directly, so ensure it's clean
-    # (a previous interrupted run may have left mutations in place).
-    subprocess.run(
-        ["git", "checkout", "."],
-        cwd=repo_path,
-        capture_output=True,
-        timeout=30,
-    )
-
     # Build cargo-mutants command.
-    # --in-place: mutate in the original directory instead of copying to a
-    # temp dir.  The copy causes "ambiguous package" errors when a crate
-    # has itself as a dev-dependency (e.g. memchr, serde).
-    # --in-place is incompatible with --jobs, so mutations run sequentially.
+    # Repos with self-referencing dev-deps (memchr, indexmap, etc.) have been
+    # removed from the config, so we can use the default copy-to-tempdir mode
+    # with --jobs for parallel mutation testing.
     cmd = [
         "cargo", "mutants",
         "--timeout", str(timeout_per_mutation),
+        "--jobs", str(jobs),
         "--output", output_dir,
         "--json",
-        "--in-place",
     ]
 
     # For workspace repos, target a specific package to avoid compiling
