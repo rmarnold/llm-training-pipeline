@@ -10,7 +10,7 @@ from datasketch import MinHash, MinHashLSH
 from detoxify import Detoxify
 from tqdm import tqdm
 
-from pipeline_lib.text_cleaning.tokenization import parallel_tokenize
+from .tokenization import parallel_tokenize
 
 
 class DataCleaner:

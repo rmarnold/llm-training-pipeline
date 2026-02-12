@@ -7,7 +7,7 @@ from typing import Any
 
 from transformers import TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 
-from pipeline_lib.oom_handler import OOMHandler
+from .oom_handler import OOMHandler
 
 
 class OOMRecoveryCallback(TrainerCallback):
