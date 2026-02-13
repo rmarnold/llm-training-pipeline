@@ -12,6 +12,7 @@ Usage:
     python scripts/16_generate_mutations.py
     python scripts/16_generate_mutations.py --config configs/data_sources_rust.yaml
     python scripts/16_generate_mutations.py --repos tokio-rs/tokio serde-rs/serde --max_mutations 200
+    python scripts/16_generate_mutations.py --repos BurntSushi/bstr dtolnay/anyhow --repo-workers 2
 
 Requires:
     - cargo-mutants installed: cargo install cargo-mutants
@@ -20,10 +21,12 @@ Requires:
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 
 import yaml
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from pipeline_lib.cargo_mutants_runner import (
@@ -34,11 +37,40 @@ from pipeline_lib.cargo_mutants_runner import (
 )
 
 
+def _auto_detect_jobs() -> int:
+    """Calculate optimal parallel jobs from CPU count and available RAM.
+
+    Uses 4 GB per worker as the RAM estimate (cargo build peak is ~1-3 GB).
+    """
+    cpu_count = multiprocessing.cpu_count()
+    cpu_jobs = max(1, cpu_count - 2)
+
+    try:
+        mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        total_ram_gb = mem_bytes / (1024**3)
+        ram_jobs = max(1, int(total_ram_gb / 4))
+    except (ValueError, OSError):
+        total_ram_gb = 0
+        ram_jobs = cpu_jobs
+
+    jobs = min(cpu_jobs, ram_jobs)
+
+    print(f"  Auto-detected jobs: {jobs} "
+          f"(CPUs: {cpu_count}, RAM: {total_ram_gb:.0f} GB, "
+          f"cpu_limit: {cpu_jobs}, ram_limit(@4GB/worker): {ram_jobs})")
+    return jobs
+
+
 @dataclass
 class RepoEntry:
     """A repo entry from the config, with optional package targeting."""
     url: str
     package: str | None = None
+
+
+def _repo_name_from_url(url: str) -> str:
+    """Extract a safe repo name from a URL for cache filenames."""
+    return url.rstrip("/").split("/")[-1].replace(".git", "")
 
 
 def load_repos_from_config(config_path: str) -> list[RepoEntry]:
@@ -78,14 +110,72 @@ def load_repos_from_config(config_path: str) -> list[RepoEntry]:
     return entries
 
 
+def _process_one_repo(
+    entry: RepoEntry,
+    clone_dir: str,
+    output_dir: str,
+    max_mutations: int,
+    timeout: int,
+    jobs_per_repo: int,
+) -> tuple[str, list[dict[str, str]]]:
+    """Process a single repo — clones, runs mutations, returns training data.
+
+    Designed to run in a worker process via ProcessPoolExecutor.
+
+    Returns:
+        Tuple of (repo_name, training_data_list).
+    """
+    repo_name = _repo_name_from_url(entry.url)
+    label = entry.url
+    if entry.package:
+        label += f" (package: {entry.package})"
+    print(f"  Processing {label}...")
+
+    repo_path = clone_rust_repo(entry.url, clone_dir)
+
+    mutations = run_cargo_mutants(
+        repo_path,
+        timeout_per_mutation=timeout,
+        max_mutations=max_mutations,
+        jobs=jobs_per_repo,
+        package=entry.package,
+    )
+    print(f"  {repo_name}: {len(mutations)} mutations")
+
+    training_data = mutations_to_training_data(mutations)
+    print(f"  {repo_name}: {len(training_data)} usable training examples")
+
+    # Save per-repo JSONL for incremental caching
+    repo_jsonl = os.path.join(output_dir, f"{repo_name}.jsonl")
+    with open(repo_jsonl, "w") as f:
+        for item in training_data:
+            f.write(json.dumps(item) + "\n")
+
+    return repo_name, training_data
+
+
+def _load_cached_repo(output_dir: str, repo_name: str) -> list[dict[str, str]]:
+    """Load cached per-repo JSONL results."""
+    repo_jsonl = os.path.join(output_dir, f"{repo_name}.jsonl")
+    data = []
+    with open(repo_jsonl) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                data.append(json.loads(line))
+    return data
+
+
 def generate_mutations(
     config_path: str = "configs/data_sources_rust.yaml",
     repos: list[str] | None = None,
     clone_dir: str = "/tmp/rust_repos",
     output_dir: str = "data/rust/mutations",
-    max_mutations_per_repo: int = 100,
+    max_mutations_per_repo: int = 50,
     timeout_per_mutation: int = 300,
-    jobs: int = 4,
+    jobs: int = 0,
+    repo_workers: int = 0,
+    no_cache: bool = False,
 ) -> str:
     """Run cargo-mutants on Rust repos and save training data.
 
@@ -96,7 +186,9 @@ def generate_mutations(
         output_dir: Output directory for mutation data.
         max_mutations_per_repo: Max mutations per repository.
         timeout_per_mutation: Timeout per mutation in seconds.
-        jobs: Number of parallel mutation tests.
+        jobs: Number of parallel mutation test jobs. 0 = auto-detect from CPU/RAM.
+        repo_workers: Number of repos to process in parallel. 0 = auto (jobs // 4, min 1).
+        no_cache: Force re-generation even if cached results exist.
 
     Returns:
         Path to output JSONL file.
@@ -110,6 +202,25 @@ def generate_mutations(
         print("\nERROR: cargo-mutants is not installed.")
         print("Install with: cargo install cargo-mutants")
         return ""
+
+    # Auto-detect jobs from CPU/RAM if not specified
+    if jobs <= 0:
+        jobs = _auto_detect_jobs()
+    else:
+        print(f"  Using explicit jobs: {jobs}")
+
+    # Auto-detect repo_workers
+    if repo_workers <= 0:
+        repo_workers = max(1, jobs // 4)
+    repo_workers = min(repo_workers, jobs)  # never more workers than jobs
+
+    # Divide mutation-test parallelism across repo workers
+    jobs_per_repo = max(1, jobs // repo_workers)
+
+    print(f"\n  Total jobs: {jobs}")
+    print(f"  Repo workers: {repo_workers}")
+    print(f"  Jobs per repo: {jobs_per_repo}")
+    print(f"  Cache: {'disabled (--no-cache)' if no_cache else 'enabled'}")
 
     # Load repo entries
     if repos is not None:
@@ -129,37 +240,66 @@ def generate_mutations(
 
     all_training_data: list[dict[str, str]] = []
 
-    for i, entry in enumerate(entries):
-        label = entry.url
-        if entry.package:
-            label += f" (package: {entry.package})"
-        print(f"\n[{i+1}/{len(entries)}] Processing {label}...")
+    # Split entries into cached (skip) and pending (process)
+    pending_entries: list[RepoEntry] = []
+    for entry in entries:
+        repo_name = _repo_name_from_url(entry.url)
+        repo_jsonl = os.path.join(output_dir, f"{repo_name}.jsonl")
 
-        try:
-            # Clone
-            repo_path = clone_rust_repo(entry.url, clone_dir)
+        if not no_cache and os.path.exists(repo_jsonl):
+            cached_data = _load_cached_repo(output_dir, repo_name)
+            print(f"  Skipping {repo_name} (cached: {len(cached_data)} examples)")
+            all_training_data.extend(cached_data)
+        else:
+            pending_entries.append(entry)
 
-            # Run mutations
-            mutations = run_cargo_mutants(
-                repo_path,
-                timeout_per_mutation=timeout_per_mutation,
-                max_mutations=max_mutations_per_repo,
-                jobs=jobs,
-                package=entry.package,
-            )
-            print(f"  Got {len(mutations)} mutations")
+    if not pending_entries:
+        print("\nAll repos cached — nothing to process.")
+    elif repo_workers == 1 or len(pending_entries) == 1:
+        # Sequential processing — simpler output, no multiprocessing overhead
+        for i, entry in enumerate(pending_entries):
+            label = entry.url
+            if entry.package:
+                label += f" (package: {entry.package})"
+            print(f"\n[{i+1}/{len(pending_entries)}] Processing {label}...")
 
-            # Convert to training data
-            training_data = mutations_to_training_data(mutations)
-            print(f"  Usable training examples: {len(training_data)}")
+            try:
+                repo_name, training_data = _process_one_repo(
+                    entry, clone_dir, output_dir,
+                    max_mutations_per_repo, timeout_per_mutation, jobs_per_repo,
+                )
+                all_training_data.extend(training_data)
+            except Exception as e:
+                print(f"  Error processing {entry.url}: {e}")
+                continue
+    else:
+        # Parallel repo processing
+        print(f"\nProcessing {len(pending_entries)} repos with {repo_workers} workers...")
+        with ProcessPoolExecutor(max_workers=repo_workers) as pool:
+            futures = {
+                pool.submit(
+                    _process_one_repo, entry, clone_dir, output_dir,
+                    max_mutations_per_repo, timeout_per_mutation, jobs_per_repo,
+                ): entry
+                for entry in pending_entries
+            }
+            for future in as_completed(futures):
+                entry = futures[future]
+                try:
+                    repo_name, training_data = future.result()
+                    all_training_data.extend(training_data)
+                except Exception as e:
+                    print(f"  Error processing {entry.url}: {e}")
 
-            all_training_data.extend(training_data)
+    # Merge all per-repo JSONLs into combined mutations.jsonl
+    # (Re-read from disk to include both cached and newly generated data)
+    all_training_data = []
+    for entry in entries:
+        repo_name = _repo_name_from_url(entry.url)
+        repo_jsonl = os.path.join(output_dir, f"{repo_name}.jsonl")
+        if os.path.exists(repo_jsonl):
+            all_training_data.extend(_load_cached_repo(output_dir, repo_name))
 
-        except Exception as e:
-            print(f"  Error processing {entry.url}: {e}")
-            continue
-
-    # Save as JSONL
     with open(output_path, "w") as f:
         for item in all_training_data:
             f.write(json.dumps(item) + "\n")
@@ -207,9 +347,14 @@ if __name__ == "__main__":
                         help="Override repo URLs (e.g., tokio-rs/tokio serde-rs/serde)")
     parser.add_argument("--clone_dir", type=str, default="/tmp/rust_repos")
     parser.add_argument("--output_dir", type=str, default="data/rust/mutations")
-    parser.add_argument("--max_mutations_per_repo", type=int, default=100)
+    parser.add_argument("--max_mutations_per_repo", type=int, default=50)
     parser.add_argument("--timeout_per_mutation", type=int, default=300)
-    parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--jobs", type=int, default=0,
+                        help="Parallel mutation test jobs. 0 = auto-detect from CPU/RAM.")
+    parser.add_argument("--repo-workers", type=int, default=0,
+                        help="Number of repos to process in parallel. 0 = auto.")
+    parser.add_argument("--no-cache", dest="no_cache", action="store_true",
+                        help="Force re-generation even if cached results exist.")
     args = parser.parse_args()
 
     # Normalize repo names to URLs if needed
@@ -230,4 +375,6 @@ if __name__ == "__main__":
         max_mutations_per_repo=args.max_mutations_per_repo,
         timeout_per_mutation=args.timeout_per_mutation,
         jobs=args.jobs,
+        repo_workers=args.repo_workers,
+        no_cache=args.no_cache,
     )
