@@ -138,6 +138,7 @@ class DriveHelper:
             )
             resp = self._service.files().list(
                 q=q, fields="files(id)", spaces="drive",
+                corpora="allDrives",
                 supportsAllDrives=True, includeItemsFromAllDrives=True,
             ).execute()
             matches = resp.get("files", [])
@@ -176,6 +177,7 @@ class DriveHelper:
             q = f"'{parent_id}' in parents and name = '{name}' and trashed = false"
             existing = self._service.files().list(
                 q=q, fields="files(id)", spaces="drive",
+                corpora="allDrives",
                 supportsAllDrives=True, includeItemsFromAllDrives=True,
             ).execute()
             media = MediaFileUpload(local_path, resumable=True)
@@ -214,6 +216,7 @@ class DriveHelper:
         q = f"'{parent_id}' in parents and name = '{name}' and trashed = false"
         resp = self._service.files().list(
             q=q, fields="files(id, mimeType)", spaces="drive",
+            corpora="allDrives",
             supportsAllDrives=True, includeItemsFromAllDrives=True,
         ).execute()
         matches = resp.get("files", [])
@@ -243,6 +246,7 @@ class DriveHelper:
         q = f"'{folder_id}' in parents and trashed = false"
         resp = self._service.files().list(
             q=q, fields="files(id, name, mimeType)", spaces="drive",
+            corpora="allDrives",
             supportsAllDrives=True, includeItemsFromAllDrives=True,
         ).execute()
         for item in resp.get("files", []):
