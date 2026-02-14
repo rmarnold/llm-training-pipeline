@@ -43,6 +43,7 @@ class DriveHelper:
         self.mode = mode
         self.drive_base = drive_base
         self._warned_local = False
+        self._warned_quota = False
 
         if mode == "service_account":
             if not credentials_path:
@@ -76,6 +77,14 @@ class DriveHelper:
                     "DriveHelper: folder %r (%s) on %s validated OK",
                     meta.get("name"), folder_id, drive_type,
                 )
+                if not self._drive_id:
+                    logger.warning(
+                        "DriveHelper: folder is on personal My Drive, not a "
+                        "Shared Drive. Service accounts cannot CREATE new files "
+                        "here (no storage quota). Uploads of new files will be "
+                        "skipped. To fix: create a Shared Drive (requires Google "
+                        "Workspace) and move your folder there."
+                    )
             except Exception as e:
                 # Truncate folder_id in error to avoid leaking secrets
                 safe_id = folder_id[:20] + "..." if len(folder_id) > 20 else folder_id
@@ -102,7 +111,20 @@ class DriveHelper:
             dst = os.path.join(self.drive_base, drive_relative_path)
             _copy_local(local_path, dst)
         else:
-            self._api_upload(local_path, drive_relative_path)
+            try:
+                self._api_upload(local_path, drive_relative_path)
+            except Exception as e:
+                if "storageQuotaExceeded" in str(e):
+                    if not self._warned_quota:
+                        logger.warning(
+                            "Drive backup skipped — service account has no storage "
+                            "quota on personal My Drive. To enable backups, move "
+                            "your folder to a Shared Drive (requires Google Workspace). "
+                            "Training data is safe on the local VM."
+                        )
+                        self._warned_quota = True
+                else:
+                    raise
 
     def restore(self, drive_relative_path: str, local_path: str) -> None:
         """Copy Drive → *local_path*.  Recursive for dirs."""
@@ -126,7 +148,18 @@ class DriveHelper:
         if self.mode == "mounted":
             os.makedirs(os.path.join(self.drive_base, drive_relative_path), exist_ok=True)
         else:
-            self._resolve_folder(drive_relative_path, create=True)
+            try:
+                self._resolve_folder(drive_relative_path, create=True)
+            except Exception as e:
+                if "storageQuotaExceeded" in str(e):
+                    if not self._warned_quota:
+                        logger.warning(
+                            "Drive ensure_dir skipped — service account has no "
+                            "storage quota on personal My Drive."
+                        )
+                        self._warned_quota = True
+                else:
+                    raise
 
     # ------------------------------------------------------------------
     # Internals — mounted helpers
