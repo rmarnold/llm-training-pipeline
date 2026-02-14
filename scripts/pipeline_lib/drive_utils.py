@@ -49,6 +49,14 @@ class DriveHelper:
                 raise ValueError("credentials_path required for service_account mode")
             if not folder_id:
                 raise ValueError("folder_id required for service_account mode")
+            # Guard against accidentally passing the JSON key as folder_id
+            if folder_id.strip().startswith("{"):
+                raise ValueError(
+                    "folder_id looks like JSON (service account key?), not a Drive folder ID.\n"
+                    "Expected a short ID like '18UpFpUhiNrs2Etha0uFjSGWmj1Ee1SnX'.\n"
+                    "Check your DRIVE_FOLDER_ID Colab Secret — it should contain "
+                    "only the folder ID from the Google Drive URL."
+                )
             self._folder_id = folder_id
             self._service = _build_drive_service(credentials_path)
             # Cache: relative_path -> Drive folder ID
@@ -69,8 +77,10 @@ class DriveHelper:
                     meta.get("name"), folder_id, drive_type,
                 )
             except Exception as e:
+                # Truncate folder_id in error to avoid leaking secrets
+                safe_id = folder_id[:20] + "..." if len(folder_id) > 20 else folder_id
                 raise ValueError(
-                    f"Cannot access Drive folder {folder_id!r}: {e}\n"
+                    f"Cannot access Drive folder {safe_id!r}: {e}\n"
                     f"Ensure the folder is shared with the service account email."
                 ) from e
 
