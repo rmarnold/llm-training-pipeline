@@ -136,7 +136,10 @@ class DriveHelper:
                 f"and mimeType = 'application/vnd.google-apps.folder' "
                 f"and trashed = false"
             )
-            resp = self._service.files().list(q=q, fields="files(id)", spaces="drive").execute()
+            resp = self._service.files().list(
+                q=q, fields="files(id)", spaces="drive",
+                supportsAllDrives=True, includeItemsFromAllDrives=True,
+            ).execute()
             matches = resp.get("files", [])
 
             if matches:
@@ -147,7 +150,9 @@ class DriveHelper:
                     "mimeType": "application/vnd.google-apps.folder",
                     "parents": [current_id],
                 }
-                folder = self._service.files().create(body=meta, fields="id").execute()
+                folder = self._service.files().create(
+                    body=meta, fields="id", supportsAllDrives=True,
+                ).execute()
                 current_id = folder["id"]
             else:
                 return ""
@@ -169,15 +174,22 @@ class DriveHelper:
 
             # Check if file already exists → update; else create
             q = f"'{parent_id}' in parents and name = '{name}' and trashed = false"
-            existing = self._service.files().list(q=q, fields="files(id)", spaces="drive").execute()
+            existing = self._service.files().list(
+                q=q, fields="files(id)", spaces="drive",
+                supportsAllDrives=True, includeItemsFromAllDrives=True,
+            ).execute()
             media = MediaFileUpload(local_path, resumable=True)
 
             if existing.get("files"):
                 file_id = existing["files"][0]["id"]
-                self._service.files().update(fileId=file_id, media_body=media).execute()
+                self._service.files().update(
+                    fileId=file_id, media_body=media, supportsAllDrives=True,
+                ).execute()
             else:
                 meta = {"name": name, "parents": [parent_id]}
-                self._service.files().create(body=meta, media_body=media, fields="id").execute()
+                self._service.files().create(
+                    body=meta, media_body=media, fields="id", supportsAllDrives=True,
+                ).execute()
         else:
             # Directory — walk and upload each file
             local_root = Path(local_path)
@@ -200,7 +212,10 @@ class DriveHelper:
 
         name = Path(relative_path).name
         q = f"'{parent_id}' in parents and name = '{name}' and trashed = false"
-        resp = self._service.files().list(q=q, fields="files(id, mimeType)", spaces="drive").execute()
+        resp = self._service.files().list(
+            q=q, fields="files(id, mimeType)", spaces="drive",
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute()
         matches = resp.get("files", [])
         if not matches:
             logger.info("restore: %s not found on Drive, skipping", relative_path)
@@ -216,7 +231,7 @@ class DriveHelper:
         from googleapiclient.http import MediaIoBaseDownload
 
         os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
-        request = self._service.files().get_media(fileId=file_id)
+        request = self._service.files().get_media(fileId=file_id, supportsAllDrives=True)
         with open(local_path, "wb") as f:
             downloader = MediaIoBaseDownload(f, request)
             done = False
@@ -226,7 +241,10 @@ class DriveHelper:
     def _download_folder(self, folder_id: str, relative_path: str, local_path: str) -> None:
         os.makedirs(local_path, exist_ok=True)
         q = f"'{folder_id}' in parents and trashed = false"
-        resp = self._service.files().list(q=q, fields="files(id, name, mimeType)", spaces="drive").execute()
+        resp = self._service.files().list(
+            q=q, fields="files(id, name, mimeType)", spaces="drive",
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute()
         for item in resp.get("files", []):
             child_local = os.path.join(local_path, item["name"])
             child_rel = str(Path(relative_path) / item["name"])
