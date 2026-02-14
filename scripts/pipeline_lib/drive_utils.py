@@ -335,20 +335,22 @@ def _build_drive_service(credentials_path: str):
 def _copy_local(src: str, dst: str) -> None:
     """Copy *src* to *dst*, handling both files and directories.
 
-    On Google Drive FUSE mounts, re-backing up files that already exist
-    can raise SameFileError (same inode).  We catch shutil.Error from
-    copytree and silently ignore any "same file" entries.
+    Walks the tree manually instead of using shutil.copytree to avoid
+    SameFileError on Google Drive FUSE mounts (copytree's internal
+    error handling mangles SameFileError into unrecoverable shutil.Error).
     """
     if os.path.isdir(src):
-        try:
-            shutil.copytree(src, dst, dirs_exist_ok=True)
-        except shutil.Error as exc:
-            # SameFileError inherits shutil.Error, so copytree's
-            # internal errors.extend(err.args[0]) explodes the string
-            # message into individual characters.  Check the full
-            # stringified exception instead.
-            if "are the same file" not in str(exc):
-                raise
+        for dirpath, _, filenames in os.walk(src):
+            rel = os.path.relpath(dirpath, src)
+            dst_dir = os.path.join(dst, rel)
+            os.makedirs(dst_dir, exist_ok=True)
+            for fname in filenames:
+                src_file = os.path.join(dirpath, fname)
+                dst_file = os.path.join(dst_dir, fname)
+                try:
+                    shutil.copy2(src_file, dst_file)
+                except shutil.SameFileError:
+                    pass
     else:
         os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
         try:
