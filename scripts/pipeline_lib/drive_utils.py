@@ -332,14 +332,22 @@ def _build_drive_service(credentials_path: str):
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+def _safe_copy2(src: str, dst: str, **kwargs) -> None:
+    """copy2 that silently skips when src and dst are the same file (Drive FUSE)."""
+    try:
+        shutil.copy2(src, dst, **kwargs)
+    except shutil.SameFileError:
+        pass
+
+
 def _copy_local(src: str, dst: str) -> None:
     """Copy *src* to *dst*, handling both files and directories."""
     if os.path.isdir(src):
         if os.path.exists(dst):
             # Merge into existing directory
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+            shutil.copytree(src, dst, dirs_exist_ok=True, copy_function=_safe_copy2)
         else:
-            shutil.copytree(src, dst)
+            shutil.copytree(src, dst, copy_function=_safe_copy2)
     else:
         os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
-        shutil.copy2(src, dst)
+        _safe_copy2(src, dst)
