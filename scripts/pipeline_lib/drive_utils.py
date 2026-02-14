@@ -343,13 +343,12 @@ def _copy_local(src: str, dst: str) -> None:
         try:
             shutil.copytree(src, dst, dirs_exist_ok=True)
         except shutil.Error as exc:
-            # exc.args[0] is a list of (src, dst, reason) tuples.
-            non_same = [
-                e for e in exc.args[0]
-                if "are the same file" not in str(e)
-            ]
-            if non_same:
-                raise shutil.Error(non_same) from None
+            # SameFileError inherits shutil.Error, so copytree's
+            # internal errors.extend(err.args[0]) explodes the string
+            # message into individual characters.  Check the full
+            # stringified exception instead.
+            if "are the same file" not in str(exc):
+                raise
     else:
         os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
         try:
