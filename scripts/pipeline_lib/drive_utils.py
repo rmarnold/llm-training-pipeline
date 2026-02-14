@@ -54,6 +54,26 @@ class DriveHelper:
             # Cache: relative_path -> Drive folder ID
             self._folder_cache: dict[str, str] = {"": folder_id}
 
+            # Validate folder access and detect shared drive
+            self._drive_id: Optional[str] = None
+            try:
+                meta = self._service.files().get(
+                    fileId=folder_id,
+                    fields="id,name,driveId",
+                    supportsAllDrives=True,
+                ).execute()
+                self._drive_id = meta.get("driveId")
+                drive_type = "shared drive" if self._drive_id else "My Drive"
+                logger.info(
+                    "DriveHelper: folder %r (%s) on %s validated OK",
+                    meta.get("name"), folder_id, drive_type,
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"Cannot access Drive folder {folder_id!r}: {e}\n"
+                    f"Ensure the folder is shared with the service account email."
+                ) from e
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -115,6 +135,19 @@ class DriveHelper:
     # Internals — service-account API
     # ------------------------------------------------------------------
 
+    def _list_files(self, q: str, fields: str = "files(id)") -> list[dict]:
+        """Wrapper around files().list() with correct shared-drive params."""
+        kwargs: dict = {
+            "q": q,
+            "fields": fields,
+            "supportsAllDrives": True,
+            "includeItemsFromAllDrives": True,
+        }
+        if self._drive_id:
+            kwargs["corpora"] = "drive"
+            kwargs["driveId"] = self._drive_id
+        return self._service.files().list(**kwargs).execute().get("files", [])
+
     def _resolve_folder(self, relative_path: str, *, create: bool = False) -> str:
         """Return the Drive folder ID for *relative_path*, creating intermediates if needed."""
         if relative_path in self._folder_cache:
@@ -136,12 +169,7 @@ class DriveHelper:
                 f"and mimeType = 'application/vnd.google-apps.folder' "
                 f"and trashed = false"
             )
-            resp = self._service.files().list(
-                q=q, fields="files(id)", spaces="drive",
-                corpora="allDrives",
-                supportsAllDrives=True, includeItemsFromAllDrives=True,
-            ).execute()
-            matches = resp.get("files", [])
+            matches = self._list_files(q)
 
             if matches:
                 current_id = matches[0]["id"]
@@ -175,15 +203,11 @@ class DriveHelper:
 
             # Check if file already exists → update; else create
             q = f"'{parent_id}' in parents and name = '{name}' and trashed = false"
-            existing = self._service.files().list(
-                q=q, fields="files(id)", spaces="drive",
-                corpora="allDrives",
-                supportsAllDrives=True, includeItemsFromAllDrives=True,
-            ).execute()
+            existing = self._list_files(q)
             media = MediaFileUpload(local_path, resumable=True)
 
-            if existing.get("files"):
-                file_id = existing["files"][0]["id"]
+            if existing:
+                file_id = existing[0]["id"]
                 self._service.files().update(
                     fileId=file_id, media_body=media, supportsAllDrives=True,
                 ).execute()
@@ -214,12 +238,7 @@ class DriveHelper:
 
         name = Path(relative_path).name
         q = f"'{parent_id}' in parents and name = '{name}' and trashed = false"
-        resp = self._service.files().list(
-            q=q, fields="files(id, mimeType)", spaces="drive",
-            corpora="allDrives",
-            supportsAllDrives=True, includeItemsFromAllDrives=True,
-        ).execute()
-        matches = resp.get("files", [])
+        matches = self._list_files(q, fields="files(id, mimeType)")
         if not matches:
             logger.info("restore: %s not found on Drive, skipping", relative_path)
             return
@@ -244,12 +263,8 @@ class DriveHelper:
     def _download_folder(self, folder_id: str, relative_path: str, local_path: str) -> None:
         os.makedirs(local_path, exist_ok=True)
         q = f"'{folder_id}' in parents and trashed = false"
-        resp = self._service.files().list(
-            q=q, fields="files(id, name, mimeType)", spaces="drive",
-            corpora="allDrives",
-            supportsAllDrives=True, includeItemsFromAllDrives=True,
-        ).execute()
-        for item in resp.get("files", []):
+        items = self._list_files(q, fields="files(id, name, mimeType)")
+        for item in items:
             child_local = os.path.join(local_path, item["name"])
             child_rel = str(Path(relative_path) / item["name"])
             if item["mimeType"] == "application/vnd.google-apps.folder":
