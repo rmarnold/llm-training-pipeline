@@ -78,20 +78,30 @@ REVIEW_CATEGORIES = {
 # ======================================================================
 
 def _parse_json_field(raw: Any) -> dict[str, Any]:
-    """Parse input_data / output_data which may be a JSON string or dict."""
+    """Parse input_data / output_data which may be a JSON string, Python dict literal, or dict."""
     if isinstance(raw, dict):
         return raw
     if isinstance(raw, str):
         raw = raw.strip()
         if not raw:
             return {}
+        # Try JSON first
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
                 return parsed
             return {"value": parsed}
         except (json.JSONDecodeError, TypeError):
-            return {"value": raw}
+            pass
+        # Fall back to Python dict literal (single-quoted keys)
+        import ast
+        try:
+            parsed = ast.literal_eval(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except (ValueError, SyntaxError):
+            pass
+        return {"value": raw}
     return {}
 
 
