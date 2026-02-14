@@ -137,16 +137,14 @@ def merge_and_export(
 
     from unsloth import FastLanguageModel
 
-    # Load base model
+    # Load adapter directly through Unsloth (handles MoE LoRA internally).
+    # PeftModel.from_pretrained() can't find MoE expert targets on GPT-OSS,
+    # but FastLanguageModel reads adapter_config.json and applies correctly.
     model, tok = FastLanguageModel.from_pretrained(
-        model_name=base_model,
+        model_name=adapter_path,
         max_seq_length=max_seq_length,
         load_in_4bit=True,
     )
-
-    # Load adapter
-    from peft import PeftModel
-    model = PeftModel.from_pretrained(model, adapter_path)
 
     if tokenizer is None:
         tokenizer = tok
@@ -168,6 +166,7 @@ def merge_and_export(
             }
             quant_method = quant_map.get(quantization, "q4_k_m")
             save_path = os.path.join(output_dir, f"gguf_{quantization}")
+            os.makedirs(save_path, exist_ok=True)
             model.save_pretrained_gguf(
                 save_path,
                 tokenizer,
