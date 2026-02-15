@@ -115,7 +115,8 @@ def _run_smoke_test(
         from dataset_formatters.harmony import encode_harmony_messages
         prompt_text = encode_harmony_messages([
             {"role": "user", "content": test_prompt},
-        ], developer_instructions="You are a Rust programming expert.")
+        ], developer_instructions="You are a Rust programming expert.",
+           add_generation_prompt=True)
 
         inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
         outputs = model.generate(

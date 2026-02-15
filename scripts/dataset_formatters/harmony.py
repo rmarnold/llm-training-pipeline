@@ -34,6 +34,7 @@ def encode_harmony_messages(
     messages: list[dict[str, Any]],
     developer_instructions: str | None = None,
     reasoning_effort: str = "medium",
+    add_generation_prompt: bool = False,
 ) -> str:
     """Encode messages in Harmony format with proper special tokens.
 
@@ -44,6 +45,9 @@ def encode_harmony_messages(
             tool_calls, tool_call_id, thinking fields.
         developer_instructions: Optional developer-level system prompt.
         reasoning_effort: "low", "medium", or "high" reasoning effort.
+        add_generation_prompt: If True, end with ``<|assistant|>\\n`` instead
+            of ``<|endoftext|>``.  Use for inference/generation so the model
+            knows it should produce an assistant reply.
 
     Returns:
         Formatted text string with Harmony tokens.
@@ -57,12 +61,13 @@ def encode_harmony_messages(
         )
     except ImportError:
         # Fallback: manual Harmony encoding when openai-harmony not installed
-        return _encode_harmony_fallback(messages, developer_instructions)
+        return _encode_harmony_fallback(messages, developer_instructions, add_generation_prompt)
 
 
 def _encode_harmony_fallback(
     messages: list[dict[str, Any]],
     developer_instructions: str | None = None,
+    add_generation_prompt: bool = False,
 ) -> str:
     """Manual Harmony-compatible encoding as fallback.
 
@@ -118,7 +123,10 @@ def _encode_harmony_fallback(
             else:
                 parts.append(f"<|tool_result|>\n{content}\n")
 
-    parts.append("<|endoftext|>")
+    if add_generation_prompt:
+        parts.append("<|assistant|>\n")
+    else:
+        parts.append("<|endoftext|>")
     return "".join(parts)
 
 

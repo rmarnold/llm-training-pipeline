@@ -130,6 +130,7 @@ class RustAgentEvaluator:
             [{"role": "user", "content": content}],
             developer_instructions="You are a Rust programming expert. Write correct, idiomatic code.",
             reasoning_effort="high",
+            add_generation_prompt=True,
         )
 
         inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=8192)
