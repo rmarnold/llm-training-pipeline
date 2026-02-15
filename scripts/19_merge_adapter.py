@@ -22,7 +22,7 @@ import os
 
 import yaml
 
-from pipeline_lib.unsloth_utils import load_unsloth_model, merge_and_export
+from pipeline_lib.unsloth_utils import merge_and_export
 
 
 def merge_adapter(
@@ -89,7 +89,13 @@ def _run_smoke_test(
     test_prompt: str,
     max_new_tokens: int = 256,
 ) -> None:
-    """Run a quick generation test on the merged model."""
+    """Run a quick generation test on the merged model.
+
+    Uses standard transformers (not Unsloth) since the model is already
+    merged.  Unsloth's loader raises a false-positive critical error on
+    GPT-OSS MoE due to router weight key naming differences.
+    """
+    import torch
     print(f"\nRunning smoke test...")
 
     hf_path = os.path.join(output_dir, "hf")
@@ -97,10 +103,13 @@ def _run_smoke_test(
         hf_path = output_dir
 
     try:
-        model, tokenizer = load_unsloth_model(
-            model_name=hf_path,
-            max_seq_length=2048,
-            load_in_4bit=True,
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(hf_path)
+        model = AutoModelForCausalLM.from_pretrained(
+            hf_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
         )
 
         from dataset_formatters.harmony import encode_harmony_messages
