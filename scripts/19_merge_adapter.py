@@ -91,9 +91,11 @@ def _run_smoke_test(
 ) -> None:
     """Run a quick generation test on the merged model.
 
-    Uses standard transformers (not Unsloth) since the model is already
-    merged.  Unsloth's loader raises a false-positive critical error on
-    GPT-OSS MoE due to router weight key naming differences.
+    Uses Unsloth's FastLanguageModel to reload the merged weights.
+    Standard transformers AutoModelForCausalLM cannot load the fused MoE
+    expert format that Unsloth produces (3D gate_up_proj/down_proj tensors
+    and different router key names), causing all expert weights to be
+    randomly initialized.
     """
     import torch
     print(f"\nRunning smoke test...")
@@ -103,14 +105,14 @@ def _run_smoke_test(
         hf_path = output_dir
 
     try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from unsloth import FastLanguageModel
 
-        tokenizer = AutoTokenizer.from_pretrained(hf_path)
-        model = AutoModelForCausalLM.from_pretrained(
-            hf_path,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=hf_path,
+            dtype=torch.bfloat16,
+            load_in_4bit=False,
         )
+        FastLanguageModel.for_inference(model)
 
         from dataset_formatters.harmony import encode_harmony_messages
         prompt_text = encode_harmony_messages([
