@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import shutil
 
 import yaml
 
@@ -117,10 +118,15 @@ def _process_one_repo(
     max_mutations: int,
     timeout: int,
     jobs_per_repo: int,
+    backup_dir: str | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
     """Process a single repo — clones, runs mutations, returns training data.
 
     Designed to run in a worker process via ProcessPoolExecutor.
+
+    Args:
+        backup_dir: If set, copy the per-repo JSONL here after saving
+            (e.g. a mounted Drive path for incremental backup).
 
     Returns:
         Tuple of (repo_name, training_data_list).
@@ -151,6 +157,13 @@ def _process_one_repo(
         for item in training_data:
             f.write(json.dumps(item) + "\n")
 
+    # Backup per-repo JSONL to Drive (incremental — survives preemption)
+    if backup_dir:
+        os.makedirs(backup_dir, exist_ok=True)
+        backup_path = os.path.join(backup_dir, f"{repo_name}.jsonl")
+        shutil.copy2(repo_jsonl, backup_path)
+        print(f"  {repo_name}: backed up to {backup_path}")
+
     return repo_name, training_data
 
 
@@ -176,6 +189,7 @@ def generate_mutations(
     jobs: int = 0,
     repo_workers: int = 0,
     no_cache: bool = False,
+    backup_dir: str | None = None,
 ) -> str:
     """Run cargo-mutants on Rust repos and save training data.
 
@@ -189,6 +203,8 @@ def generate_mutations(
         jobs: Number of parallel mutation test jobs. 0 = auto-detect from CPU/RAM.
         repo_workers: Number of repos to process in parallel. 0 = auto (jobs // 4, min 1).
         no_cache: Force re-generation even if cached results exist.
+        backup_dir: If set, copy per-repo JSONLs and final outputs here
+            (e.g. a mounted Google Drive path for incremental backup).
 
     Returns:
         Path to output JSONL file.
@@ -267,6 +283,7 @@ def generate_mutations(
                 repo_name, training_data = _process_one_repo(
                     entry, clone_dir, output_dir,
                     max_mutations_per_repo, timeout_per_mutation, jobs_per_repo,
+                    backup_dir=backup_dir,
                 )
                 all_training_data.extend(training_data)
             except Exception as e:
@@ -280,6 +297,7 @@ def generate_mutations(
                 pool.submit(
                     _process_one_repo, entry, clone_dir, output_dir,
                     max_mutations_per_repo, timeout_per_mutation, jobs_per_repo,
+                    backup_dir,
                 ): entry
                 for entry in pending_entries
             }
@@ -313,6 +331,18 @@ def generate_mutations(
     # Also save as HF dataset for direct use
     if all_training_data:
         _save_as_hf_dataset(all_training_data, output_dir)
+
+    # Backup final combined outputs to Drive
+    if backup_dir:
+        os.makedirs(backup_dir, exist_ok=True)
+        shutil.copy2(output_path, os.path.join(backup_dir, "mutations.jsonl"))
+        hf_src = os.path.join(output_dir, "hf_dataset")
+        hf_dst = os.path.join(backup_dir, "hf_dataset")
+        if os.path.isdir(hf_src):
+            if os.path.exists(hf_dst):
+                shutil.rmtree(hf_dst)
+            shutil.copytree(hf_src, hf_dst)
+        print(f"  Final outputs backed up to {backup_dir}")
 
     return output_path
 
@@ -355,6 +385,8 @@ if __name__ == "__main__":
                         help="Number of repos to process in parallel. 0 = auto.")
     parser.add_argument("--no-cache", dest="no_cache", action="store_true",
                         help="Force re-generation even if cached results exist.")
+    parser.add_argument("--backup-dir", type=str, default=None,
+                        help="Copy per-repo JSONLs and final outputs here (e.g. mounted Drive path).")
     args = parser.parse_args()
 
     # Normalize repo names to URLs if needed
@@ -377,4 +409,5 @@ if __name__ == "__main__":
         jobs=args.jobs,
         repo_workers=args.repo_workers,
         no_cache=args.no_cache,
+        backup_dir=args.backup_dir,
     )
