@@ -240,8 +240,14 @@ def generate_mutations(
 
     # Load repo entries
     if repos is not None:
-        # CLI override — simple URLs, no package targeting
-        entries = [RepoEntry(url=r) for r in repos]
+        # CLI override — accept "owner/repo" shorthand or full URLs
+        entries = []
+        for r in repos:
+            if "/" in r and not r.startswith("http"):
+                entries.append(RepoEntry(url=f"https://github.com/{r}"))
+            else:
+                entries.append(RepoEntry(url=r))
+
     elif os.path.exists(config_path):
         entries = load_repos_from_config(config_path)
     else:
