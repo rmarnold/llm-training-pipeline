@@ -114,50 +114,81 @@ def save_adapter(
     print(f"Saved {save_method} to {output_dir}")
 
 
-def _ensure_adapter_has_model_config(adapter_path: str, base_model: str) -> None:
-    """Copy config.json from base model into adapter dir if missing.
+def _load_base_and_adapter(
+    FastLanguageModel: Any,
+    base_model: str,
+    adapter_path: str,
+    max_seq_length: int,
+) -> tuple[Any, Any]:
+    """Load base model via Unsloth, then apply saved LoRA adapter weights.
 
-    Newer Unsloth versions call ``get_transformers_model_type()`` before
-    detecting that a path is an adapter, which requires config.json.
-    We copy it from the base model (or download it from HF Hub) so
-    Unsloth can resolve the model architecture.
+    Avoids ``FastLanguageModel.from_pretrained(adapter_path)`` which fails
+    on newer Unsloth (``get_transformers_model_type`` runs before adapter
+    detection, erroring on adapter dirs that lack config.json).
+
+    Strategy:
+      1. Load the base model through Unsloth (works — training does this).
+      2. Read adapter_config.json to get the LoRA hyper-params.
+      3. Apply LoRA via ``FastLanguageModel.get_peft_model`` (MoE-aware).
+      4. Load the trained adapter weights from disk.
     """
     import json
-    config_dst = os.path.join(adapter_path, "config.json")
-    adapter_cfg = os.path.join(adapter_path, "adapter_config.json")
 
-    if os.path.exists(config_dst):
-        return  # already present
+    # 1. Load base model
+    print(f"  Loading base model: {base_model}")
+    model, tok = FastLanguageModel.from_pretrained(
+        model_name=base_model,
+        max_seq_length=max_seq_length,
+        load_in_4bit=True,
+    )
 
-    if not os.path.exists(adapter_cfg):
-        return  # not an adapter directory
+    # 2. Read saved adapter config
+    adapter_cfg_path = os.path.join(adapter_path, "adapter_config.json")
+    with open(adapter_cfg_path) as f:
+        acfg = json.load(f)
 
-    # Resolve base model: prefer explicit arg, fall back to adapter_config
-    resolved_base = base_model
-    if not resolved_base:
-        with open(adapter_cfg) as f:
-            acfg = json.load(f)
-        resolved_base = acfg.get("base_model_name_or_path", "")
-    if not resolved_base:
-        return
+    # 3. Recreate LoRA with same config (Unsloth handles MoE expert targeting)
+    print(f"  Applying LoRA: r={acfg.get('r')}, alpha={acfg.get('lora_alpha')}")
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=acfg.get("r", 64),
+        target_modules=acfg.get("target_modules", [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ]),
+        lora_alpha=acfg.get("lora_alpha", 128),
+        lora_dropout=acfg.get("lora_dropout", 0),
+        bias=acfg.get("bias", "none"),
+        use_gradient_checkpointing=acfg.get(
+            "use_gradient_checkpointing", "unsloth",
+        ),
+        use_rslora=acfg.get("use_rslora", False),
+    )
 
-    # Try local path first (already downloaded base model)
-    local_config = os.path.join(resolved_base, "config.json")
-    if os.path.exists(local_config):
-        import shutil
-        shutil.copy2(local_config, config_dst)
-        print(f"  Copied config.json from {resolved_base} -> {adapter_path}")
-        return
+    # 4. Load trained adapter weights
+    weight_file = os.path.join(adapter_path, "adapter_model.safetensors")
+    if os.path.exists(weight_file):
+        from safetensors.torch import load_file
+        state_dict = load_file(weight_file)
+        incompatible = model.load_state_dict(state_dict, strict=False)
+        loaded = len(state_dict) - len(incompatible.unexpected_keys)
+        print(f"  Loaded {loaded} adapter weight tensors from {weight_file}")
+        if incompatible.unexpected_keys:
+            print(f"  Warning: {len(incompatible.unexpected_keys)} unexpected keys")
+    else:
+        # Try pytorch bin format
+        bin_file = os.path.join(adapter_path, "adapter_model.bin")
+        if os.path.exists(bin_file):
+            state_dict = torch.load(bin_file, map_location="cpu", weights_only=True)
+            model.load_state_dict(state_dict, strict=False)
+            print(f"  Loaded adapter weights from {bin_file}")
+        else:
+            raise FileNotFoundError(
+                f"No adapter weights found in {adapter_path} "
+                f"(checked adapter_model.safetensors and adapter_model.bin)"
+            )
 
-    # Download from HF Hub
-    try:
-        from huggingface_hub import hf_hub_download
-        downloaded = hf_hub_download(resolved_base, "config.json")
-        import shutil
-        shutil.copy2(downloaded, config_dst)
-        print(f"  Downloaded config.json from {resolved_base} -> {adapter_path}")
-    except Exception as e:
-        print(f"  Warning: could not fetch config.json for {resolved_base}: {e}")
+    return model, tok
 
 
 def merge_and_export(
@@ -183,19 +214,12 @@ def merge_and_export(
 
     from unsloth import FastLanguageModel
 
-    # Ensure the adapter directory has config.json so Unsloth can resolve
-    # the model type. Adapter dirs only contain adapter_config.json + weights;
-    # newer Unsloth calls get_transformers_model_type() before detecting
-    # adapters, which fails without config.json.
-    _ensure_adapter_has_model_config(adapter_path, base_model)
-
-    # Load adapter directly through Unsloth (handles MoE LoRA internally).
-    # PeftModel.from_pretrained() can't find MoE expert targets on GPT-OSS,
-    # but FastLanguageModel reads adapter_config.json and applies correctly.
-    model, tok = FastLanguageModel.from_pretrained(
-        model_name=adapter_path,
-        max_seq_length=max_seq_length,
-        load_in_4bit=True,
+    # Load base model first, then apply adapter weights.
+    # FastLanguageModel.from_pretrained(adapter_path) fails on newer Unsloth
+    # because get_transformers_model_type() runs before adapter detection.
+    # Instead: load base model -> recreate LoRA -> load trained weights.
+    model, tok = _load_base_and_adapter(
+        FastLanguageModel, base_model, adapter_path, max_seq_length,
     )
 
     if tokenizer is None:
