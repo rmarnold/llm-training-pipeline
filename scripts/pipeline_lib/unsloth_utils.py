@@ -114,6 +114,52 @@ def save_adapter(
     print(f"Saved {save_method} to {output_dir}")
 
 
+def _ensure_adapter_has_model_config(adapter_path: str, base_model: str) -> None:
+    """Copy config.json from base model into adapter dir if missing.
+
+    Newer Unsloth versions call ``get_transformers_model_type()`` before
+    detecting that a path is an adapter, which requires config.json.
+    We copy it from the base model (or download it from HF Hub) so
+    Unsloth can resolve the model architecture.
+    """
+    import json
+    config_dst = os.path.join(adapter_path, "config.json")
+    adapter_cfg = os.path.join(adapter_path, "adapter_config.json")
+
+    if os.path.exists(config_dst):
+        return  # already present
+
+    if not os.path.exists(adapter_cfg):
+        return  # not an adapter directory
+
+    # Resolve base model: prefer explicit arg, fall back to adapter_config
+    resolved_base = base_model
+    if not resolved_base:
+        with open(adapter_cfg) as f:
+            acfg = json.load(f)
+        resolved_base = acfg.get("base_model_name_or_path", "")
+    if not resolved_base:
+        return
+
+    # Try local path first (already downloaded base model)
+    local_config = os.path.join(resolved_base, "config.json")
+    if os.path.exists(local_config):
+        import shutil
+        shutil.copy2(local_config, config_dst)
+        print(f"  Copied config.json from {resolved_base} -> {adapter_path}")
+        return
+
+    # Download from HF Hub
+    try:
+        from huggingface_hub import hf_hub_download
+        downloaded = hf_hub_download(resolved_base, "config.json")
+        import shutil
+        shutil.copy2(downloaded, config_dst)
+        print(f"  Downloaded config.json from {resolved_base} -> {adapter_path}")
+    except Exception as e:
+        print(f"  Warning: could not fetch config.json for {resolved_base}: {e}")
+
+
 def merge_and_export(
     base_model: str,
     adapter_path: str,
@@ -136,6 +182,12 @@ def merge_and_export(
         export_formats = ["hf"]
 
     from unsloth import FastLanguageModel
+
+    # Ensure the adapter directory has config.json so Unsloth can resolve
+    # the model type. Adapter dirs only contain adapter_config.json + weights;
+    # newer Unsloth calls get_transformers_model_type() before detecting
+    # adapters, which fails without config.json.
+    _ensure_adapter_has_model_config(adapter_path, base_model)
 
     # Load adapter directly through Unsloth (handles MoE LoRA internally).
     # PeftModel.from_pretrained() can't find MoE expert targets on GPT-OSS,
