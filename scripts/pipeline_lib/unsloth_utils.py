@@ -142,8 +142,14 @@ def _load_base_and_adapter(
         load_in_4bit=True,
     )
 
-    # 2. Read saved adapter config
+    # 2. Read saved adapter config (may be in adapter_path or adapter_path/final)
     adapter_cfg_path = os.path.join(adapter_path, "adapter_config.json")
+    if not os.path.exists(adapter_cfg_path):
+        final_path = os.path.join(adapter_path, "final")
+        if os.path.exists(os.path.join(final_path, "adapter_config.json")):
+            adapter_path = final_path
+            adapter_cfg_path = os.path.join(adapter_path, "adapter_config.json")
+            print(f"  Using adapter subdir: {adapter_path}")
     with open(adapter_cfg_path) as f:
         acfg = json.load(f)
 
