@@ -11,8 +11,8 @@ model:
 lora:
   r: 128  # Higher rank — agent behavior needs more capacity
   lora_alpha: 256
-  # GPT-OSS 20B MoE: singular names map to fused expert FFN layers.
-  # See lang_rust.yaml comment for details on why dense names fail.
+  # GPT-OSS 20B MoE: these configs are IGNORED for MoE models.
+  # apply_lora_config() auto-detects MoE and uses regex targeting.
   target_modules:
     - "q_proj"
     - "k_proj"
