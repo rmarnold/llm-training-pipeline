@@ -13,8 +13,8 @@ GPT-OSS 20B MoE Architecture:
 - Unsloth Bug #3405: default target modules miss expert layers entirely
 - Unsloth 2026.2.1 claims to handle MoE via singular names but PEFT matching
   still fails ("set target_parameters but found no matching parameters")
-- Fix: Use Unsloth for attention LoRA (works), then add expert LoRA via PEFT
-  directly with regex patterns matching the actual parameter structure.
+- Fix: Bypass Unsloth entirely for MoE models. Use PEFT's get_peft_model
+  directly with a combined regex matching both attention AND expert modules.
 - Save: PEFT native fallback when Unsloth validation fails (Bug #3701)
 
 Requires: pip install -e ".[gpt_oss]"
@@ -215,29 +215,26 @@ def apply_lora_config(
     The router/gate layers are NOT targeted — MoE routing stays frozen.
 
     For MoE models (GPT-OSS 20B):
-    - Step 1: Unsloth's get_peft_model for attention layers (q/k/v/o_proj)
-      This works correctly and gives us Unsloth's gradient checkpointing.
-    - Step 2: PEFT's add_adapter for expert FFN layers via regex.
-      Unsloth's built-in MoE handling is broken (singular names don't match
-      the actual plural parameter names), so we bypass it.
-    - Both adapters are set active so all LoRA params train together.
+    - Unsloth's get_peft_model is completely bypassed (its MoE handling
+      is broken — singular names don't match actual plural param names,
+      and add_adapter API is incompatible with Unsloth's wrapper).
+    - Instead, PEFT's get_peft_model is used directly with a single regex
+      that matches BOTH attention (q/k/v/o_proj) AND expert FFN layers
+      (experts.gate_up_projs.{idx}, experts.down_projs.{idx}).
+    - Gradient checkpointing is enabled manually.
+
+    For dense models:
+    - Unsloth's get_peft_model works correctly and is used as-is.
 
     Args:
         model: Unsloth model from load_unsloth_model().
         lora_config: Dict with r, lora_alpha, target_modules, etc.
             Typically loaded from YAML config.
-        auto_detect_moe: If True, auto-detect and add MoE expert LoRA via PEFT.
+        auto_detect_moe: If True, auto-detect MoE and use PEFT directly.
 
     Returns:
         Model with LoRA adapters applied.
     """
-    from unsloth import FastLanguageModel
-
-    target_modules = lora_config.get("target_modules", [
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
-    ])
-
     r = lora_config.get("r", 64)
     lora_alpha = lora_config.get("lora_alpha", 128)
     lora_dropout = lora_config.get("lora_dropout", 0)
@@ -247,31 +244,15 @@ def apply_lora_config(
     moe_info = detect_moe_experts(model) if auto_detect_moe else {"is_moe": False}
 
     if moe_info["is_moe"]:
-        # MoE model: use attention-only targets for Unsloth (works correctly)
-        attention_targets = [m for m in target_modules
-                            if m in ("q_proj", "k_proj", "v_proj", "o_proj")]
-        if not attention_targets:
-            attention_targets = ["q_proj", "k_proj", "v_proj", "o_proj"]
-
-        print(f"  MoE model: applying attention LoRA via Unsloth: {attention_targets}")
-        model = FastLanguageModel.get_peft_model(
-            model,
-            r=r,
-            target_modules=attention_targets,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            bias=bias,
-            use_gradient_checkpointing=lora_config.get("use_gradient_checkpointing", "unsloth"),
-            use_rslora=lora_config.get("use_rslora", False),
-        )
-
-        # Step 2: Add expert LoRA via PEFT directly (bypass Unsloth's broken MoE)
-        expert_regex = get_moe_expert_regex(model)
-        if expert_regex:
-            print(f"  Adding expert LoRA via PEFT: regex={expert_regex}")
-            _add_expert_lora(model, expert_regex, r, lora_alpha, lora_dropout, bias)
+        # MoE model: use PEFT directly (Unsloth's MoE LoRA is broken)
+        model = _apply_moe_lora_peft(model, lora_config, moe_info)
     else:
         # Dense model: let Unsloth handle everything
+        from unsloth import FastLanguageModel
+        target_modules = lora_config.get("target_modules", [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ])
         model = FastLanguageModel.get_peft_model(
             model,
             r=r,
@@ -286,46 +267,66 @@ def apply_lora_config(
     return model
 
 
-def _add_expert_lora(
+def _apply_moe_lora_peft(
     model: Any,
-    expert_regex: str,
-    r: int,
-    lora_alpha: int,
-    lora_dropout: float,
-    bias: str,
-) -> None:
-    """Add LoRA adapters to MoE expert layers using PEFT directly.
+    lora_config: dict[str, Any],
+    moe_info: dict[str, Any],
+) -> Any:
+    """Apply LoRA to MoE model using PEFT directly, bypassing Unsloth.
 
-    Bypasses Unsloth's broken MoE LoRA handling by using PEFT's
-    add_adapter() with regex-based target_modules.
+    Uses a single regex that matches both attention modules (by name suffix)
+    and expert FFN modules (by path pattern). PEFT's re.fullmatch on module
+    names is used, so we prefix with .* to match the full module path.
 
-    The expert adapter is named "expert_lora" and set active alongside
-    the default Unsloth adapter so both train together.
+    Attention: layers.N.self_attn.{q,k,v,o}_proj
+    Experts:   layers.N.mlp.experts.{gate_up_projs,down_projs}.{idx}
     """
-    from peft import LoraConfig
+    from peft import LoraConfig as PeftLoraConfig, get_peft_model
 
-    expert_config = LoraConfig(
-        r=r,
-        lora_alpha=lora_alpha,
-        target_modules=expert_regex,
-        lora_dropout=lora_dropout,
-        bias=bias,
+    r = lora_config.get("r", 64)
+    lora_alpha = lora_config.get("lora_alpha", 128)
+    lora_dropout = lora_config.get("lora_dropout", 0)
+    bias = lora_config.get("bias", "none")
+
+    # Build regex matching attention + expert modules
+    attention_pattern = "q_proj|k_proj|v_proj|o_proj"
+    expert_names = moe_info["expert_module_names"]
+    expert_names_pattern = "|".join(expert_names)
+    # .* prefix because PEFT uses re.fullmatch against full module path
+    # $ anchor to avoid matching sub-modules (e.g., .weight)
+    combined_regex = (
+        f".*({attention_pattern}|"
+        f"experts\\.({expert_names_pattern})\\.\\d+)$"
     )
 
-    # Get the PEFT model (may be wrapped by Unsloth)
-    peft_model = model
-    if hasattr(model, "model") and hasattr(model.model, "add_adapter"):
-        peft_model = model.model
+    print(f"  MoE PEFT direct mode:")
+    print(f"  Combined regex: {combined_regex}")
+    print(f"  Rank: {r}, Alpha: {lora_alpha}")
 
-    try:
-        peft_model.add_adapter("expert_lora", expert_config)
-        # Enable both adapters so all LoRA params are trainable
-        peft_model.set_adapter(["default", "expert_lora"])
-        print(f"  Expert LoRA adapter added successfully")
-    except Exception as e:
-        print(f"  WARNING: Failed to add expert LoRA adapter: {e}")
-        print(f"  Training will proceed with attention-only LoRA.")
-        print(f"  You can try adding expert LoRA manually with PEFT.")
+    config = PeftLoraConfig(
+        r=r,
+        lora_alpha=lora_alpha,
+        target_modules=combined_regex,
+        lora_dropout=lora_dropout,
+        bias=bias,
+        task_type="CAUSAL_LM",
+    )
+
+    # Enable input gradients (required for LoRA training)
+    model.enable_input_require_grads()
+
+    # Apply PEFT LoRA
+    model = get_peft_model(model, config)
+
+    # Enable gradient checkpointing (Unsloth's get_peft_model normally does this)
+    use_gc = lora_config.get("use_gradient_checkpointing", "unsloth")
+    if use_gc:
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        print(f"  Gradient checkpointing: enabled (reentrant=False)")
+
+    return model
 
 
 def save_adapter(
