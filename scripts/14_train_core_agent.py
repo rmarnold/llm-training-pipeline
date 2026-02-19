@@ -139,6 +139,13 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         processing_class=tokenizer,
     )
 
+    # Register Drive checkpoint callback for Colab session recovery
+    if cli_overrides.get("drive_checkpoint_backup", False):
+        from pipeline_lib.checkpoint_callback import make_drive_checkpoint_callback
+        cb = make_drive_checkpoint_callback(output_dir)
+        if cb:
+            trainer.add_callback(cb)
+
     print(f"\nStarting training...")
     print(f"  Output: {output_dir}")
     print(f"  Epochs: {training_args.num_train_epochs}")
@@ -175,13 +182,16 @@ if __name__ == "__main__":
     parser.add_argument("--train_data_path", type=str)
     parser.add_argument("--val_data_path", type=str)
     parser.add_argument("--resume_from_checkpoint", type=str)
+    parser.add_argument("--drive_checkpoint_backup", action="store_true",
+                        help="Back up each checkpoint to Drive (Colab recovery)")
     args = parser.parse_args()
 
     cli_overrides = {}
     for key in ["max_steps", "num_train_epochs", "learning_rate", "warmup_ratio",
                  "per_device_train_batch_size", "gradient_accumulation_steps",
                  "save_steps", "eval_steps", "logging_steps", "output_dir",
-                 "train_data_path", "val_data_path", "resume_from_checkpoint"]:
+                 "train_data_path", "val_data_path", "resume_from_checkpoint",
+                 "drive_checkpoint_backup"]:
         val = getattr(args, key)
         if val is not None:
             cli_overrides[key] = val
