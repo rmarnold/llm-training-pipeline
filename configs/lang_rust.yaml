@@ -9,13 +9,17 @@ model:
 lora:
   r: 64  # Rank for language adapter
   lora_alpha: 128  # 2x rank
+  # GPT-OSS 20B MoE: use singular names (gate_up_proj, down_proj) which
+  # Unsloth maps to the fused expert FFN layers (gate_up_projs, down_projs).
+  # The old dense names (gate_proj, up_proj, down_proj) silently miss expert
+  # layers entirely — only attention gets LoRA (31.8M vs ~200M+ params).
+  # Note: apply_lora_config() also auto-detects MoE and fixes targets at runtime.
   target_modules:
     - "q_proj"
     - "k_proj"
     - "v_proj"
     - "o_proj"
-    - "gate_proj"
-    - "up_proj"
+    - "gate_up_proj"
     - "down_proj"
   lora_dropout: 0
   bias: "none"

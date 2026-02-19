@@ -11,13 +11,14 @@ model:
 lora:
   r: 128  # Higher rank — agent behavior needs more capacity
   lora_alpha: 256
+  # GPT-OSS 20B MoE: singular names map to fused expert FFN layers.
+  # See lang_rust.yaml comment for details on why dense names fail.
   target_modules:
     - "q_proj"
     - "k_proj"
     - "v_proj"
     - "o_proj"
-    - "gate_proj"
-    - "up_proj"
+    - "gate_up_proj"
     - "down_proj"
   lora_dropout: 0
   bias: "none"
