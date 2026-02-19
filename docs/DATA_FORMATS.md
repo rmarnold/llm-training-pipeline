@@ -350,6 +350,58 @@ python scripts/15_generate_trajectories.py --max_samples 5000
 
 ---
 
+---
+
+## 6. MoE Expert LoRA Configuration (GPT-OSS 20B)
+
+GPT-OSS 20B uses Mixture of Experts (MoE) with fused expert FFN layers. Standard LoRA target module names miss expert layers entirely.
+
+### Correct Target Modules
+
+```yaml
+# configs/lang_rust.yaml or core_agent.yaml
+lora:
+  target_modules:
+    - "q_proj"        # Attention query
+    - "k_proj"        # Attention key
+    - "v_proj"        # Attention value
+    - "o_proj"        # Attention output
+    - "gate_up_proj"  # MoE expert FFN (singular — Unsloth maps to fused experts)
+    - "down_proj"     # MoE expert FFN (singular — Unsloth maps to fused experts)
+```
+
+### Wrong Target Modules (common mistake)
+
+```yaml
+# These SILENTLY MISS expert layers on MoE models:
+target_modules:
+  - "gate_proj"   # Dense model FFN — does NOT match MoE gate_up_projs
+  - "up_proj"     # Dense model FFN — does NOT match MoE gate_up_projs
+  - "down_proj"   # Happens to share name but doesn't target expert copies
+```
+
+### Auto-Detection
+
+`apply_lora_config()` in `pipeline_lib/unsloth_utils.py` auto-detects MoE architecture and corrects target modules at runtime (`auto_detect_moe=True` by default). The YAML configs are also updated, so both paths are covered.
+
+### Verification
+
+```python
+from pipeline_lib.unsloth_utils import verify_expert_lora
+result = verify_expert_lora(model)
+# result["has_expert_lora"] should be True
+# Expect ~200M+ trainable params (vs ~31.8M attention-only)
+```
+
+### Known Bugs
+
+| Bug | Effect | Workaround |
+|-----|--------|------------|
+| Unsloth #3405 | Default target modules miss MoE experts | Use singular names + auto-detection |
+| Unsloth #3701 | Save validation fails with expert LoRA | PEFT native save fallback in `save_adapter()` |
+
+---
+
 ## Common Issues
 
 ### 1. Missing Fields

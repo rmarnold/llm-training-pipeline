@@ -132,14 +132,16 @@ python scripts/12_check_gates.py dpo
 
 ### GPT-OSS 20B Rust Agent (Scripts 13-19)
 
-A separate 4-phase pipeline for training a Rust coding agent on GPT-OSS 20B (MoE, ~3.6B active params):
+A separate 4-phase pipeline for training a Rust coding agent on GPT-OSS 20B (MoE, ~3.6B active params, 32 experts/layer, top-4 routing):
 
 1. **Lang Adapter** — QLoRA (rank 64) for Rust syntax, stdlib, and idioms
 2. **Core Agent SFT** — Higher-rank LoRA (128) on agent trajectories with tool use (Harmony format)
 3. **IPO** — Identity Preference Optimisation on ranked pairs (very low LR, 1 epoch)
 4. **GRPO RL** — Group Relative Policy Optimisation with execution rewards (cargo check/test/clippy)
 
-See `notebooks/train_gpt_oss_rust_agent.ipynb` for the interactive Colab walkthrough.
+**MoE Expert LoRA**: GPT-OSS uses fused expert FFN layers (`gate_up_projs`/`down_projs`). Standard LoRA target names miss these entirely (Unsloth Bug #3405). The pipeline auto-detects MoE architecture and uses correct singular names (`gate_up_proj`/`down_proj`) that Unsloth maps to expert layers. A PEFT save fallback handles Unsloth's MoE save validation bug (#3701). Run the MoE diagnostic cell in the notebook before training to verify expert LoRA is applied (~200M+ trainable params vs ~31.8M attention-only).
+
+See `notebooks/train_gpt_oss_coding_tui.ipynb` for the interactive Colab walkthrough with GPU auto-config, MoE diagnostics, and quality gates.
 
 ## GPU Support
 

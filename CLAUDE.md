@@ -73,13 +73,21 @@ Promotion gates (`configs/promotion_gates.yaml`) define thresholds for advancing
 - **Deprecated**: `production_pretrain.py` and `full_model_pretrain.py` — use `05_pretrain.py` instead
 
 ### GPT-OSS 20B Rust Agent (scripts 13-19)
-- **Base model**: GPT-OSS 20B MoE (~3.6B active params), architecture in `configs/gpt_oss_20b.py`
+- **Base model**: GPT-OSS 20B MoE (~3.6B active params, 32 experts/layer, top-4 routing), architecture in `configs/gpt_oss_20b.py`
 - **Unsloth** for QLoRA training; all scripts use `pipeline_lib/unsloth_utils.py`
 - **Harmony format** (`dataset_formatters/harmony.py`): Required for all GPT-OSS training data. Supports tool calls, thinking fields, multi-turn agent traces.
 - **Config-first**: All scripts load YAML configs and accept CLI overrides (e.g. `--max_steps`, `--per_device_train_batch_size`)
 - **Rust toolchain required**: `cargo`, `cargo-mutants` for mutation generation and evaluation
 - **Evaluation metrics**: `cargo_check_pass_rate`, `cargo_test_pass_rate`, `clippy_clean_rate` with targets in `configs/rust_eval.yaml`
-- **Notebook**: `notebooks/train_gpt_oss_rust_agent.ipynb` — Colab companion with GPU tier auto-config
+- **Notebook**: `notebooks/train_gpt_oss_coding_tui.ipynb` — Colab companion with GPU tier auto-config, MoE diagnostic, quality gates
+- **Coding TUI notebook**: `notebooks/train_gpt_oss_coding_tui.ipynb` — 4-phase pipeline (Tool Calling SFT → Agent SFT → IPO → GRPO) with non-blocking quality gates
+
+### MoE Expert LoRA (Critical for GPT-OSS 20B)
+- **Unsloth Bug #3405**: Default target modules (`gate_proj`, `up_proj`, `down_proj`) silently miss MoE expert FFN layers. Only attention gets LoRA (~31.8M params), experts (~19B params) stay frozen.
+- **Fix**: Use singular names (`gate_up_proj`, `down_proj`) which Unsloth maps to fused expert layers. `apply_lora_config()` auto-detects MoE and corrects targets at runtime.
+- **Unsloth Bug #3701**: Save validation fails when expert modules are targeted. `save_adapter()` catches this and falls back to PEFT's native `save_pretrained()`.
+- **Diagnostic**: Notebook cell 26 loads model, applies test LoRA, verifies expert layers have adapters before training starts.
+- **Verify with**: `verify_expert_lora(model)` — returns `has_expert_lora: True` if working correctly. Expect trainable params to jump from ~31.8M to ~200M+.
 
 ### Data Formats
 - **Pretraining**: Packed `.npy` (shape: `N x seq_length`, int64) or HF Datasets with `input_ids`
