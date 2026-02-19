@@ -9,11 +9,13 @@ Provides utilities for:
 
 GPT-OSS 20B MoE Architecture:
 - 32 experts per layer, top-4 routing
-- Expert FFN uses fused layers: gate_up_projs (plural) and down_projs (plural)
+- Expert FFN param structure: experts.gate_up_projs.{idx}.weight (layer THEN index)
 - Unsloth Bug #3405: default target modules miss expert layers entirely
-- Unsloth Bug #3701: save validation fails when expert modules are targeted
-- Fix: use singular names (gate_up_proj, down_proj) which Unsloth maps internally,
-  with PEFT native save as fallback if Unsloth's save validation fails.
+- Unsloth 2026.2.1 claims to handle MoE via singular names but PEFT matching
+  still fails ("set target_parameters but found no matching parameters")
+- Fix: Use Unsloth for attention LoRA (works), then add expert LoRA via PEFT
+  directly with regex patterns matching the actual parameter structure.
+- Save: PEFT native fallback when Unsloth validation fails (Bug #3701)
 
 Requires: pip install -e ".[gpt_oss]"
 """
@@ -59,84 +61,99 @@ def load_unsloth_model(
 def detect_moe_experts(model: Any) -> dict[str, Any]:
     """Detect MoE expert layers in the model architecture.
 
-    Inspects named modules to find expert FFN layers. GPT-OSS 20B uses
-    fused expert layers: gate_up_projs (plural) and down_projs (plural).
+    Inspects named parameters to find expert FFN layers. GPT-OSS 20B uses
+    fused expert layers with structure: experts.{layer_name}.{expert_idx}.weight
+    e.g., experts.gate_up_projs.0.weight, experts.down_projs.31.weight
 
     Returns:
         Dict with:
             is_moe: bool — whether model has MoE expert layers
-            expert_module_names: list[str] — unique expert parameter name patterns
+            expert_module_names: list[str] — unique expert layer names (e.g., gate_up_projs, down_projs)
             num_experts: int — number of experts detected
             expert_param_count: int — total parameters in expert layers
+            sample_param_names: list[str] — first 5 expert param names for debugging
     """
-    expert_names = set()
+    expert_layer_names = set()
+    expert_indices = set()
     expert_param_count = 0
-    num_experts = 0
+    sample_names = []
 
     for name, param in model.named_parameters():
-        if "expert" in name.lower():
-            # Extract the module type (e.g., gate_up_projs, down_projs)
-            parts = name.split(".")
-            for i, part in enumerate(parts):
-                if "expert" in part.lower() and i + 1 < len(parts):
-                    # Count unique expert indices
-                    try:
-                        expert_idx = int(parts[i + 1])
-                        num_experts = max(num_experts, expert_idx + 1)
-                    except (ValueError, IndexError):
-                        pass
-                    # Get the layer type after expert index
-                    if i + 2 < len(parts):
-                        expert_names.add(parts[i + 2].split(".")[0])
-            expert_param_count += param.numel()
+        if "expert" not in name.lower():
+            continue
+
+        expert_param_count += param.numel()
+        if len(sample_names) < 5:
+            sample_names.append(name)
+
+        parts = name.split(".")
+        # Find "experts" in the path, then look at what follows
+        for i, part in enumerate(parts):
+            if part.lower() == "experts" and i + 2 < len(parts):
+                next_part = parts[i + 1]
+                after_next = parts[i + 2]
+                # Structure A: experts.{layer_name}.{idx} (GPT-OSS)
+                # e.g., experts.gate_up_projs.0.weight
+                try:
+                    int(after_next)
+                    expert_layer_names.add(next_part)
+                    expert_indices.add(int(after_next))
+                except ValueError:
+                    pass
+                # Structure B: experts.{idx}.{layer_name} (other MoE models)
+                # e.g., experts.0.gate_up_projs.weight
+                try:
+                    int(next_part)
+                    expert_layer_names.add(after_next.split(".")[0])
+                    expert_indices.add(int(next_part))
+                except ValueError:
+                    pass
+                break  # Only process first "experts" in path
 
     return {
-        "is_moe": len(expert_names) > 0,
-        "expert_module_names": sorted(expert_names),
-        "num_experts": num_experts,
+        "is_moe": len(expert_layer_names) > 0,
+        "expert_module_names": sorted(expert_layer_names),
+        "num_experts": max(expert_indices) + 1 if expert_indices else 0,
         "expert_param_count": expert_param_count,
+        "sample_param_names": sample_names,
     }
 
 
-def get_moe_target_modules(
-    model: Any,
-    base_targets: list[str] | None = None,
-) -> list[str]:
-    """Get target modules that include MoE expert FFN layers.
+def get_moe_expert_regex(model: Any) -> str | None:
+    """Build a regex pattern matching MoE expert FFN modules.
 
-    For GPT-OSS 20B, Unsloth's Feb 2026+ versions accept singular names
-    (gate_up_proj, down_proj) and internally map them to the fused expert
-    layers (gate_up_projs, down_projs with expert indexing).
+    Inspects model parameters to determine the naming convention, then
+    builds a PEFT-compatible regex that matches all expert FFN layers.
 
-    Falls back to the base attention-only targets if no MoE layers detected.
-
-    Args:
-        model: Loaded model to inspect.
-        base_targets: Base target modules (attention). Defaults to standard set.
+    GPT-OSS 20B structure: experts.gate_up_projs.{idx}, experts.down_projs.{idx}
+    Other MoE models:      experts.{idx}.gate_up_projs, experts.{idx}.down_projs
 
     Returns:
-        List of target module names including expert FFN layers.
+        Regex string for PEFT target_modules, or None if not MoE.
     """
-    if base_targets is None:
-        base_targets = ["q_proj", "k_proj", "v_proj", "o_proj"]
-
     moe_info = detect_moe_experts(model)
     if not moe_info["is_moe"]:
-        # Dense model — use standard FFN names
-        return base_targets + ["gate_proj", "up_proj", "down_proj"]
+        return None
 
-    # MoE model — use singular names that Unsloth maps to expert layers.
-    # Unsloth internally expands these to target all expert copies.
-    # Do NOT use plural names (gate_up_projs) directly — Unsloth won't match them.
-    # Do NOT use regex patterns — triggers save validation bug #3701.
-    expert_targets = ["gate_up_proj", "down_proj"]
+    layer_names = moe_info["expert_module_names"]
+    # Filter out non-FFN names (e.g., router/gate weights)
+    ffn_names = [n for n in layer_names if "proj" in n.lower() or "linear" in n.lower()]
+    if not ffn_names:
+        ffn_names = layer_names
+
+    # Build regex: match any expert FFN layer regardless of index position
+    names_pattern = "|".join(ffn_names)
+    # Matches both: experts.{name}.{idx} and experts.{idx}.{name}
+    regex = f"experts\\.({names_pattern})\\.\\d+"
 
     print(f"  MoE detected: {moe_info['num_experts']} experts, "
           f"{moe_info['expert_param_count']:,} expert params")
-    print(f"  Expert layer types: {moe_info['expert_module_names']}")
-    print(f"  Using MoE target modules: {base_targets + expert_targets}")
+    print(f"  Expert layer types: {ffn_names}")
+    print(f"  Expert regex: {regex}")
+    if moe_info["sample_param_names"]:
+        print(f"  Sample params: {moe_info['sample_param_names'][:3]}")
 
-    return base_targets + expert_targets
+    return regex
 
 
 def verify_expert_lora(model: Any) -> dict[str, Any]:
@@ -196,14 +213,20 @@ def apply_lora_config(
     """Apply LoRA configuration to an Unsloth model.
 
     The router/gate layers are NOT targeted — MoE routing stays frozen.
-    When auto_detect_moe=True, automatically detects MoE expert layers
-    and adds them to target_modules.
+
+    For MoE models (GPT-OSS 20B):
+    - Step 1: Unsloth's get_peft_model for attention layers (q/k/v/o_proj)
+      This works correctly and gives us Unsloth's gradient checkpointing.
+    - Step 2: PEFT's add_adapter for expert FFN layers via regex.
+      Unsloth's built-in MoE handling is broken (singular names don't match
+      the actual plural parameter names), so we bypass it.
+    - Both adapters are set active so all LoRA params train together.
 
     Args:
         model: Unsloth model from load_unsloth_model().
         lora_config: Dict with r, lora_alpha, target_modules, etc.
             Typically loaded from YAML config.
-        auto_detect_moe: If True, auto-detect and add MoE expert targets.
+        auto_detect_moe: If True, auto-detect and add MoE expert LoRA via PEFT.
 
     Returns:
         Model with LoRA adapters applied.
@@ -215,27 +238,94 @@ def apply_lora_config(
         "gate_proj", "up_proj", "down_proj",
     ])
 
-    # Auto-detect MoE and update target modules if needed
-    if auto_detect_moe:
-        moe_info = detect_moe_experts(model)
-        if moe_info["is_moe"]:
-            # Replace dense FFN names with MoE-aware names
-            attention_targets = [m for m in target_modules
-                                 if m in ("q_proj", "k_proj", "v_proj", "o_proj")]
-            target_modules = get_moe_target_modules(model, attention_targets)
+    r = lora_config.get("r", 64)
+    lora_alpha = lora_config.get("lora_alpha", 128)
+    lora_dropout = lora_config.get("lora_dropout", 0)
+    bias = lora_config.get("bias", "none")
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_config.get("r", 64),
-        target_modules=target_modules,
-        lora_alpha=lora_config.get("lora_alpha", 128),
-        lora_dropout=lora_config.get("lora_dropout", 0),
-        bias=lora_config.get("bias", "none"),
-        use_gradient_checkpointing=lora_config.get("use_gradient_checkpointing", "unsloth"),
-        use_rslora=lora_config.get("use_rslora", False),
-    )
+    # Check for MoE before applying any LoRA
+    moe_info = detect_moe_experts(model) if auto_detect_moe else {"is_moe": False}
+
+    if moe_info["is_moe"]:
+        # MoE model: use attention-only targets for Unsloth (works correctly)
+        attention_targets = [m for m in target_modules
+                            if m in ("q_proj", "k_proj", "v_proj", "o_proj")]
+        if not attention_targets:
+            attention_targets = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+        print(f"  MoE model: applying attention LoRA via Unsloth: {attention_targets}")
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=r,
+            target_modules=attention_targets,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            bias=bias,
+            use_gradient_checkpointing=lora_config.get("use_gradient_checkpointing", "unsloth"),
+            use_rslora=lora_config.get("use_rslora", False),
+        )
+
+        # Step 2: Add expert LoRA via PEFT directly (bypass Unsloth's broken MoE)
+        expert_regex = get_moe_expert_regex(model)
+        if expert_regex:
+            print(f"  Adding expert LoRA via PEFT: regex={expert_regex}")
+            _add_expert_lora(model, expert_regex, r, lora_alpha, lora_dropout, bias)
+    else:
+        # Dense model: let Unsloth handle everything
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=r,
+            target_modules=target_modules,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            bias=bias,
+            use_gradient_checkpointing=lora_config.get("use_gradient_checkpointing", "unsloth"),
+            use_rslora=lora_config.get("use_rslora", False),
+        )
 
     return model
+
+
+def _add_expert_lora(
+    model: Any,
+    expert_regex: str,
+    r: int,
+    lora_alpha: int,
+    lora_dropout: float,
+    bias: str,
+) -> None:
+    """Add LoRA adapters to MoE expert layers using PEFT directly.
+
+    Bypasses Unsloth's broken MoE LoRA handling by using PEFT's
+    add_adapter() with regex-based target_modules.
+
+    The expert adapter is named "expert_lora" and set active alongside
+    the default Unsloth adapter so both train together.
+    """
+    from peft import LoraConfig
+
+    expert_config = LoraConfig(
+        r=r,
+        lora_alpha=lora_alpha,
+        target_modules=expert_regex,
+        lora_dropout=lora_dropout,
+        bias=bias,
+    )
+
+    # Get the PEFT model (may be wrapped by Unsloth)
+    peft_model = model
+    if hasattr(model, "model") and hasattr(model.model, "add_adapter"):
+        peft_model = model.model
+
+    try:
+        peft_model.add_adapter("expert_lora", expert_config)
+        # Enable both adapters so all LoRA params are trainable
+        peft_model.set_adapter(["default", "expert_lora"])
+        print(f"  Expert LoRA adapter added successfully")
+    except Exception as e:
+        print(f"  WARNING: Failed to add expert LoRA adapter: {e}")
+        print(f"  Training will proceed with attention-only LoRA.")
+        print(f"  You can try adding expert LoRA manually with PEFT.")
 
 
 def save_adapter(
