@@ -214,7 +214,7 @@ def _build_moe_regex(moe_info: dict[str, Any]) -> str:
     PEFT uses re.fullmatch against full module paths, so we prefix with .*.
     The $ anchor avoids matching sub-modules (e.g., .weight).
 
-    Returns regex like: .*(q_proj|k_proj|v_proj|o_proj|experts\.(down_projs|gate_up_projs)\.\d+)$
+    Returns regex like: ``.*(<attn>|experts\\.(<expert>)\\.\\d+)$``
     """
     attention_pattern = "q_proj|k_proj|v_proj|o_proj"
     expert_names = moe_info["expert_module_names"]
