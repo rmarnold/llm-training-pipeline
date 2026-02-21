@@ -622,8 +622,10 @@ def unpack_moe_expert_tensors(save_path: str) -> bool:
     config = AutoConfig.from_pretrained(save_path)
     with torch.device("meta"):
         ref_model = AutoModelForCausalLM.from_config(config)
-    expected_keys = set(ref_model.state_dict().keys())
-    del ref_model
+    ref_state = ref_model.state_dict()
+    expected_keys = set(ref_state.keys())
+    expected_shapes = {k: tuple(v.shape) for k, v in ref_state.items()}
+    del ref_model, ref_state
 
     missing = sorted(expected_keys - actual_keys)
     extra = sorted(actual_keys - expected_keys)
@@ -813,8 +815,20 @@ def unpack_moe_expert_tensors(save_path: str) -> bool:
                         new_tensors[key] = tensor
                         continue
 
+                    # Unsloth stores expert weights in bmm convention
+                    # [in_features, out_features] but HF expects [out_features, in_features].
+                    # Check first chunk against expected shape and transpose if needed.
+                    need_transpose = False
+                    sample_key = target_keys[0]
+                    if sample_key in expected_shapes:
+                        exp_shape = expected_shapes[sample_key]
+                        chunk_shape = tuple(chunks[0].shape)
+                        if chunk_shape != exp_shape and chunk_shape == exp_shape[::-1]:
+                            need_transpose = True
+                            print(f"      Transposing: {list(chunk_shape)} -> {list(exp_shape)}")
+
                     for chunk, target_key in zip(chunks, target_keys):
-                        new_tensors[target_key] = chunk
+                        new_tensors[target_key] = chunk.T if need_transpose else chunk
                         new_weight_map[target_key] = shard_file
                     total_created += len(target_keys)
 
