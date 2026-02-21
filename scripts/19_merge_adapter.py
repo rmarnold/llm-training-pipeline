@@ -92,9 +92,9 @@ def _run_smoke_test(
     """Run a quick generation test on the merged model.
 
     Uses standard HuggingFace AutoModelForCausalLM to verify the merged
-    model loads correctly (after fix_unsloth_moe_keys has corrected any
-    Unsloth-internal key renames). Falls back to Unsloth if standard
-    loading fails.
+    model loads correctly (after unpack_moe_expert_tensors has unpacked
+    Unsloth's batched expert weights into individual tensors). Falls back
+    to Unsloth if standard loading fails.
     """
     import torch
     print(f"\nRunning smoke test...")

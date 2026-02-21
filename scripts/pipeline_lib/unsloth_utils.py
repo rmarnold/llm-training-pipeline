@@ -567,129 +567,259 @@ def _load_base_and_adapter(
     return model, tok
 
 
-def fix_unsloth_moe_keys(save_path: str, original_model_name: str) -> bool:
-    """Fix MoE key naming in Unsloth-merged safetensors.
+def unpack_moe_expert_tensors(save_path: str) -> bool:
+    """Unpack Unsloth's packed MoE expert tensors into standard HF format.
 
-    Unsloth internally renames MoE router weights (e.g., gate -> router).
-    When it saves the merged model, these internal names persist, causing
-    standard HuggingFace model loaders to miss the router weights (they
-    get randomly initialized instead of loaded).
+    After Unsloth merges LoRA into an MoE model and dequantizes MXFP4 to bf16,
+    the expert FFN weights are saved in Unsloth's internal packed format: all
+    experts' weights batched into single large tensors (e.g., 32 experts'
+    down_proj stacked into one 'down_proj_blocks' tensor of shape
+    [num_experts * dim, ...]). Standard HuggingFace model loaders expect
+    individual per-expert tensors (down_projs.0.weight, down_projs.1.weight, ...).
 
-    This compares the merged model's keys against the original model's
-    keys and renames any mismatches back to the original names.
+    This function:
+    1. Determines expected key format from the model architecture (not the
+       original MXFP4 model, which has different key names).
+    2. Identifies packed tensors, quantization artifacts, and misnamed keys.
+    3. Unpacks batched tensors into individual expert weights.
+    4. Removes MXFP4 scale artifacts (*_scales tensors).
+    5. Fixes router key naming (router.weight -> router.linear.weight).
+
+    Note: The previous fix_unsloth_moe_keys() compared against the original
+    MXFP4 model's HF Hub index, which has _blocks-suffixed keys. This caused
+    it to INCORRECTLY rename attention layer keys (e.g., self_attn.down_proj
+    -> self_attn.down_proj_blocks). This function avoids that by using the
+    architecture's own expected state_dict keys.
 
     Args:
-        save_path: Path to the merged model directory (with safetensors).
-        original_model_name: HuggingFace model ID (e.g., "openai/gpt-oss-20b").
+        save_path: Path to the merged model directory (with safetensors + config.json).
 
     Returns:
         True if any fixes were applied.
     """
     import json
+    import re
+    from collections import defaultdict
 
-    # Read merged model's safetensors index
-    merged_index_path = os.path.join(save_path, "model.safetensors.index.json")
-    if not os.path.exists(merged_index_path):
+    # Read safetensors index
+    index_path = os.path.join(save_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
         single_path = os.path.join(save_path, "model.safetensors")
         if os.path.exists(single_path):
-            print(f"  Single safetensors file (no index), skipping key fix")
+            print(f"  Single safetensors file (no index), skipping")
         else:
-            print(f"  No safetensors found at {save_path}, skipping key fix")
+            print(f"  No safetensors found at {save_path}, skipping")
         return False
 
-    with open(merged_index_path) as f:
-        merged_index = json.load(f)
-    merged_keys = set(merged_index["weight_map"].keys())
+    with open(index_path) as f:
+        index = json.load(f)
+    weight_map = index["weight_map"]
+    actual_keys = set(weight_map.keys())
 
-    # Get original model's key names from HF Hub
-    try:
-        from huggingface_hub import hf_hub_download
-        orig_index_path = hf_hub_download(
-            original_model_name, "model.safetensors.index.json"
-        )
-        with open(orig_index_path) as f:
-            original_index = json.load(f)
-        original_keys = set(original_index["weight_map"].keys())
-    except Exception as e:
-        print(f"  Could not get original model index: {e}")
+    # Get expected keys from the model architecture (on meta device = no memory)
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.from_pretrained(save_path)
+    with torch.device("meta"):
+        ref_model = AutoModelForCausalLM.from_config(config)
+    expected_keys = set(ref_model.state_dict().keys())
+    del ref_model
+
+    missing = sorted(expected_keys - actual_keys)
+    extra = sorted(actual_keys - expected_keys)
+
+    if not missing and not extra:
+        print(f"  All keys match expected format — no fixes needed")
         return False
 
-    # Find mismatched keys
-    merged_only = sorted(merged_keys - original_keys)
-    original_only = set(original_keys - merged_keys)
+    print(f"  Key mismatch: {len(missing)} missing, {len(extra)} extra vs expected architecture")
 
-    if not merged_only:
-        print(f"  All merged keys match original model — no fixes needed")
-        return False
+    # Get num_experts from config
+    num_experts = getattr(config, "num_local_experts",
+                          getattr(config, "num_experts", None))
+    if num_experts is None:
+        # Try nested config
+        for attr in ["moe", "mixture_of_experts"]:
+            sub = getattr(config, attr, None)
+            if sub and hasattr(sub, "num_experts"):
+                num_experts = sub.num_experts
+                break
+    if num_experts is None:
+        print(f"  Could not determine num_experts from config, trying 32")
+        num_experts = 32
 
-    print(f"  Found {len(merged_only)} Unsloth-renamed keys")
+    # === Build transformation plan ===
+    # Map each extra key to its transform: rename, split, or remove
+    transforms = {}  # extra_key -> (op_type, op_data)
+    remaining_missing = set(missing)
+    remaining_extra = set(extra)
 
-    # Build rename map: match by layer structure (exactly 1 differing part)
-    rename_map = {}
-    for m_key in merged_only:
-        m_parts = m_key.split(".")
-        best_match = None
+    # --- 1. Simple renames (1:1 key mapping) ---
+    # e.g., router.weight -> router.linear.weight
+    for e_key in list(remaining_extra):
+        candidates = []
+        # Router module: router.weight -> router.linear.weight
+        if ".router.weight" in e_key and ".router.linear." not in e_key:
+            candidates.append(e_key.replace(".router.weight", ".router.linear.weight"))
+        if ".router.bias" in e_key and ".router.linear." not in e_key:
+            candidates.append(e_key.replace(".router.bias", ".router.linear.bias"))
 
-        for o_key in sorted(original_only):
-            o_parts = o_key.split(".")
-            if len(m_parts) != len(o_parts):
-                continue
-            diffs = [i for i, (m, o) in enumerate(zip(m_parts, o_parts)) if m != o]
-            if len(diffs) == 1:
-                best_match = o_key
+        for candidate in candidates:
+            if candidate in remaining_missing:
+                transforms[e_key] = ("rename", candidate)
+                remaining_missing.discard(candidate)
+                remaining_extra.discard(e_key)
                 break
 
-        if best_match:
-            rename_map[m_key] = best_match
-            original_only.discard(best_match)
+    # --- 2. Packed -> unpacked (1:N tensor splits) ---
+    # Group missing keys by expert pattern to find groups of N experts
+    # e.g., model.layers.0.mlp.experts.down_projs.{0-31}.weight
+    missing_groups = defaultdict(list)
+    for key in remaining_missing:
+        # Replace expert index with placeholder
+        pattern_key = re.sub(r"(\.experts\.\w+)\.(\d+)\.", r"\1.{E}.", key)
+        missing_groups[pattern_key].append(key)
 
-    if not rename_map:
-        print(f"  Could not determine key mapping — manual investigation needed")
-        print(f"  Unsloth keys: {merged_only[:5]}")
+    for pattern, group_keys in missing_groups.items():
+        if len(group_keys) != num_experts:
+            continue  # Not a complete expert group
+
+        # Determine the packed key name from the pattern
+        # Pattern: "model.layers.0.mlp.experts.down_projs.{E}.weight"
+        # Packed:  "model.layers.0.mlp.experts.down_proj_blocks"
+        # Also try: "model.layers.0.mlp.experts.down_proj" (without _blocks)
+        m = re.match(r"(.+\.experts\.)(\w+)s\.\{E\}\.(weight|bias)", pattern)
+        if not m:
+            continue
+
+        prefix = m.group(1)      # model.layers.0.mlp.experts.
+        proj_name = m.group(2)   # down_proj or gate_up_proj
+        param_type = m.group(3)  # weight or bias
+
+        # Try multiple packed key naming conventions
+        packed_candidates = [
+            f"{prefix}{proj_name}_blocks",          # down_proj_blocks (Unsloth MXFP4)
+            f"{prefix}{proj_name}",                  # down_proj (Unsloth may drop _blocks)
+            f"{prefix}{proj_name}_{param_type}s",    # down_proj_weights (alternative)
+        ]
+
+        for packed_key in packed_candidates:
+            if packed_key in remaining_extra:
+                sorted_keys = sorted(group_keys,
+                    key=lambda k: int(re.search(r"\.(\d+)\.", k).group(1)))
+                transforms[packed_key] = ("split", sorted_keys)
+                remaining_extra.discard(packed_key)
+                for k in sorted_keys:
+                    remaining_missing.discard(k)
+                break
+
+    # --- 3. Scale artifacts to remove ---
+    for e_key in list(remaining_extra):
+        if re.match(r".*\.experts\.\w+_scales$", e_key):
+            transforms[e_key] = ("remove", None)
+            remaining_extra.discard(e_key)
+
+    # Report plan
+    renames = sum(1 for v in transforms.values() if v[0] == "rename")
+    splits = sum(1 for v in transforms.values() if v[0] == "split")
+    removes = sum(1 for v in transforms.values() if v[0] == "remove")
+
+    print(f"  Transform plan: {splits} unpack, {renames} rename, {removes} remove")
+
+    if remaining_missing:
+        # Show a sample of unresolved missing keys
+        sample = list(remaining_missing)[:5]
+        print(f"  Note: {len(remaining_missing)} expected keys not in merged output (likely zero-init biases):")
+        for k in sample:
+            print(f"    {k}")
+        if len(remaining_missing) > 5:
+            print(f"    ... and {len(remaining_missing) - 5} more")
+
+    if remaining_extra:
+        sample = list(remaining_extra)[:5]
+        print(f"  WARNING: {len(remaining_extra)} extra keys not handled:")
+        for k in sample:
+            print(f"    {k}")
+
+    if not transforms:
+        print(f"  No transforms to apply")
         return False
 
-    # Log the rename pattern
-    sample_old, sample_new = next(iter(rename_map.items()))
-    old_parts = sample_old.split(".")
-    new_parts = sample_new.split(".")
-    diff_idx = [i for i, (a, b) in enumerate(zip(old_parts, new_parts)) if a != b][0]
-    print(f"  Renaming: .{old_parts[diff_idx]}. -> .{new_parts[diff_idx]}. ({len(rename_map)} keys)")
-
-    # Group renames by shard file
+    # === Execute transforms per shard ===
     from safetensors import safe_open
     from safetensors.torch import save_file
 
-    files_to_fix = {}
-    for old_key, new_key in rename_map.items():
-        shard_file = merged_index["weight_map"][old_key]
-        files_to_fix.setdefault(shard_file, {})[old_key] = new_key
+    new_weight_map = dict(weight_map)
+    shard_ops = defaultdict(dict)
 
-    for shard_file, renames in files_to_fix.items():
+    for key, (op_type, op_data) in transforms.items():
+        shard = weight_map[key]
+        shard_ops[shard][key] = (op_type, op_data)
+
+    total_created = 0
+    for shard_file, ops in shard_ops.items():
         shard_path = os.path.join(save_path, shard_file)
-        print(f"  Fixing {len(renames)} keys in {shard_file}...")
+        print(f"  Processing {shard_file} ({len(ops)} transforms)...")
 
-        tensors = {}
+        new_tensors = {}
         metadata = {}
+
         with safe_open(shard_path, framework="pt") as f:
             meta = f.metadata()
             if meta:
                 metadata = dict(meta)
-            for key in f.keys():
-                new_key = renames.get(key, key)
-                tensors[new_key] = f.get_tensor(key)
 
-        save_file(tensors, shard_path, metadata=metadata)
+            for key in f.keys():
+                if key not in ops:
+                    new_tensors[key] = f.get_tensor(key)
+                    continue
+
+                op_type, op_data = ops[key]
+
+                if op_type == "remove":
+                    del new_weight_map[key]
+                    continue
+
+                tensor = f.get_tensor(key)
+
+                if op_type == "rename":
+                    new_tensors[op_data] = tensor
+                    del new_weight_map[key]
+                    new_weight_map[op_data] = shard_file
+
+                elif op_type == "split":
+                    target_keys = op_data
+                    expert_dim = tensor.shape[0] // num_experts
+
+                    if tensor.dim() == 2:
+                        desc = f"{list(tensor.shape)} -> {num_experts} x [{expert_dim}, {tensor.shape[1]}]"
+                    elif tensor.dim() == 1:
+                        desc = f"[{tensor.shape[0]}] -> {num_experts} x [{expert_dim}]"
+                    else:
+                        desc = f"{list(tensor.shape)} -> {num_experts} chunks"
+                    print(f"    Unpack {key}: {desc}")
+
+                    chunks = tensor.split(expert_dim, dim=0)
+                    if len(chunks) != len(target_keys):
+                        print(f"    ERROR: {len(chunks)} chunks != {len(target_keys)} targets, keeping original")
+                        new_tensors[key] = tensor
+                        continue
+
+                    for chunk, target_key in zip(chunks, target_keys):
+                        new_tensors[target_key] = chunk
+                        new_weight_map[target_key] = shard_file
+                    total_created += len(target_keys)
+
+                    del new_weight_map[key]
+
+        save_file(new_tensors, shard_path, metadata=metadata)
 
     # Update the index
-    new_weight_map = {}
-    for key, shard in merged_index["weight_map"].items():
-        new_weight_map[rename_map.get(key, key)] = shard
-    merged_index["weight_map"] = new_weight_map
+    index["weight_map"] = new_weight_map
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2, sort_keys=True)
 
-    with open(merged_index_path, "w") as f:
-        json.dump(merged_index, f, indent=2, sort_keys=True)
-
-    print(f"  Fixed {len(rename_map)} Unsloth-renamed keys in merged model")
+    print(f"  Done: {total_created} expert tensors unpacked, {removes} artifacts removed, {renames} keys renamed")
     return True
 
 
@@ -750,9 +880,10 @@ def merge_and_export(
                     print(f"  Saved config + tokenizer to complete the merge")
                 else:
                     raise
-            # Fix Unsloth's internal MoE key renaming (e.g., gate -> router)
-            # so the merged model loads correctly with standard HF loaders.
-            fix_unsloth_moe_keys(save_path, base_model)
+            # Unpack Unsloth's packed MoE expert tensors into standard HF format.
+            # Unsloth saves experts as batched tensors (down_proj_blocks) that
+            # must be split into individual expert weights (down_projs.{i}.weight).
+            unpack_moe_expert_tensors(save_path)
             print(f"Exported HuggingFace format to {save_path}")
 
         elif fmt.startswith("gguf_"):
