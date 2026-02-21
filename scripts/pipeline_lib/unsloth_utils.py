@@ -567,6 +567,132 @@ def _load_base_and_adapter(
     return model, tok
 
 
+def fix_unsloth_moe_keys(save_path: str, original_model_name: str) -> bool:
+    """Fix MoE key naming in Unsloth-merged safetensors.
+
+    Unsloth internally renames MoE router weights (e.g., gate -> router).
+    When it saves the merged model, these internal names persist, causing
+    standard HuggingFace model loaders to miss the router weights (they
+    get randomly initialized instead of loaded).
+
+    This compares the merged model's keys against the original model's
+    keys and renames any mismatches back to the original names.
+
+    Args:
+        save_path: Path to the merged model directory (with safetensors).
+        original_model_name: HuggingFace model ID (e.g., "openai/gpt-oss-20b").
+
+    Returns:
+        True if any fixes were applied.
+    """
+    import json
+
+    # Read merged model's safetensors index
+    merged_index_path = os.path.join(save_path, "model.safetensors.index.json")
+    if not os.path.exists(merged_index_path):
+        single_path = os.path.join(save_path, "model.safetensors")
+        if os.path.exists(single_path):
+            print(f"  Single safetensors file (no index), skipping key fix")
+        else:
+            print(f"  No safetensors found at {save_path}, skipping key fix")
+        return False
+
+    with open(merged_index_path) as f:
+        merged_index = json.load(f)
+    merged_keys = set(merged_index["weight_map"].keys())
+
+    # Get original model's key names from HF Hub
+    try:
+        from huggingface_hub import hf_hub_download
+        orig_index_path = hf_hub_download(
+            original_model_name, "model.safetensors.index.json"
+        )
+        with open(orig_index_path) as f:
+            original_index = json.load(f)
+        original_keys = set(original_index["weight_map"].keys())
+    except Exception as e:
+        print(f"  Could not get original model index: {e}")
+        return False
+
+    # Find mismatched keys
+    merged_only = sorted(merged_keys - original_keys)
+    original_only = set(original_keys - merged_keys)
+
+    if not merged_only:
+        print(f"  All merged keys match original model — no fixes needed")
+        return False
+
+    print(f"  Found {len(merged_only)} Unsloth-renamed keys")
+
+    # Build rename map: match by layer structure (exactly 1 differing part)
+    rename_map = {}
+    for m_key in merged_only:
+        m_parts = m_key.split(".")
+        best_match = None
+
+        for o_key in sorted(original_only):
+            o_parts = o_key.split(".")
+            if len(m_parts) != len(o_parts):
+                continue
+            diffs = [i for i, (m, o) in enumerate(zip(m_parts, o_parts)) if m != o]
+            if len(diffs) == 1:
+                best_match = o_key
+                break
+
+        if best_match:
+            rename_map[m_key] = best_match
+            original_only.discard(best_match)
+
+    if not rename_map:
+        print(f"  Could not determine key mapping — manual investigation needed")
+        print(f"  Unsloth keys: {merged_only[:5]}")
+        return False
+
+    # Log the rename pattern
+    sample_old, sample_new = next(iter(rename_map.items()))
+    old_parts = sample_old.split(".")
+    new_parts = sample_new.split(".")
+    diff_idx = [i for i, (a, b) in enumerate(zip(old_parts, new_parts)) if a != b][0]
+    print(f"  Renaming: .{old_parts[diff_idx]}. -> .{new_parts[diff_idx]}. ({len(rename_map)} keys)")
+
+    # Group renames by shard file
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    files_to_fix = {}
+    for old_key, new_key in rename_map.items():
+        shard_file = merged_index["weight_map"][old_key]
+        files_to_fix.setdefault(shard_file, {})[old_key] = new_key
+
+    for shard_file, renames in files_to_fix.items():
+        shard_path = os.path.join(save_path, shard_file)
+        print(f"  Fixing {len(renames)} keys in {shard_file}...")
+
+        tensors = {}
+        metadata = {}
+        with safe_open(shard_path, framework="pt") as f:
+            meta = f.metadata()
+            if meta:
+                metadata = dict(meta)
+            for key in f.keys():
+                new_key = renames.get(key, key)
+                tensors[new_key] = f.get_tensor(key)
+
+        save_file(tensors, shard_path, metadata=metadata)
+
+    # Update the index
+    new_weight_map = {}
+    for key, shard in merged_index["weight_map"].items():
+        new_weight_map[rename_map.get(key, key)] = shard
+    merged_index["weight_map"] = new_weight_map
+
+    with open(merged_index_path, "w") as f:
+        json.dump(merged_index, f, indent=2, sort_keys=True)
+
+    print(f"  Fixed {len(rename_map)} Unsloth-renamed keys in merged model")
+    return True
+
+
 def merge_and_export(
     base_model: str,
     adapter_path: str,
@@ -624,6 +750,9 @@ def merge_and_export(
                     print(f"  Saved config + tokenizer to complete the merge")
                 else:
                     raise
+            # Fix Unsloth's internal MoE key renaming (e.g., gate -> router)
+            # so the merged model loads correctly with standard HF loaders.
+            fix_unsloth_moe_keys(save_path, base_model)
             print(f"Exported HuggingFace format to {save_path}")
 
         elif fmt.startswith("gguf_"):
