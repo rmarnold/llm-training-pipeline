@@ -403,12 +403,11 @@ def save_adapter(
             model.save_pretrained_merged(output_dir, tokenizer, save_method=save_method)
         except RuntimeError as e:
             if "LoRAs" in str(e) and "match" in str(e):
-                # Unsloth Bug #3701: MoE LoRA count validation failure
-                print(f"  Unsloth merge-save failed (Bug #3701): {e}")
-                print(f"  Falling back to PEFT merge_and_unload...")
-                merged = model.merge_and_unload()
+                # Unsloth Bug #3701: Merged files already on disk, just
+                # validation failed. Save config + tokenizer to complete.
+                print(f"  Unsloth Bug #3701 (merged files already on disk)")
                 os.makedirs(output_dir, exist_ok=True)
-                merged.save_pretrained(output_dir)
+                model.config.save_pretrained(output_dir)
                 if tokenizer:
                     tokenizer.save_pretrained(output_dir)
             else:
@@ -456,6 +455,29 @@ def _save_peft_native(model: Any, output_dir: str) -> None:
         print(f"  Manual adapter save successful: {output_dir}")
 
 
+def _remap_peft_keys(state_dict: dict, adapter_name: str = "default") -> dict:
+    """Remap PEFT-saved keys to match Unsloth's live model state dict.
+
+    PEFT's ``save_pretrained`` strips the adapter name from keys:
+      on-disk: ``...lora_A.weight``
+      live model: ``...lora_A.default.weight``
+
+    This inserts the adapter name back so ``load_state_dict`` matches.
+    """
+    remapped = {}
+    lora_parts = ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B")
+    for k, v in state_dict.items():
+        if any(lp in k for lp in lora_parts) and f".{adapter_name}." not in k:
+            parts = k.split(".")
+            for i, part in enumerate(parts):
+                if part in lora_parts:
+                    parts.insert(i + 1, adapter_name)
+                    break
+            k = ".".join(parts)
+        remapped[k] = v
+    return remapped
+
+
 def _load_base_and_adapter(
     FastLanguageModel: Any,
     base_model: str,
@@ -464,15 +486,19 @@ def _load_base_and_adapter(
 ) -> tuple[Any, Any]:
     """Load base model via Unsloth, then apply saved LoRA adapter weights.
 
-    Uses PEFT's ``PeftModel.from_pretrained()`` for adapter loading, which
-    correctly handles key mapping regardless of whether the adapter was saved
-    by Unsloth or PEFT native (Bug #3701 fallback).
+    Uses Unsloth's own ``get_peft_model`` to recreate the LoRA architecture
+    (preserving Unsloth's internal wrapping so ``save_pretrained_merged``
+    recognizes the model). Adapter weights are loaded with key remapping
+    to handle the PEFT-native save format (Bug #3701 fallback saves keys
+    without the ``.default.`` adapter name prefix).
 
     Strategy:
-      1. Load the base model through Unsloth (preserves optimizations).
-      2. Use PEFT's ``PeftModel.from_pretrained()`` to load the adapter.
+      1. Load the base model through Unsloth (preserves internal format).
+      2. Read adapter_config.json for LoRA hyper-params.
+      3. Apply LoRA via Unsloth's ``get_peft_model`` (MoE-aware wrapping).
+      4. Load trained adapter weights with PEFT key remapping.
     """
-    from peft import PeftModel
+    import json
 
     # Resolve adapter path (may be in adapter_path or adapter_path/final)
     actual_adapter_path = adapter_path
@@ -481,7 +507,11 @@ def _load_base_and_adapter(
         final_path = os.path.join(adapter_path, "final")
         if os.path.exists(os.path.join(final_path, "adapter_config.json")):
             actual_adapter_path = final_path
+            adapter_cfg_path = os.path.join(actual_adapter_path, "adapter_config.json")
             print(f"  Using adapter subdir: {actual_adapter_path}")
+
+    with open(adapter_cfg_path) as f:
+        acfg = json.load(f)
 
     # 1. Load base model via Unsloth
     print(f"  Loading base model: {base_model}")
@@ -491,15 +521,48 @@ def _load_base_and_adapter(
         load_in_4bit=True,
     )
 
-    # 2. Load adapter via PEFT (handles key mapping for both Unsloth and PEFT-native saves)
-    print(f"  Loading adapter from: {actual_adapter_path}")
-    model = PeftModel.from_pretrained(model, actual_adapter_path)
-
-    # Count loaded adapter params
-    lora_params = sum(
-        p.numel() for n, p in model.named_parameters() if "lora_" in n
+    # 2. Recreate LoRA with same config via Unsloth (preserves Unsloth wrapping)
+    target_modules = acfg.get("target_modules", [
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_up_proj", "down_proj",
+    ])
+    print(f"  Applying LoRA: r={acfg.get('r')}, alpha={acfg.get('lora_alpha')}")
+    print(f"  Target modules: {target_modules}")
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=acfg.get("r", 64),
+        target_modules=target_modules,
+        lora_alpha=acfg.get("lora_alpha", 128),
+        lora_dropout=acfg.get("lora_dropout", 0),
+        bias=acfg.get("bias", "none"),
+        use_gradient_checkpointing=False,  # Not needed for merge
+        use_rslora=acfg.get("use_rslora", False),
     )
-    print(f"  Loaded adapter with {lora_params:,} LoRA parameters")
+
+    # 3. Load trained adapter weights (with PEFT key remapping)
+    weight_file = os.path.join(actual_adapter_path, "adapter_model.safetensors")
+    if not os.path.exists(weight_file):
+        weight_file = os.path.join(actual_adapter_path, "adapter_model.bin")
+    if not os.path.exists(weight_file):
+        raise FileNotFoundError(
+            f"No adapter weights found in {actual_adapter_path} "
+            f"(checked adapter_model.safetensors and adapter_model.bin)"
+        )
+
+    if weight_file.endswith(".safetensors"):
+        from safetensors.torch import load_file
+        state_dict = load_file(weight_file)
+    else:
+        state_dict = torch.load(weight_file, map_location="cpu", weights_only=True)
+
+    # PEFT native save strips adapter name from keys (e.g. "lora_A.weight"
+    # instead of "lora_A.default.weight"). Remap to match Unsloth's model.
+    remapped = _remap_peft_keys(state_dict)
+    incompatible = model.load_state_dict(remapped, strict=False)
+    loaded = len(remapped) - len(incompatible.unexpected_keys)
+    print(f"  Loaded {loaded}/{len(remapped)} adapter weight tensors")
+    if incompatible.unexpected_keys:
+        print(f"  Warning: {len(incompatible.unexpected_keys)} unexpected keys")
 
     return model, tok
 
@@ -547,14 +610,18 @@ def merge_and_export(
                 model.save_pretrained_merged(save_path, tokenizer, save_method="merged_16bit")
             except RuntimeError as e:
                 if "LoRAs" in str(e) and "match" in str(e):
-                    # Unsloth Bug #3701: MoE LoRA count validation failure
-                    # Fall back to PEFT merge + HuggingFace save
-                    print(f"  Unsloth merge-save failed (Bug #3701): {e}")
-                    print(f"  Falling back to PEFT merge_and_unload...")
-                    merged = model.merge_and_unload()
+                    # Unsloth Bug #3701: MoE LoRA count validation failure.
+                    # At this point Unsloth has ALREADY:
+                    #   1. Dequantized MXFP4 weights to bf16 safetensor files
+                    #   2. Merged LoRA weights into those files on disk
+                    #   3. Regenerated the safetensors index
+                    # The error fires at the post-save validation step.
+                    # We just need to save config + tokenizer to complete the output.
+                    print(f"  Unsloth Bug #3701 (validation only — merged files already on disk)")
                     os.makedirs(save_path, exist_ok=True)
-                    merged.save_pretrained(save_path)
+                    model.config.save_pretrained(save_path)
                     tokenizer.save_pretrained(save_path)
+                    print(f"  Saved config + tokenizer to complete the merge")
                 else:
                     raise
             print(f"Exported HuggingFace format to {save_path}")
