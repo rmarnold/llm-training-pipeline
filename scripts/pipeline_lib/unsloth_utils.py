@@ -699,8 +699,8 @@ def unpack_moe_expert_tensors(save_path: str) -> bool:
         # Try multiple packed key naming conventions
         packed_candidates = [
             f"{prefix}{proj_name}_blocks",          # down_proj_blocks (Unsloth MXFP4)
-            f"{prefix}{proj_name}",                  # down_proj (Unsloth may drop _blocks)
-            f"{prefix}{proj_name}_{param_type}s",    # down_proj_weights (alternative)
+            f"{prefix}{proj_name}",                  # down_proj (Unsloth packed weight)
+            f"{prefix}{proj_name}_{param_type}",     # down_proj_bias (Unsloth packed bias)
         ]
 
         for packed_key in packed_candidates:
@@ -789,17 +789,19 @@ def unpack_moe_expert_tensors(save_path: str) -> bool:
 
                 elif op_type == "split":
                     target_keys = op_data
-                    expert_dim = tensor.shape[0] // num_experts
 
-                    if tensor.dim() == 2:
-                        desc = f"{list(tensor.shape)} -> {num_experts} x [{expert_dim}, {tensor.shape[1]}]"
-                    elif tensor.dim() == 1:
-                        desc = f"[{tensor.shape[0]}] -> {num_experts} x [{expert_dim}]"
+                    if tensor.shape[0] == num_experts:
+                        # Format: [num_experts, dim1, ...] — unbind removes expert dim
+                        chunks = list(tensor.unbind(dim=0))
+                        per_expert_shape = list(tensor.shape[1:])
                     else:
-                        desc = f"{list(tensor.shape)} -> {num_experts} chunks"
-                    print(f"    Unpack {key}: {desc}")
+                        # Format: [num_experts * dim1, ...] — split along dim 0
+                        expert_dim = tensor.shape[0] // num_experts
+                        chunks = list(tensor.split(expert_dim, dim=0))
+                        per_expert_shape = [expert_dim] + list(tensor.shape[1:])
 
-                    chunks = tensor.split(expert_dim, dim=0)
+                    print(f"    Unpack {key}: {list(tensor.shape)} -> {num_experts} x {per_expert_shape}")
+
                     if len(chunks) != len(target_keys):
                         print(f"    ERROR: {len(chunks)} chunks != {len(target_keys)} targets, keeping original")
                         new_tensors[key] = tensor
@@ -875,6 +877,10 @@ def merge_and_export(
                     # We just need to save config + tokenizer to complete the output.
                     print(f"  Unsloth Bug #3701 (validation only — merged files already on disk)")
                     os.makedirs(save_path, exist_ok=True)
+                    # Strip quantization_config (MXFP4 artifact) so the merged
+                    # bf16 model loads with standard Linear, not Linear4bit.
+                    if hasattr(model.config, "quantization_config"):
+                        delattr(model.config, "quantization_config")
                     model.config.save_pretrained(save_path)
                     tokenizer.save_pretrained(save_path)
                     print(f"  Saved config + tokenizer to complete the merge")
