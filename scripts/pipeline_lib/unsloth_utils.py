@@ -815,17 +815,20 @@ def unpack_moe_expert_tensors(save_path: str) -> bool:
                         new_tensors[key] = tensor
                         continue
 
-                    # Unsloth stores ALL expert weights in bmm convention
-                    # [in_features, out_features] but HF expects [out_features, in_features].
-                    # Always transpose 2D weight tensors. 1D biases don't need it.
-                    # Shape comparison fails for square matrices (down_proj [2880,2880]).
-                    need_transpose = chunks[0].dim() == 2
-                    if need_transpose:
-                        chunk_shape = list(chunks[0].shape)
-                        print(f"      Transposing: {chunk_shape} -> {chunk_shape[::-1]}")
-
                     for chunk, target_key in zip(chunks, target_keys):
-                        new_tensors[target_key] = chunk.T.contiguous() if need_transpose else chunk
+                        chunk_shape = tuple(chunk.shape)
+                        exp_shape = expected_shapes.get(target_key)
+                        # Only transpose when shape explicitly mismatches expected.
+                        # gate_up_proj [2880, 5760] vs expected [5760, 2880] → transpose.
+                        # down_proj [2880, 2880] vs expected [2880, 2880] → keep as-is.
+                        if exp_shape and chunk_shape != exp_shape and chunk.dim() == 2:
+                            reversed_shape = (chunk_shape[1], chunk_shape[0])
+                            if reversed_shape == exp_shape:
+                                print(f"      Transposing {target_key}: {list(chunk_shape)} -> {list(exp_shape)}")
+                                chunk = chunk.T.contiguous()
+                            else:
+                                print(f"      WARNING: shape {list(chunk_shape)} != expected {list(exp_shape)} and transpose doesn't fix it")
+                        new_tensors[target_key] = chunk
                         new_weight_map[target_key] = shard_file
                     total_created += len(target_keys)
 
