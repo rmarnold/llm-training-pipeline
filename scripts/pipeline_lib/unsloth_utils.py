@@ -828,7 +828,7 @@ def unpack_moe_expert_tensors(save_path: str) -> bool:
                             print(f"      Transposing: {list(chunk_shape)} -> {list(exp_shape)}")
 
                     for chunk, target_key in zip(chunks, target_keys):
-                        new_tensors[target_key] = chunk.T if need_transpose else chunk
+                        new_tensors[target_key] = chunk.T.contiguous() if need_transpose else chunk
                         new_weight_map[target_key] = shard_file
                     total_created += len(target_keys)
 
