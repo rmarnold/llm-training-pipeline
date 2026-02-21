@@ -696,12 +696,18 @@ def unpack_moe_expert_tensors(save_path: str) -> bool:
         proj_name = m.group(2)   # down_proj or gate_up_proj
         param_type = m.group(3)  # weight or bias
 
-        # Try multiple packed key naming conventions
-        packed_candidates = [
-            f"{prefix}{proj_name}_blocks",          # down_proj_blocks (Unsloth MXFP4)
-            f"{prefix}{proj_name}",                  # down_proj (Unsloth packed weight)
-            f"{prefix}{proj_name}_{param_type}",     # down_proj_bias (Unsloth packed bias)
-        ]
+        # Candidates MUST be param_type-specific to avoid collision:
+        # 'gate_up_proj' is the weight packed key but would also match
+        # the bias group if processed first (set iteration is unordered).
+        if param_type == "weight":
+            packed_candidates = [
+                f"{prefix}{proj_name}_blocks",      # down_proj_blocks (Unsloth MXFP4)
+                f"{prefix}{proj_name}",              # down_proj (Unsloth packed weight)
+            ]
+        else:  # bias
+            packed_candidates = [
+                f"{prefix}{proj_name}_{param_type}", # down_proj_bias (Unsloth packed bias)
+            ]
 
         for packed_key in packed_candidates:
             if packed_key in remaining_extra:
