@@ -96,8 +96,14 @@ def _run_smoke_test(
     Unsloth's batched expert weights into individual tensors). Falls back
     to Unsloth if standard loading fails.
     """
+    import gc
     import torch
     print(f"\nRunning smoke test...")
+
+    # Free GPU memory from the merge process before loading merged model.
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     hf_path = os.path.join(output_dir, "hf")
     if not os.path.exists(hf_path):
@@ -110,7 +116,7 @@ def _run_smoke_test(
         model = AutoModelForCausalLM.from_pretrained(
             hf_path,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
+            device_map="cpu",
         )
         tokenizer = AutoTokenizer.from_pretrained(hf_path)
 
