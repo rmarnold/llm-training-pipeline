@@ -815,17 +815,14 @@ def unpack_moe_expert_tensors(save_path: str) -> bool:
                         new_tensors[key] = tensor
                         continue
 
-                    # Unsloth stores expert weights in bmm convention
+                    # Unsloth stores ALL expert weights in bmm convention
                     # [in_features, out_features] but HF expects [out_features, in_features].
-                    # Check first chunk against expected shape and transpose if needed.
-                    need_transpose = False
-                    sample_key = target_keys[0]
-                    if sample_key in expected_shapes:
-                        exp_shape = expected_shapes[sample_key]
-                        chunk_shape = tuple(chunks[0].shape)
-                        if chunk_shape != exp_shape and chunk_shape == exp_shape[::-1]:
-                            need_transpose = True
-                            print(f"      Transposing: {list(chunk_shape)} -> {list(exp_shape)}")
+                    # Always transpose 2D weight tensors. 1D biases don't need it.
+                    # Shape comparison fails for square matrices (down_proj [2880,2880]).
+                    need_transpose = chunks[0].dim() == 2
+                    if need_transpose:
+                        chunk_shape = list(chunks[0].shape)
+                        print(f"      Transposing: {chunk_shape} -> {chunk_shape[::-1]}")
 
                     for chunk, target_key in zip(chunks, target_keys):
                         new_tensors[target_key] = chunk.T.contiguous() if need_transpose else chunk
