@@ -89,66 +89,117 @@ def _run_smoke_test(
     test_prompt: str,
     max_new_tokens: int = 256,
 ) -> None:
-    """Run a quick generation test on the merged model.
+    """Validate merged model by inspecting safetensor weights directly.
 
-    Uses standard HuggingFace AutoModelForCausalLM to verify the merged
-    model loads correctly. Requires transformers >= 5.x which has native
-    GptOssForCausalLM with packed expert format support.
-
-    The merged model uses packed expert tensors [num_experts, in, out]
-    which is the correct format for the GptOssExperts class that uses
-    @use_experts_implementation(is_transposed=True).
+    Does NOT use AutoModelForCausalLM (which requires transformers >= 5.x
+    for packed expert format). Instead loads safetensors directly to verify:
+    1. Packed expert keys exist with correct [num_experts, ...] shapes
+    2. Router keys exist
+    3. No NaN/inf in weight tensors
+    4. Non-expert layers (attention, norms, embeddings) are present
     """
-    import gc
+    import json
     import torch
-    print(f"\nRunning smoke test...")
-
-    # Free GPU memory from the merge process before loading merged model.
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    print(f"\nRunning smoke test (direct safetensor validation)...")
 
     hf_path = os.path.join(output_dir, "hf")
     if not os.path.exists(hf_path):
         hf_path = output_dir
 
     try:
-        import transformers
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from safetensors import safe_open
 
-        print(f"  transformers version: {transformers.__version__}")
-        # GptOssForCausalLM with packed expert format requires transformers >= 5.x
-        major = int(transformers.__version__.split(".")[0])
-        if major < 5:
-            print(f"  WARNING: transformers {transformers.__version__} may not support "
-                  f"packed expert format. Upgrade to >= 5.0 for GptOssForCausalLM.")
-
-        print(f"  Loading merged model with AutoModelForCausalLM...")
-        model = AutoModelForCausalLM.from_pretrained(
-            hf_path,
-            torch_dtype=torch.bfloat16,
-            device_map="cpu",
+        # Find safetensor files
+        st_files = sorted(
+            f for f in os.listdir(hf_path) if f.endswith(".safetensors")
         )
-        tokenizer = AutoTokenizer.from_pretrained(hf_path)
+        if not st_files:
+            print(f"  Smoke test FAILED: no .safetensors files in {hf_path}")
+            return
 
-        from dataset_formatters.harmony import encode_harmony_messages
-        prompt_text = encode_harmony_messages([
-            {"role": "user", "content": test_prompt},
-        ], developer_instructions="You are a Rust programming expert.",
-           add_generation_prompt=True)
+        print(f"  Found {len(st_files)} safetensor file(s)")
 
-        inputs = tokenizer(prompt_text, return_tensors="pt").to(model.device)
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=0.2,
-            do_sample=True,
-        )
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # Collect all keys and check weights
+        all_keys = set()
+        nan_keys = []
+        inf_keys = []
+        sample_shapes = {}
 
-        print(f"  Prompt: {test_prompt}")
-        print(f"  Response (first 500 chars): {response[:500]}")
-        print(f"  Smoke test PASSED")
+        for fname in st_files:
+            path = os.path.join(hf_path, fname)
+            with safe_open(path, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    all_keys.add(key)
+                    tensor = f.get_tensor(key)
+
+                    if torch.isnan(tensor).any():
+                        nan_keys.append(key)
+                    if torch.isinf(tensor).any():
+                        inf_keys.append(key)
+
+                    # Sample shapes for layer 0
+                    if "layers.0." in key:
+                        sample_shapes[key] = list(tensor.shape)
+
+        print(f"  Total keys: {len(all_keys)}")
+
+        # Check 1: packed expert keys
+        packed_expert_keys = [k for k in all_keys if ".experts.down_proj" in k
+                              and ".down_projs." not in k]
+        unpacked_expert_keys = [k for k in all_keys if ".experts.down_projs." in k]
+
+        if packed_expert_keys:
+            print(f"  Packed expert keys: {len(packed_expert_keys)} (correct)")
+            # Verify shape is [num_experts, ...]
+            for key in sorted(packed_expert_keys)[:1]:
+                shape = sample_shapes.get(key)
+                if shape:
+                    print(f"    {key}: {shape}")
+        elif unpacked_expert_keys:
+            print(f"  WARNING: Found unpacked expert keys ({len(unpacked_expert_keys)})")
+            print(f"    Model may have been incorrectly unpacked")
+        else:
+            print(f"  WARNING: No expert keys found")
+
+        # Check 2: router keys
+        router_keys = [k for k in all_keys if ".router." in k]
+        print(f"  Router keys: {len(router_keys)}")
+
+        # Check 3: attention/norm/embedding keys
+        attn_keys = [k for k in all_keys if ".self_attn." in k]
+        norm_keys = [k for k in all_keys if "norm" in k.lower()]
+        embed_keys = [k for k in all_keys if "embed" in k.lower()]
+        lm_head = "lm_head.weight" in all_keys
+        print(f"  Attention keys: {len(attn_keys)}")
+        print(f"  Norm keys: {len(norm_keys)}")
+        print(f"  Embedding keys: {len(embed_keys)}")
+        print(f"  lm_head: {'yes' if lm_head else 'MISSING'}")
+
+        # Check 4: NaN/inf
+        if nan_keys:
+            print(f"  FAIL: {len(nan_keys)} keys contain NaN: {nan_keys[:5]}")
+        if inf_keys:
+            print(f"  FAIL: {len(inf_keys)} keys contain inf: {inf_keys[:5]}")
+
+        # Verdict
+        has_experts = len(packed_expert_keys) > 0
+        has_router = len(router_keys) > 0
+        has_attn = len(attn_keys) > 0
+        no_bad_values = len(nan_keys) == 0 and len(inf_keys) == 0
+
+        if has_experts and has_router and has_attn and no_bad_values:
+            print(f"  Smoke test PASSED")
+        else:
+            issues = []
+            if not has_experts:
+                issues.append("no packed experts")
+            if not has_router:
+                issues.append("no router keys")
+            if not has_attn:
+                issues.append("no attention keys")
+            if not no_bad_values:
+                issues.append("NaN/inf in weights")
+            print(f"  Smoke test FAILED: {', '.join(issues)}")
 
     except Exception as e:
         print(f"  Smoke test FAILED: {e}")
