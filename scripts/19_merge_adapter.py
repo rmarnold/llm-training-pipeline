@@ -182,9 +182,9 @@ def _run_smoke_test(
         print(f"  Phase 1 FAILED: {e}")
 
     # Phase 2: Text generation via Unsloth
-    # NOTE: AutoModelForCausalLM on transformers 4.x CANNOT load packed
-    # MoE expert format (key mismatch: router.weight vs router.linear.weight,
-    # packed experts.down_proj vs unpacked experts.down_projs.{idx}.weight).
+    # cleanup_merged_moe() converts packed expert format to unpacked nn.Linear
+    # format with proper transpose, and remaps router keys. This allows both
+    # Unsloth FastLanguageModel and AutoModelForCausalLM to load the model.
     print(f"\n  Phase 2: Inference test (Unsloth)...")
     try:
         from unsloth import FastLanguageModel

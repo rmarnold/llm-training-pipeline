@@ -47,22 +47,27 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
     setup_torch_backends()
 
     # Determine base model (with or without lang_rust merged)
-    base_model = config["model"]["base_model"]
-    merge_lang = config["model"].get("merge_lang_adapter", True)
-    lang_adapter_path = config["model"].get("lang_adapter")
-
-    if merge_lang and lang_adapter_path and not cli_overrides.get("no_merge_lang_adapter"):
-        # Check if merged model already exists
-        merged_path = f"{lang_adapter_path}_merged"
-        if os.path.exists(merged_path):
-            print(f"\nUsing pre-merged model: {merged_path}")
-            base_model = merged_path
-        else:
-            print(f"\nMerging lang_rust adapter from {lang_adapter_path}...")
-            print("  (Run scripts/19_merge_adapter.py first, or use --no-merge-lang-adapter)")
-            print(f"  Falling back to base model: {base_model}")
+    # CLI --base_model overrides config and skips lang_rust merge logic
+    if cli_overrides.get("base_model"):
+        base_model = cli_overrides["base_model"]
+        print(f"\nUsing base model from CLI: {base_model}")
     else:
-        print(f"\nSkipping lang adapter merge, using base: {base_model}")
+        base_model = config["model"]["base_model"]
+        merge_lang = config["model"].get("merge_lang_adapter", True)
+        lang_adapter_path = config["model"].get("lang_adapter")
+
+        if merge_lang and lang_adapter_path and not cli_overrides.get("no_merge_lang_adapter"):
+            # Check if merged model already exists
+            merged_path = f"{lang_adapter_path}_merged"
+            if os.path.exists(merged_path):
+                print(f"\nUsing pre-merged model: {merged_path}")
+                base_model = merged_path
+            else:
+                print(f"\nMerging lang_rust adapter from {lang_adapter_path}...")
+                print("  (Run scripts/19_merge_adapter.py first, or use --no-merge-lang-adapter)")
+                print(f"  Falling back to base model: {base_model}")
+        else:
+            print(f"\nSkipping lang adapter merge, using base: {base_model}")
 
     # Load model
     print(f"\nLoading model: {base_model}")
@@ -169,6 +174,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="configs/core_agent.yaml")
     parser.add_argument("--no-merge-lang-adapter", action="store_true",
                         help="Skip merging lang_rust adapter into base")
+    parser.add_argument("--base_model", type=str,
+                        help="Override base model path (skips lang_rust merge logic)")
     parser.add_argument("--max_steps", type=int)
     parser.add_argument("--num_train_epochs", type=int)
     parser.add_argument("--learning_rate", type=float)
@@ -187,10 +194,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cli_overrides = {}
-    for key in ["max_steps", "num_train_epochs", "learning_rate", "warmup_ratio",
-                 "per_device_train_batch_size", "gradient_accumulation_steps",
-                 "save_steps", "eval_steps", "logging_steps", "output_dir",
-                 "train_data_path", "val_data_path", "resume_from_checkpoint",
+    for key in ["base_model", "max_steps", "num_train_epochs", "learning_rate",
+                 "warmup_ratio", "per_device_train_batch_size",
+                 "gradient_accumulation_steps", "save_steps", "eval_steps",
+                 "logging_steps", "output_dir", "train_data_path",
+                 "val_data_path", "resume_from_checkpoint",
                  "drive_checkpoint_backup"]:
         val = getattr(args, key)
         if val is not None:

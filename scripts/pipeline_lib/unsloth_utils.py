@@ -567,8 +567,180 @@ def _load_base_and_adapter(
     return model, tok
 
 
+def _convert_packed_to_unpacked(save_path: str) -> bool:
+    """Convert packed MoE expert tensors to unpacked nn.Linear format.
+
+    Unsloth's merge outputs expert weights in packed format for transformers
+    >= 5.x (``@use_experts_implementation(is_transposed=True)``):
+
+      - ``experts.gate_up_proj``:      ``[num_experts, hidden, 2*intermediate]``
+      - ``experts.gate_up_proj_bias``:  ``[num_experts, 2*intermediate]``
+      - ``experts.down_proj``:          ``[num_experts, intermediate, hidden]``
+      - ``experts.down_proj_bias``:     ``[num_experts, hidden]``
+
+    The packed forward pass does ``output = x @ W[expert_idx]`` (no transpose).
+
+    GptOssForCausalLM on transformers 4.x expects unpacked nn.Linear format:
+
+      - ``experts.gate_up_projs.{i}.weight``: ``[2*intermediate, hidden]``
+      - ``experts.gate_up_projs.{i}.bias``:   ``[2*intermediate]``
+      - ``experts.down_projs.{i}.weight``:    ``[hidden, intermediate]``
+      - ``experts.down_projs.{i}.bias``:      ``[hidden]``
+
+    The nn.Linear forward does ``output = x @ weight.T + bias``.
+
+    Therefore: ``nn.Linear.weight = packed[i].T`` (transpose required for
+    weight matrices, not for bias vectors).
+
+    An earlier version of this code (``unpack_moe_expert_tensors``, commit
+    6ef9dd8) split packed tensors but DID NOT transpose, producing garbage.
+    This version transposes correctly.
+
+    Also remaps router keys if the model class expects a different path
+    (determined dynamically via ``AutoModelForCausalLM.from_config``).
+
+    Args:
+        save_path: Path to the merged model directory with safetensors.
+
+    Returns:
+        True if conversion was performed, False if already unpacked.
+    """
+    import json
+    import re
+    from collections import defaultdict
+
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    index_path = os.path.join(save_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return False
+
+    with open(index_path) as f:
+        index = json.load(f)
+    weight_map = index["weight_map"]
+
+    # Detect packed expert keys (3D tensors: gate_up_proj, down_proj, and biases)
+    packed_pattern = re.compile(
+        r".*\.experts\.(gate_up_proj|down_proj|gate_up_proj_bias|down_proj_bias)$"
+    )
+    packed_keys = [k for k in weight_map if packed_pattern.match(k)]
+    if not packed_keys:
+        return False
+
+    print(f"  Converting {len(packed_keys)} packed expert tensors to unpacked format...")
+
+    # --- Determine router key mapping dynamically ---
+    router_rename: dict[str, str] = {}
+    actual_router_keys = [k for k in weight_map if ".mlp.router." in k]
+
+    try:
+        from transformers import AutoConfig, AutoModelForCausalLM
+
+        config = AutoConfig.from_pretrained(save_path)
+        with torch.device("meta"):
+            ref_model = AutoModelForCausalLM.from_config(config)
+        expected_keys = set(ref_model.state_dict().keys())
+        del ref_model
+
+        # Check if actual router keys exist in expected set
+        for k in actual_router_keys:
+            if k not in expected_keys:
+                # Try router.linear.{weight,bias} variant
+                candidate = k.replace(".mlp.router.", ".mlp.router.linear.")
+                if candidate in expected_keys:
+                    router_rename[k] = candidate
+    except Exception as e:
+        print(f"  Warning: Could not load model class for router key detection: {e}")
+        # Fallback: documented mismatch is router.weight -> router.linear.weight
+        for k in actual_router_keys:
+            if ".router.linear." not in k:
+                router_rename[k] = k.replace(".mlp.router.", ".mlp.router.linear.")
+
+    # --- Group keys to convert by shard file ---
+    keys_to_convert = set(packed_keys) | set(router_rename.keys())
+    shard_groups: dict[str, list[str]] = defaultdict(list)
+    for key in keys_to_convert:
+        shard_groups[weight_map[key]].append(key)
+
+    new_weight_map = dict(weight_map)
+
+    for shard_file, convert_keys in shard_groups.items():
+        shard_path = os.path.join(save_path, shard_file)
+        new_tensors: dict[str, torch.Tensor] = {}
+        metadata: dict[str, str] = {}
+        convert_set = set(convert_keys)
+
+        with safe_open(shard_path, framework="pt") as f:
+            meta = f.metadata()
+            if meta:
+                metadata = dict(meta)
+
+            # Copy all keys that don't need conversion
+            for key in f.keys():
+                if key not in convert_set:
+                    new_tensors[key] = f.get_tensor(key)
+
+            # Convert each packed key
+            for key in convert_keys:
+                tensor = f.get_tensor(key)
+
+                # Router key: just rename
+                if key in router_rename:
+                    new_key = router_rename[key]
+                    new_tensors[new_key] = tensor
+                    del new_weight_map[key]
+                    new_weight_map[new_key] = shard_file
+                    continue
+
+                # Expert tensor: unpack (split along dim 0)
+                del new_weight_map[key]
+                num_experts = tensor.shape[0]
+                is_bias = key.endswith("_bias")
+
+                # Key mapping:
+                #   experts.gate_up_proj      -> experts.gate_up_projs.{i}.weight
+                #   experts.gate_up_proj_bias -> experts.gate_up_projs.{i}.bias
+                #   experts.down_proj         -> experts.down_projs.{i}.weight
+                #   experts.down_proj_bias    -> experts.down_projs.{i}.bias
+                prefix = key.rsplit(".", 1)[0]  # model.layers.N.mlp.experts
+                last = key.rsplit(".", 1)[1]  # gate_up_proj, down_proj_bias, etc.
+
+                if is_bias:
+                    proj_plural = last.replace("_bias", "") + "s"
+                    suffix = "bias"
+                else:
+                    proj_plural = last + "s"
+                    suffix = "weight"
+
+                for i in range(num_experts):
+                    expert_tensor = tensor[i]
+                    if not is_bias:
+                        # Transpose: packed (in, out) -> nn.Linear (out, in)
+                        expert_tensor = expert_tensor.T.contiguous()
+                    new_key = f"{prefix}.{proj_plural}.{i}.{suffix}"
+                    new_tensors[new_key] = expert_tensor
+                    new_weight_map[new_key] = shard_file
+
+        save_file(new_tensors, shard_path, metadata=metadata)
+
+    # Update index
+    index["weight_map"] = new_weight_map
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2, sort_keys=True)
+
+    unpacked_count = sum(1 for k in new_weight_map
+                         if re.match(r".*\.experts\.(gate_up_projs|down_projs)\.\d+\.", k))
+    print(f"  Unpacked: {len(packed_keys)} packed -> {unpacked_count} individual expert tensors")
+    if router_rename:
+        print(f"  Remapped: {len(router_rename)} router keys")
+    print(f"  Total keys: {len(new_weight_map)}")
+
+    return True
+
+
 def cleanup_merged_moe(save_path: str) -> bool:
-    """Clean up MXFP4 artifacts from Unsloth's merged MoE model output.
+    """Clean up Unsloth's merged MoE model output for transformers 4.x.
 
     After Unsloth merges LoRA into a GPT-OSS MoE model and dequantizes MXFP4
     to bf16, the expert weights are saved in PACKED format — all 32 experts'
@@ -576,20 +748,18 @@ def cleanup_merged_moe(save_path: str) -> bool:
       - gate_up_proj: [num_experts, hidden_size, 2*intermediate_size]
       - down_proj:    [num_experts, intermediate_size, hidden_size]
 
-    This IS the correct format for the GptOssForCausalLM model class in
-    transformers >= 5.x, which uses @use_experts_implementation(is_transposed=True)
-    and stores weights as nn.Parameter with packed shapes. The forward pass
-    does x @ W[expert_idx] (not F.linear which transposes).
+    This packed format is for transformers >= 5.x which uses
+    @use_experts_implementation(is_transposed=True). Unsloth requires
+    transformers 4.x, which expects unpacked nn.Linear format.
 
-    Previous versions of this code (unpack_moe_expert_tensors) INCORRECTLY
-    split the packed tensors into individual per-expert tensors, breaking
-    the model and producing garbage output.
-
-    This function only:
+    This function:
     1. Strips quantization_config from config.json (prevents bf16 being
        loaded as Linear4bit/MXFP4).
     2. Removes any leftover _scales tensors (MXFP4 quantization artifacts).
-    3. Validates that keys match what the model class expects.
+    3. Converts packed expert tensors to unpacked nn.Linear format with
+       proper transpose (packed stores (in, out) for x @ W; nn.Linear
+       stores (out, in) for x @ W.T).
+    4. Remaps router keys to match model class expectations.
 
     Args:
         save_path: Path to the merged model directory.
@@ -662,10 +832,19 @@ def cleanup_merged_moe(save_path: str) -> bool:
         print(f"  Removed {len(scale_keys)} MXFP4 scale artifacts")
         changed = True
 
-    # --- 3. Validate key format ---
+    # --- 3. Convert packed expert tensors to unpacked nn.Linear format ---
+    if _convert_packed_to_unpacked(save_path):
+        changed = True
+
+    # --- 4. Validate key format ---
+    # Re-read index after potential conversion
+    with open(index_path) as f:
+        index = json.load(f)
+    weight_map = index["weight_map"]
+
     actual_keys = set(weight_map.keys())
     expert_keys = sorted([k for k in actual_keys if "expert" in k and "layers.0." in k])
-    print(f"  Expert keys (layer 0): {expert_keys}")
+    print(f"  Expert keys (layer 0, first 5): {expert_keys[:5]}")
     print(f"  Total model keys: {len(actual_keys)}")
 
     if not changed:
