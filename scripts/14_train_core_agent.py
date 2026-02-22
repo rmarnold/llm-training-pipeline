@@ -119,6 +119,8 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
             config["training"].get("gradient_accumulation_steps", 4),
         ),
         bf16=config["training"].get("bf16", True),
+        gradient_checkpointing=config["training"].get("gradient_checkpointing", True),
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         max_grad_norm=config["training"].get("max_grad_norm", 0.5),
         weight_decay=config["training"].get("weight_decay", 0.01),
         optim=config["training"].get("optim", "adamw_8bit"),
