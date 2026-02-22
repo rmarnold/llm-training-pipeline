@@ -627,7 +627,48 @@ def _convert_packed_to_unpacked(save_path: str) -> bool:
     )
     packed_keys = [k for k in weight_map if packed_pattern.match(k)]
     if not packed_keys:
-        return False
+        # Index says unpacked — verify actual shards agree.
+        # A previous interrupted conversion may have updated the index
+        # without finishing all shard rewrites (corruption scenario).
+        shard_files = set(weight_map.values())
+        index_key_count = len(weight_map)
+        actual_key_count = 0
+        try:
+            for shard_file in shard_files:
+                shard_path = os.path.join(save_path, shard_file)
+                with safe_open(shard_path, framework="pt") as f:
+                    actual_key_count += len(list(f.keys()))
+        except Exception as e:
+            print(f"  WARNING: Shard verification failed ({e}), "
+                  f"triggering full re-merge")
+            # Fall through to re-run Unsloth merge which will recreate shards
+            return False
+
+        if actual_key_count != index_key_count:
+            print(f"  WARNING: Index has {index_key_count} keys but shards "
+                  f"contain {actual_key_count} — stale index from interrupted "
+                  f"conversion. Rebuilding index from shards...")
+            # Rebuild index from actual shard contents, then re-detect packed
+            new_weight_map = {}
+            for shard_file in shard_files:
+                shard_path = os.path.join(save_path, shard_file)
+                with safe_open(shard_path, framework="pt") as f:
+                    for key in f.keys():
+                        new_weight_map[key] = shard_file
+            index["weight_map"] = new_weight_map
+            with open(index_path, "w") as f_idx:
+                json.dump(index, f_idx, indent=2, sort_keys=True)
+            weight_map = new_weight_map
+            print(f"  Rebuilt index: {len(new_weight_map)} keys from "
+                  f"{len(shard_files)} shards")
+            # Re-check for packed keys with rebuilt index
+            packed_keys = [k for k in weight_map if packed_pattern.match(k)]
+            if not packed_keys:
+                return False
+            print(f"  Found {len(packed_keys)} packed expert tensors after "
+                  f"index rebuild")
+        else:
+            return False
 
     print(f"  Converting {len(packed_keys)} packed expert tensors to unpacked format...")
 
