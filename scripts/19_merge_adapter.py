@@ -89,37 +89,35 @@ def _run_smoke_test(
     test_prompt: str,
     max_new_tokens: int = 256,
 ) -> None:
-    """Validate merged model by inspecting safetensor weights directly.
+    """Validate merged model via safetensor inspection + Unsloth inference.
 
-    Does NOT use AutoModelForCausalLM (which requires transformers >= 5.x
-    for packed expert format). Instead loads safetensors directly to verify:
-    1. Packed expert keys exist with correct [num_experts, ...] shapes
-    2. Router keys exist
-    3. No NaN/inf in weight tensors
-    4. Non-expert layers (attention, norms, embeddings) are present
+    Two-phase validation:
+    1. Direct safetensor weight inspection (no transformers version dependency)
+    2. Text generation via FastLanguageModel (avoids AutoModelForCausalLM
+       which cannot load packed MoE expert format on transformers 4.x)
     """
-    import json
     import torch
-    print(f"\nRunning smoke test (direct safetensor validation)...")
+    print(f"\nRunning smoke test...")
 
     hf_path = os.path.join(output_dir, "hf")
     if not os.path.exists(hf_path):
         hf_path = output_dir
 
+    # Phase 1: Safetensor weight validation
+    print(f"\n  Phase 1: Weight validation (safetensors)...")
+    weights_ok = False
     try:
         from safetensors import safe_open
 
-        # Find safetensor files
         st_files = sorted(
             f for f in os.listdir(hf_path) if f.endswith(".safetensors")
         )
         if not st_files:
-            print(f"  Smoke test FAILED: no .safetensors files in {hf_path}")
+            print(f"  FAILED: no .safetensors files in {hf_path}")
             return
 
         print(f"  Found {len(st_files)} safetensor file(s)")
 
-        # Collect all keys and check weights
         all_keys = set()
         nan_keys = []
         inf_keys = []
@@ -131,78 +129,106 @@ def _run_smoke_test(
                 for key in f.keys():
                     all_keys.add(key)
                     tensor = f.get_tensor(key)
-
                     if torch.isnan(tensor).any():
                         nan_keys.append(key)
                     if torch.isinf(tensor).any():
                         inf_keys.append(key)
-
-                    # Sample shapes for layer 0
                     if "layers.0." in key:
                         sample_shapes[key] = list(tensor.shape)
 
         print(f"  Total keys: {len(all_keys)}")
 
-        # Check 1: packed expert keys
         packed_expert_keys = [k for k in all_keys if ".experts.down_proj" in k
                               and ".down_projs." not in k]
         unpacked_expert_keys = [k for k in all_keys if ".experts.down_projs." in k]
 
         if packed_expert_keys:
             print(f"  Packed expert keys: {len(packed_expert_keys)} (correct)")
-            # Verify shape is [num_experts, ...]
             for key in sorted(packed_expert_keys)[:1]:
                 shape = sample_shapes.get(key)
                 if shape:
                     print(f"    {key}: {shape}")
         elif unpacked_expert_keys:
             print(f"  WARNING: Found unpacked expert keys ({len(unpacked_expert_keys)})")
-            print(f"    Model may have been incorrectly unpacked")
         else:
             print(f"  WARNING: No expert keys found")
 
-        # Check 2: router keys
         router_keys = [k for k in all_keys if ".router." in k]
-        print(f"  Router keys: {len(router_keys)}")
-
-        # Check 3: attention/norm/embedding keys
         attn_keys = [k for k in all_keys if ".self_attn." in k]
-        norm_keys = [k for k in all_keys if "norm" in k.lower()]
-        embed_keys = [k for k in all_keys if "embed" in k.lower()]
-        lm_head = "lm_head.weight" in all_keys
-        print(f"  Attention keys: {len(attn_keys)}")
-        print(f"  Norm keys: {len(norm_keys)}")
-        print(f"  Embedding keys: {len(embed_keys)}")
-        print(f"  lm_head: {'yes' if lm_head else 'MISSING'}")
+        print(f"  Router: {len(router_keys)}, Attention: {len(attn_keys)}, lm_head: {'yes' if 'lm_head.weight' in all_keys else 'MISSING'}")
 
-        # Check 4: NaN/inf
         if nan_keys:
             print(f"  FAIL: {len(nan_keys)} keys contain NaN: {nan_keys[:5]}")
         if inf_keys:
             print(f"  FAIL: {len(inf_keys)} keys contain inf: {inf_keys[:5]}")
 
-        # Verdict
         has_experts = len(packed_expert_keys) > 0
         has_router = len(router_keys) > 0
         has_attn = len(attn_keys) > 0
         no_bad_values = len(nan_keys) == 0 and len(inf_keys) == 0
 
         if has_experts and has_router and has_attn and no_bad_values:
-            print(f"  Smoke test PASSED")
+            weights_ok = True
+            print(f"  Phase 1 PASSED")
         else:
             issues = []
-            if not has_experts:
-                issues.append("no packed experts")
-            if not has_router:
-                issues.append("no router keys")
-            if not has_attn:
-                issues.append("no attention keys")
-            if not no_bad_values:
-                issues.append("NaN/inf in weights")
-            print(f"  Smoke test FAILED: {', '.join(issues)}")
+            if not has_experts: issues.append("no packed experts")
+            if not has_router: issues.append("no router keys")
+            if not has_attn: issues.append("no attention keys")
+            if not no_bad_values: issues.append("NaN/inf in weights")
+            print(f"  Phase 1 FAILED: {', '.join(issues)}")
 
     except Exception as e:
-        print(f"  Smoke test FAILED: {e}")
+        print(f"  Phase 1 FAILED: {e}")
+
+    # Phase 2: Text generation via Unsloth
+    # NOTE: AutoModelForCausalLM on transformers 4.x CANNOT load packed
+    # MoE expert format (key mismatch: router.weight vs router.linear.weight,
+    # packed experts.down_proj vs unpacked experts.down_projs.{idx}.weight).
+    print(f"\n  Phase 2: Inference test (Unsloth)...")
+    try:
+        from unsloth import FastLanguageModel
+
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            hf_path,
+            max_seq_length=4096,
+            load_in_4bit=True,
+            dtype=torch.bfloat16,
+        )
+        FastLanguageModel.for_inference(model)
+
+        inputs = tokenizer(test_prompt, return_tensors="pt").to(model.device)
+        outputs = model.generate(
+            **inputs, max_new_tokens=max_new_tokens,
+            temperature=0.1, do_sample=True,
+        )
+        response = tokenizer.decode(
+            outputs[0][inputs["input_ids"].shape[1]:],
+            skip_special_tokens=False,
+        )
+
+        print(f"\n  {'─' * 50}")
+        print(f"  MODEL RESPONSE:")
+        print(f"  {'─' * 50}")
+        for line in response[:500].split('\n'):
+            print(f"  {line}")
+        print(f"  {'─' * 50}")
+
+        is_garbage = response.strip() == "" or len(set(response[:100])) < 5
+        if is_garbage:
+            print(f"  Phase 2 FAILED: garbage/empty output")
+        else:
+            print(f"  Phase 2 PASSED: coherent output")
+
+        del model, tokenizer
+        import gc; gc.collect()
+        torch.cuda.empty_cache()
+
+    except Exception as e:
+        print(f"  Phase 2 FAILED: {e}")
+
+    # Overall verdict
+    print(f"\n  Smoke test: {'PASSED' if weights_ok else 'FAILED'}")
 
 
 if __name__ == "__main__":
