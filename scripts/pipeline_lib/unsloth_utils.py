@@ -845,6 +845,122 @@ def unpack_moe_expert_tensors(save_path: str) -> bool:
     return True
 
 
+def _diagnose_expert_weights(save_path: str, base_model: str) -> None:
+    """Compare unpacked expert weights against the original base model.
+
+    Downloads one shard from the base model and compares a few expert tensors
+    to verify that (a) the LoRA merge actually changed them and (b) the
+    unpacking preserved reasonable values.
+    """
+    import json
+
+    print(f"\n  === Weight Diagnostic ===")
+
+    try:
+        from huggingface_hub import hf_hub_download
+        from safetensors import safe_open
+
+        # Find which shard contains layer 0 experts in our output
+        index_path = os.path.join(save_path, "model.safetensors.index.json")
+        with open(index_path) as f:
+            index = json.load(f)
+
+        # Test keys: one non-square (gate_up) and one square (down_proj)
+        test_keys = [
+            "model.layers.0.mlp.experts.gate_up_projs.0.weight",
+            "model.layers.0.mlp.experts.down_projs.0.weight",
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight",  # alt naming
+        ]
+
+        # Find available test keys in our output
+        available = [k for k in test_keys if k in index["weight_map"]]
+        if not available:
+            # Try to discover actual key names
+            expert_keys = [k for k in index["weight_map"] if "expert" in k and ".0." in k and "weight" in k]
+            available = expert_keys[:2]
+
+        if not available:
+            print(f"  No expert keys found in output, skipping diagnostic")
+            return
+
+        # Load our unpacked tensors
+        our_tensors = {}
+        for key in available:
+            shard_file = index["weight_map"][key]
+            shard_path = os.path.join(save_path, shard_file)
+            with safe_open(shard_path, framework="pt") as f:
+                our_tensors[key] = f.get_tensor(key)
+
+        # Try to load same keys from base model
+        # First check if base model index is cached
+        try:
+            base_index_path = hf_hub_download(base_model, "model.safetensors.index.json")
+            with open(base_index_path) as f:
+                base_index = json.load(f)
+        except Exception as e:
+            print(f"  Could not load base model index: {e}")
+            # Still report our tensor stats
+            for key, tensor in our_tensors.items():
+                print(f"  {key}: shape={list(tensor.shape)}, dtype={tensor.dtype}")
+                print(f"    mean={tensor.float().mean():.6f}, std={tensor.float().std():.6f}")
+                print(f"    min={tensor.float().min():.6f}, max={tensor.float().max():.6f}")
+                print(f"    has_nan={tensor.isnan().any()}, has_inf={tensor.isinf().any()}")
+            return
+
+        for key in available:
+            if key not in base_index["weight_map"]:
+                print(f"  {key}: not found in base model (different naming)")
+                # Report our stats anyway
+                tensor = our_tensors[key]
+                print(f"    OUR:  shape={list(tensor.shape)}, mean={tensor.float().mean():.6f}, std={tensor.float().std():.6f}")
+                continue
+
+            base_shard_file = base_index["weight_map"][key]
+            try:
+                base_shard_path = hf_hub_download(base_model, base_shard_file)
+            except Exception as e:
+                print(f"  Could not download base shard for {key}: {e}")
+                continue
+
+            with safe_open(base_shard_path, framework="pt") as f:
+                base_tensor = f.get_tensor(key)
+
+            ours = our_tensors[key]
+            print(f"  {key}:")
+            print(f"    BASE: shape={list(base_tensor.shape)}, mean={base_tensor.float().mean():.6f}, std={base_tensor.float().std():.6f}")
+            print(f"    OURS: shape={list(ours.shape)}, mean={ours.float().mean():.6f}, std={ours.float().std():.6f}")
+
+            if base_tensor.shape == ours.shape:
+                diff = (ours.float() - base_tensor.float()).abs()
+                cos_sim = torch.nn.functional.cosine_similarity(
+                    ours.float().flatten().unsqueeze(0),
+                    base_tensor.float().flatten().unsqueeze(0),
+                )
+                print(f"    DIFF: max={diff.max():.6f}, mean={diff.mean():.6f}, cosine_sim={cos_sim.item():.6f}")
+                if diff.max() < 1e-6:
+                    print(f"    *** IDENTICAL — LoRA merge did NOT change this tensor! ***")
+                elif cos_sim > 0.999:
+                    print(f"    LoRA merge applied (small delta, high similarity — expected)")
+                elif cos_sim > 0.9:
+                    print(f"    Moderate difference — LoRA delta is significant")
+                else:
+                    print(f"    *** LARGE difference — possible corruption or wrong tensor ***")
+            else:
+                print(f"    Shape mismatch — cannot compare directly")
+                # Try transposed comparison
+                if len(ours.shape) == 2 and ours.shape == (base_tensor.shape[1], base_tensor.shape[0]):
+                    cos_sim = torch.nn.functional.cosine_similarity(
+                        ours.float().T.flatten().unsqueeze(0),
+                        base_tensor.float().flatten().unsqueeze(0),
+                    )
+                    print(f"    Transposed cosine_sim={cos_sim.item():.6f}")
+
+        print(f"  === End Diagnostic ===\n")
+
+    except Exception as e:
+        print(f"  Diagnostic failed (non-fatal): {e}")
+
+
 def merge_and_export(
     base_model: str,
     adapter_path: str,
@@ -910,6 +1026,8 @@ def merge_and_export(
             # Unsloth saves experts as batched tensors (down_proj_blocks) that
             # must be split into individual expert weights (down_projs.{i}.weight).
             unpack_moe_expert_tensors(save_path)
+            # Diagnostic: compare unpacked weights against base model
+            _diagnose_expert_weights(save_path, base_model)
             print(f"Exported HuggingFace format to {save_path}")
 
         elif fmt.startswith("gguf_"):
