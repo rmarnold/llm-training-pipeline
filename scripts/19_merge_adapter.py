@@ -143,13 +143,17 @@ def _run_smoke_test(
         unpacked_expert_keys = [k for k in all_keys if ".experts.down_projs." in k]
 
         if packed_expert_keys:
-            print(f"  Packed expert keys: {len(packed_expert_keys)} (correct)")
+            print(f"  Packed expert keys: {len(packed_expert_keys)}")
             for key in sorted(packed_expert_keys)[:1]:
                 shape = sample_shapes.get(key)
                 if shape:
                     print(f"    {key}: {shape}")
         elif unpacked_expert_keys:
-            print(f"  WARNING: Found unpacked expert keys ({len(unpacked_expert_keys)})")
+            print(f"  Unpacked expert keys: {len(unpacked_expert_keys)}")
+            for key in sorted(unpacked_expert_keys)[:1]:
+                shape = sample_shapes.get(key)
+                if shape:
+                    print(f"    {key}: {shape}")
         else:
             print(f"  WARNING: No expert keys found")
 
@@ -162,7 +166,7 @@ def _run_smoke_test(
         if inf_keys:
             print(f"  FAIL: {len(inf_keys)} keys contain inf: {inf_keys[:5]}")
 
-        has_experts = len(packed_expert_keys) > 0
+        has_experts = len(packed_expert_keys) > 0 or len(unpacked_expert_keys) > 0
         has_router = len(router_keys) > 0
         has_attn = len(attn_keys) > 0
         no_bad_values = len(nan_keys) == 0 and len(inf_keys) == 0
@@ -172,7 +176,7 @@ def _run_smoke_test(
             print(f"  Phase 1 PASSED")
         else:
             issues = []
-            if not has_experts: issues.append("no packed experts")
+            if not has_experts: issues.append("no expert keys")
             if not has_router: issues.append("no router keys")
             if not has_attn: issues.append("no attention keys")
             if not no_bad_values: issues.append("NaN/inf in weights")

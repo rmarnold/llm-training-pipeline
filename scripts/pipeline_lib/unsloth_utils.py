@@ -973,10 +973,9 @@ def merge_and_export(
                     print(f"  Saved config + tokenizer to complete the merge")
                 else:
                     raise
-            # Clean up MXFP4 artifacts. Unsloth outputs expert weights in
-            # packed format [num_experts, in, out] which IS correct for
-            # GptOssForCausalLM (transformers >= 5.x). We just need to
-            # strip quantization_config and any leftover _scales tensors.
+            # Clean up merged model: strip MXFP4 artifacts, convert packed
+            # expert tensors to unpacked nn.Linear format for transformers 4.x,
+            # and remap router keys.
             cleanup_merged_moe(save_path)
             _validate_merged_keys(save_path)
             print(f"Exported HuggingFace format to {save_path}")
@@ -1000,6 +999,15 @@ def merge_and_export(
 
         else:
             print(f"Warning: Unknown export format '{fmt}', skipping")
+
+    # Free VRAM — merge model is no longer needed, smoke test loads fresh
+    del model
+    if tokenizer is not None:
+        del tokenizer
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def load_config(config_path: str) -> dict[str, Any]:
