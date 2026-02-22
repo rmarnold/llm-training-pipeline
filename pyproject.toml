@@ -9,7 +9,7 @@ description = "Production LLM training pipeline for 7B models on A100/H100 GPUs"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",
-    "transformers>=4.36",
+    "transformers>=5.0",
     "trl>=0.7",
     "accelerate>=0.25",
     "datasets>=2.14",
