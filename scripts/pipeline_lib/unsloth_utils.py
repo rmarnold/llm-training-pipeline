@@ -607,6 +607,7 @@ def _convert_packed_to_unpacked(save_path: str) -> bool:
     """
     import json
     import re
+    import tempfile
     from collections import defaultdict
 
     from safetensors import safe_open
@@ -722,7 +723,28 @@ def _convert_packed_to_unpacked(save_path: str) -> bool:
                     new_tensors[new_key] = expert_tensor
                     new_weight_map[new_key] = shard_file
 
-        save_file(new_tensors, shard_path, metadata=metadata)
+        # Atomic write: save to temp file, verify, then rename
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            suffix=".safetensors", dir=save_path,
+        )
+        os.close(tmp_fd)
+        try:
+            save_file(new_tensors, tmp_path, metadata=metadata)
+            # Verify the new file is readable
+            with safe_open(tmp_path, framework="pt") as verify:
+                verify_keys = set(verify.keys())
+            expected_shard_keys = set(new_tensors.keys())
+            if verify_keys != expected_shard_keys:
+                raise RuntimeError(
+                    f"Verification failed: wrote {len(expected_shard_keys)} keys "
+                    f"but read back {len(verify_keys)}"
+                )
+            os.replace(tmp_path, shard_path)
+        except Exception:
+            # Clean up temp file, leave original intact
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
 
     # Update index
     index["weight_map"] = new_weight_map
@@ -822,7 +844,27 @@ def cleanup_merged_moe(save_path: str) -> bool:
                     if key not in remove_set:
                         new_tensors[key] = f.get_tensor(key)
 
-            save_file(new_tensors, shard_path, metadata=metadata)
+            # Atomic write: temp file -> verify -> rename
+            import tempfile
+
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                suffix=".safetensors", dir=save_path,
+            )
+            os.close(tmp_fd)
+            try:
+                save_file(new_tensors, tmp_path, metadata=metadata)
+                with safe_open(tmp_path, framework="pt") as verify:
+                    verify_keys = set(verify.keys())
+                if verify_keys != set(new_tensors.keys()):
+                    raise RuntimeError(
+                        f"Scale removal verification failed: wrote "
+                        f"{len(new_tensors)} keys but read back {len(verify_keys)}"
+                    )
+                os.replace(tmp_path, shard_path)
+            except Exception:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
 
         # Update index
         index["weight_map"] = weight_map
