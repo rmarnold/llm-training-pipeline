@@ -567,398 +567,170 @@ def _load_base_and_adapter(
     return model, tok
 
 
-def unpack_moe_expert_tensors(save_path: str) -> bool:
-    """Unpack Unsloth's packed MoE expert tensors into standard HF format.
+def cleanup_merged_moe(save_path: str) -> bool:
+    """Clean up MXFP4 artifacts from Unsloth's merged MoE model output.
 
-    After Unsloth merges LoRA into an MoE model and dequantizes MXFP4 to bf16,
-    the expert FFN weights are saved in Unsloth's internal packed format: all
-    experts' weights batched into single large tensors (e.g., 32 experts'
-    down_proj stacked into one 'down_proj_blocks' tensor of shape
-    [num_experts * dim, ...]). Standard HuggingFace model loaders expect
-    individual per-expert tensors (down_projs.0.weight, down_projs.1.weight, ...).
+    After Unsloth merges LoRA into a GPT-OSS MoE model and dequantizes MXFP4
+    to bf16, the expert weights are saved in PACKED format — all 32 experts'
+    weights in a single 3D tensor per projection type:
+      - gate_up_proj: [num_experts, hidden_size, 2*intermediate_size]
+      - down_proj:    [num_experts, intermediate_size, hidden_size]
 
-    This function:
-    1. Determines expected key format from the model architecture (not the
-       original MXFP4 model, which has different key names).
-    2. Identifies packed tensors, quantization artifacts, and misnamed keys.
-    3. Unpacks batched tensors into individual expert weights.
-    4. Removes MXFP4 scale artifacts (*_scales tensors).
-    5. Fixes router key naming (router.weight -> router.linear.weight).
+    This IS the correct format for the GptOssForCausalLM model class in
+    transformers >= 5.x, which uses @use_experts_implementation(is_transposed=True)
+    and stores weights as nn.Parameter with packed shapes. The forward pass
+    does x @ W[expert_idx] (not F.linear which transposes).
 
-    Note: The previous fix_unsloth_moe_keys() compared against the original
-    MXFP4 model's HF Hub index, which has _blocks-suffixed keys. This caused
-    it to INCORRECTLY rename attention layer keys (e.g., self_attn.down_proj
-    -> self_attn.down_proj_blocks). This function avoids that by using the
-    architecture's own expected state_dict keys.
+    Previous versions of this code (unpack_moe_expert_tensors) INCORRECTLY
+    split the packed tensors into individual per-expert tensors, breaking
+    the model and producing garbage output.
+
+    This function only:
+    1. Strips quantization_config from config.json (prevents bf16 being
+       loaded as Linear4bit/MXFP4).
+    2. Removes any leftover _scales tensors (MXFP4 quantization artifacts).
+    3. Validates that keys match what the model class expects.
 
     Args:
-        save_path: Path to the merged model directory (with safetensors + config.json).
+        save_path: Path to the merged model directory.
 
     Returns:
-        True if any fixes were applied.
+        True if any changes were made.
     """
     import json
     import re
-    from collections import defaultdict
 
-    # Read safetensors index
+    changed = False
+
+    # --- 1. Strip quantization_config from config.json ---
+    config_path = os.path.join(save_path, "config.json")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            config = json.load(f)
+        if "quantization_config" in config:
+            del config["quantization_config"]
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2, sort_keys=True)
+            print(f"  Stripped quantization_config from config.json")
+            changed = True
+
+    # --- 2. Remove any _scales tensors (MXFP4 artifacts) ---
     index_path = os.path.join(save_path, "model.safetensors.index.json")
     if not os.path.exists(index_path):
-        single_path = os.path.join(save_path, "model.safetensors")
-        if os.path.exists(single_path):
-            print(f"  Single safetensors file (no index), skipping")
-        else:
-            print(f"  No safetensors found at {save_path}, skipping")
-        return False
+        print(f"  No safetensors index found, skipping artifact cleanup")
+        return changed
 
     with open(index_path) as f:
         index = json.load(f)
     weight_map = index["weight_map"]
+
+    # Find scale artifacts
+    scale_keys = [k for k in weight_map if re.match(r".*_scales$", k)]
+    if scale_keys:
+        from collections import defaultdict
+
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+
+        # Group by shard for efficient processing
+        shard_removes = defaultdict(list)
+        for key in scale_keys:
+            shard_removes[weight_map[key]].append(key)
+            del weight_map[key]
+
+        for shard_file, keys_to_remove in shard_removes.items():
+            shard_path = os.path.join(save_path, shard_file)
+            remove_set = set(keys_to_remove)
+            new_tensors = {}
+            metadata = {}
+
+            with safe_open(shard_path, framework="pt") as f:
+                meta = f.metadata()
+                if meta:
+                    metadata = dict(meta)
+                for key in f.keys():
+                    if key not in remove_set:
+                        new_tensors[key] = f.get_tensor(key)
+
+            save_file(new_tensors, shard_path, metadata=metadata)
+
+        # Update index
+        index["weight_map"] = weight_map
+        with open(index_path, "w") as f:
+            json.dump(index, f, indent=2, sort_keys=True)
+
+        print(f"  Removed {len(scale_keys)} MXFP4 scale artifacts")
+        changed = True
+
+    # --- 3. Validate key format ---
     actual_keys = set(weight_map.keys())
+    expert_keys = sorted([k for k in actual_keys if "expert" in k and "layers.0." in k])
+    print(f"  Expert keys (layer 0): {expert_keys}")
+    print(f"  Total model keys: {len(actual_keys)}")
 
-    # Get expected keys from the model architecture (on meta device = no memory)
-    from transformers import AutoConfig, AutoModelForCausalLM
+    if not changed:
+        print(f"  No cleanup needed — merged model is ready")
 
-    config = AutoConfig.from_pretrained(save_path)
-    with torch.device("meta"):
-        ref_model = AutoModelForCausalLM.from_config(config)
-    ref_state = ref_model.state_dict()
-    expected_keys = set(ref_state.keys())
-    expected_shapes = {k: tuple(v.shape) for k, v in ref_state.items()}
-    del ref_model, ref_state
-
-    missing = sorted(expected_keys - actual_keys)
-    extra = sorted(actual_keys - expected_keys)
-
-    if not missing and not extra:
-        print(f"  All keys match expected format — no fixes needed")
-        return False
-
-    print(f"  Key mismatch: {len(missing)} missing, {len(extra)} extra vs expected architecture")
-
-    # Get num_experts from config
-    num_experts = getattr(config, "num_local_experts",
-                          getattr(config, "num_experts", None))
-    if num_experts is None:
-        # Try nested config
-        for attr in ["moe", "mixture_of_experts"]:
-            sub = getattr(config, attr, None)
-            if sub and hasattr(sub, "num_experts"):
-                num_experts = sub.num_experts
-                break
-    if num_experts is None:
-        print(f"  Could not determine num_experts from config, trying 32")
-        num_experts = 32
-
-    # === Build transformation plan ===
-    # Map each extra key to its transform: rename, split, or remove
-    transforms = {}  # extra_key -> (op_type, op_data)
-    remaining_missing = set(missing)
-    remaining_extra = set(extra)
-
-    # --- 1. Simple renames (1:1 key mapping) ---
-    # e.g., router.weight -> router.linear.weight
-    for e_key in list(remaining_extra):
-        candidates = []
-        # Router module: router.weight -> router.linear.weight
-        if ".router.weight" in e_key and ".router.linear." not in e_key:
-            candidates.append(e_key.replace(".router.weight", ".router.linear.weight"))
-        if ".router.bias" in e_key and ".router.linear." not in e_key:
-            candidates.append(e_key.replace(".router.bias", ".router.linear.bias"))
-
-        for candidate in candidates:
-            if candidate in remaining_missing:
-                transforms[e_key] = ("rename", candidate)
-                remaining_missing.discard(candidate)
-                remaining_extra.discard(e_key)
-                break
-
-    # --- 2. Packed -> unpacked (1:N tensor splits) ---
-    # Group missing keys by expert pattern to find groups of N experts
-    # e.g., model.layers.0.mlp.experts.down_projs.{0-31}.weight
-    missing_groups = defaultdict(list)
-    for key in remaining_missing:
-        # Replace expert index with placeholder
-        pattern_key = re.sub(r"(\.experts\.\w+)\.(\d+)\.", r"\1.{E}.", key)
-        missing_groups[pattern_key].append(key)
-
-    for pattern, group_keys in missing_groups.items():
-        if len(group_keys) != num_experts:
-            continue  # Not a complete expert group
-
-        # Determine the packed key name from the pattern
-        # Pattern: "model.layers.0.mlp.experts.down_projs.{E}.weight"
-        # Packed:  "model.layers.0.mlp.experts.down_proj_blocks"
-        # Also try: "model.layers.0.mlp.experts.down_proj" (without _blocks)
-        m = re.match(r"(.+\.experts\.)(\w+)s\.\{E\}\.(weight|bias)", pattern)
-        if not m:
-            continue
-
-        prefix = m.group(1)      # model.layers.0.mlp.experts.
-        proj_name = m.group(2)   # down_proj or gate_up_proj
-        param_type = m.group(3)  # weight or bias
-
-        # Candidates MUST be param_type-specific to avoid collision:
-        # 'gate_up_proj' is the weight packed key but would also match
-        # the bias group if processed first (set iteration is unordered).
-        if param_type == "weight":
-            packed_candidates = [
-                f"{prefix}{proj_name}_blocks",      # down_proj_blocks (Unsloth MXFP4)
-                f"{prefix}{proj_name}",              # down_proj (Unsloth packed weight)
-            ]
-        else:  # bias
-            packed_candidates = [
-                f"{prefix}{proj_name}_{param_type}", # down_proj_bias (Unsloth packed bias)
-            ]
-
-        for packed_key in packed_candidates:
-            if packed_key in remaining_extra:
-                sorted_keys = sorted(group_keys,
-                    key=lambda k: int(re.search(r"\.(\d+)\.", k).group(1)))
-                transforms[packed_key] = ("split", sorted_keys)
-                remaining_extra.discard(packed_key)
-                for k in sorted_keys:
-                    remaining_missing.discard(k)
-                break
-
-    # --- 3. Scale artifacts to remove ---
-    for e_key in list(remaining_extra):
-        if re.match(r".*\.experts\.\w+_scales$", e_key):
-            transforms[e_key] = ("remove", None)
-            remaining_extra.discard(e_key)
-
-    # Report plan
-    renames = sum(1 for v in transforms.values() if v[0] == "rename")
-    splits = sum(1 for v in transforms.values() if v[0] == "split")
-    removes = sum(1 for v in transforms.values() if v[0] == "remove")
-
-    print(f"  Transform plan: {splits} unpack, {renames} rename, {removes} remove")
-
-    if remaining_missing:
-        # Show a sample of unresolved missing keys
-        sample = list(remaining_missing)[:5]
-        print(f"  Note: {len(remaining_missing)} expected keys not in merged output (likely zero-init biases):")
-        for k in sample:
-            print(f"    {k}")
-        if len(remaining_missing) > 5:
-            print(f"    ... and {len(remaining_missing) - 5} more")
-
-    if remaining_extra:
-        sample = list(remaining_extra)[:5]
-        print(f"  WARNING: {len(remaining_extra)} extra keys not handled:")
-        for k in sample:
-            print(f"    {k}")
-
-    if not transforms:
-        print(f"  No transforms to apply")
-        return False
-
-    # === Execute transforms per shard ===
-    from safetensors import safe_open
-    from safetensors.torch import save_file
-
-    new_weight_map = dict(weight_map)
-    shard_ops = defaultdict(dict)
-
-    for key, (op_type, op_data) in transforms.items():
-        shard = weight_map[key]
-        shard_ops[shard][key] = (op_type, op_data)
-
-    total_created = 0
-    for shard_file, ops in shard_ops.items():
-        shard_path = os.path.join(save_path, shard_file)
-        print(f"  Processing {shard_file} ({len(ops)} transforms)...")
-
-        new_tensors = {}
-        metadata = {}
-
-        with safe_open(shard_path, framework="pt") as f:
-            meta = f.metadata()
-            if meta:
-                metadata = dict(meta)
-
-            for key in f.keys():
-                if key not in ops:
-                    new_tensors[key] = f.get_tensor(key)
-                    continue
-
-                op_type, op_data = ops[key]
-
-                if op_type == "remove":
-                    del new_weight_map[key]
-                    continue
-
-                tensor = f.get_tensor(key)
-
-                if op_type == "rename":
-                    new_tensors[op_data] = tensor
-                    del new_weight_map[key]
-                    new_weight_map[op_data] = shard_file
-
-                elif op_type == "split":
-                    target_keys = op_data
-
-                    if tensor.shape[0] == num_experts:
-                        # Format: [num_experts, dim1, ...] — unbind removes expert dim
-                        chunks = list(tensor.unbind(dim=0))
-                        per_expert_shape = list(tensor.shape[1:])
-                    else:
-                        # Format: [num_experts * dim1, ...] — split along dim 0
-                        expert_dim = tensor.shape[0] // num_experts
-                        chunks = list(tensor.split(expert_dim, dim=0))
-                        per_expert_shape = [expert_dim] + list(tensor.shape[1:])
-
-                    print(f"    Unpack {key}: {list(tensor.shape)} -> {num_experts} x {per_expert_shape}")
-
-                    if len(chunks) != len(target_keys):
-                        print(f"    ERROR: {len(chunks)} chunks != {len(target_keys)} targets, keeping original")
-                        new_tensors[key] = tensor
-                        continue
-
-                    for chunk, target_key in zip(chunks, target_keys):
-                        chunk_shape = tuple(chunk.shape)
-                        exp_shape = expected_shapes.get(target_key)
-                        # Only transpose when shape explicitly mismatches expected.
-                        # gate_up_proj [2880, 5760] vs expected [5760, 2880] → transpose.
-                        # down_proj [2880, 2880] vs expected [2880, 2880] → keep as-is.
-                        if exp_shape and chunk_shape != exp_shape and chunk.dim() == 2:
-                            reversed_shape = (chunk_shape[1], chunk_shape[0])
-                            if reversed_shape == exp_shape:
-                                print(f"      Transposing {target_key}: {list(chunk_shape)} -> {list(exp_shape)}")
-                                chunk = chunk.T.contiguous()
-                            else:
-                                print(f"      WARNING: shape {list(chunk_shape)} != expected {list(exp_shape)} and transpose doesn't fix it")
-                        new_tensors[target_key] = chunk
-                        new_weight_map[target_key] = shard_file
-                    total_created += len(target_keys)
-
-                    del new_weight_map[key]
-
-        save_file(new_tensors, shard_path, metadata=metadata)
-
-    # Update the index
-    index["weight_map"] = new_weight_map
-    with open(index_path, "w") as f:
-        json.dump(index, f, indent=2, sort_keys=True)
-
-    print(f"  Done: {total_created} expert tensors unpacked, {removes} artifacts removed, {renames} keys renamed")
-    return True
+    return changed
 
 
-def _diagnose_expert_weights(save_path: str, base_model: str) -> None:
-    """Compare unpacked expert weights against the original base model.
+def _validate_merged_keys(save_path: str) -> None:
+    """Validate merged model keys match expected GptOss format.
 
-    Downloads one shard from the base model and compares a few expert tensors
-    to verify that (a) the LoRA merge actually changed them and (b) the
-    unpacking preserved reasonable values.
+    Loads the model class on meta device and compares against saved keys.
+    Reports any mismatches for debugging.
     """
     import json
 
-    print(f"\n  === Weight Diagnostic ===")
+    print(f"\n  === Key Validation ===")
 
     try:
-        from huggingface_hub import hf_hub_download
-        from safetensors import safe_open
+        from transformers import AutoConfig, AutoModelForCausalLM
 
-        # Find which shard contains layer 0 experts in our output
+        config = AutoConfig.from_pretrained(save_path)
+        with torch.device("meta"):
+            ref_model = AutoModelForCausalLM.from_config(config)
+        expected_keys = set(ref_model.state_dict().keys())
+        expected_shapes = {k: tuple(v.shape) for k, v in ref_model.state_dict().items()}
+        del ref_model
+
         index_path = os.path.join(save_path, "model.safetensors.index.json")
         with open(index_path) as f:
             index = json.load(f)
+        actual_keys = set(index["weight_map"].keys())
 
-        # Test keys: one non-square (gate_up) and one square (down_proj)
-        test_keys = [
-            "model.layers.0.mlp.experts.gate_up_projs.0.weight",
-            "model.layers.0.mlp.experts.down_projs.0.weight",
-            "model.layers.0.block_sparse_moe.experts.0.w1.weight",  # alt naming
-        ]
+        missing = sorted(expected_keys - actual_keys)
+        extra = sorted(actual_keys - expected_keys)
 
-        # Find available test keys in our output
-        available = [k for k in test_keys if k in index["weight_map"]]
-        if not available:
-            # Try to discover actual key names
-            expert_keys = [k for k in index["weight_map"] if "expert" in k and ".0." in k and "weight" in k]
-            available = expert_keys[:2]
+        if not missing and not extra:
+            print(f"  All {len(actual_keys)} keys match expected model format")
+        else:
+            if missing:
+                print(f"  {len(missing)} missing keys (first 5):")
+                for k in missing[:5]:
+                    print(f"    {k}: expected shape {expected_shapes.get(k)}")
+            if extra:
+                print(f"  {len(extra)} extra keys (first 5):")
+                for k in extra[:5]:
+                    print(f"    {k}")
 
-        if not available:
-            print(f"  No expert keys found in output, skipping diagnostic")
-            return
-
-        # Load our unpacked tensors
-        our_tensors = {}
-        for key in available:
+        # Spot-check a few expert tensor shapes
+        from safetensors import safe_open
+        check_keys = [k for k in actual_keys if "layers.0.mlp.experts" in k and "weight" not in k.split(".")[-1].replace("weight", "")]
+        check_keys = sorted([k for k in actual_keys if "layers.0.mlp.experts" in k])[:4]
+        for key in check_keys:
             shard_file = index["weight_map"][key]
             shard_path = os.path.join(save_path, shard_file)
             with safe_open(shard_path, framework="pt") as f:
-                our_tensors[key] = f.get_tensor(key)
+                tensor = f.get_tensor(key)
+            exp = expected_shapes.get(key, "N/A")
+            match = "OK" if exp != "N/A" and tuple(tensor.shape) == exp else "MISMATCH" if exp != "N/A" else "?"
+            print(f"  {key}: {list(tensor.shape)} (expected {exp}) [{match}]")
 
-        # Try to load same keys from base model
-        # First check if base model index is cached
-        try:
-            base_index_path = hf_hub_download(base_model, "model.safetensors.index.json")
-            with open(base_index_path) as f:
-                base_index = json.load(f)
-        except Exception as e:
-            print(f"  Could not load base model index: {e}")
-            # Still report our tensor stats
-            for key, tensor in our_tensors.items():
-                print(f"  {key}: shape={list(tensor.shape)}, dtype={tensor.dtype}")
-                print(f"    mean={tensor.float().mean():.6f}, std={tensor.float().std():.6f}")
-                print(f"    min={tensor.float().min():.6f}, max={tensor.float().max():.6f}")
-                print(f"    has_nan={tensor.isnan().any()}, has_inf={tensor.isinf().any()}")
-            return
-
-        for key in available:
-            if key not in base_index["weight_map"]:
-                print(f"  {key}: not found in base model (different naming)")
-                # Report our stats anyway
-                tensor = our_tensors[key]
-                print(f"    OUR:  shape={list(tensor.shape)}, mean={tensor.float().mean():.6f}, std={tensor.float().std():.6f}")
-                continue
-
-            base_shard_file = base_index["weight_map"][key]
-            try:
-                base_shard_path = hf_hub_download(base_model, base_shard_file)
-            except Exception as e:
-                print(f"  Could not download base shard for {key}: {e}")
-                continue
-
-            with safe_open(base_shard_path, framework="pt") as f:
-                base_tensor = f.get_tensor(key)
-
-            ours = our_tensors[key]
-            print(f"  {key}:")
-            print(f"    BASE: shape={list(base_tensor.shape)}, mean={base_tensor.float().mean():.6f}, std={base_tensor.float().std():.6f}")
-            print(f"    OURS: shape={list(ours.shape)}, mean={ours.float().mean():.6f}, std={ours.float().std():.6f}")
-
-            if base_tensor.shape == ours.shape:
-                diff = (ours.float() - base_tensor.float()).abs()
-                cos_sim = torch.nn.functional.cosine_similarity(
-                    ours.float().flatten().unsqueeze(0),
-                    base_tensor.float().flatten().unsqueeze(0),
-                )
-                print(f"    DIFF: max={diff.max():.6f}, mean={diff.mean():.6f}, cosine_sim={cos_sim.item():.6f}")
-                if diff.max() < 1e-6:
-                    print(f"    *** IDENTICAL — LoRA merge did NOT change this tensor! ***")
-                elif cos_sim > 0.999:
-                    print(f"    LoRA merge applied (small delta, high similarity — expected)")
-                elif cos_sim > 0.9:
-                    print(f"    Moderate difference — LoRA delta is significant")
-                else:
-                    print(f"    *** LARGE difference — possible corruption or wrong tensor ***")
-            else:
-                print(f"    Shape mismatch — cannot compare directly")
-                # Try transposed comparison
-                if len(ours.shape) == 2 and ours.shape == (base_tensor.shape[1], base_tensor.shape[0]):
-                    cos_sim = torch.nn.functional.cosine_similarity(
-                        ours.float().T.flatten().unsqueeze(0),
-                        base_tensor.float().flatten().unsqueeze(0),
-                    )
-                    print(f"    Transposed cosine_sim={cos_sim.item():.6f}")
-
-        print(f"  === End Diagnostic ===\n")
+        print(f"  === End Validation ===\n")
 
     except Exception as e:
-        print(f"  Diagnostic failed (non-fatal): {e}")
+        print(f"  Validation failed (non-fatal): {e}")
 
 
 def merge_and_export(
@@ -1022,12 +794,12 @@ def merge_and_export(
                     print(f"  Saved config + tokenizer to complete the merge")
                 else:
                     raise
-            # Unpack Unsloth's packed MoE expert tensors into standard HF format.
-            # Unsloth saves experts as batched tensors (down_proj_blocks) that
-            # must be split into individual expert weights (down_projs.{i}.weight).
-            unpack_moe_expert_tensors(save_path)
-            # Diagnostic: compare unpacked weights against base model
-            _diagnose_expert_weights(save_path, base_model)
+            # Clean up MXFP4 artifacts. Unsloth outputs expert weights in
+            # packed format [num_experts, in, out] which IS correct for
+            # GptOssForCausalLM (transformers >= 5.x). We just need to
+            # strip quantization_config and any leftover _scales tensors.
+            cleanup_merged_moe(save_path)
+            _validate_merged_keys(save_path)
             print(f"Exported HuggingFace format to {save_path}")
 
         elif fmt.startswith("gguf_"):

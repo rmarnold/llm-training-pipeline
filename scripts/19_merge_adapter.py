@@ -92,9 +92,12 @@ def _run_smoke_test(
     """Run a quick generation test on the merged model.
 
     Uses standard HuggingFace AutoModelForCausalLM to verify the merged
-    model loads correctly (after unpack_moe_expert_tensors has unpacked
-    Unsloth's batched expert weights into individual tensors). Falls back
-    to Unsloth if standard loading fails.
+    model loads correctly. Requires transformers >= 5.x which has native
+    GptOssForCausalLM with packed expert format support.
+
+    The merged model uses packed expert tensors [num_experts, in, out]
+    which is the correct format for the GptOssExperts class that uses
+    @use_experts_implementation(is_transposed=True).
     """
     import gc
     import torch
@@ -110,7 +113,15 @@ def _run_smoke_test(
         hf_path = output_dir
 
     try:
+        import transformers
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        print(f"  transformers version: {transformers.__version__}")
+        # GptOssForCausalLM with packed expert format requires transformers >= 5.x
+        major = int(transformers.__version__.split(".")[0])
+        if major < 5:
+            print(f"  WARNING: transformers {transformers.__version__} may not support "
+                  f"packed expert format. Upgrade to >= 5.0 for GptOssForCausalLM.")
 
         print(f"  Loading merged model with AutoModelForCausalLM...")
         model = AutoModelForCausalLM.from_pretrained(
