@@ -100,6 +100,24 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         eval_dataset = load_from_disk(val_data_path)
         print(f"  Evaluation examples: {len(eval_dataset):,}")
 
+    # Profile token lengths to validate seq_len setting
+    from pipeline_lib.data_profiler import profile_seq_lengths
+
+    profile = profile_seq_lengths(
+        dataset_path=train_data_path,
+        tokenizer=tokenizer,
+        sample_size=5000,
+    )
+    configured_seq_len = cli_overrides.get(
+        "max_seq_length", config["data"].get("max_seq_length", 16384),
+    )
+    if profile.get("recommended_seq_len") and profile["recommended_seq_len"] < configured_seq_len:
+        print(f"  NOTE: configured seq_len ({configured_seq_len}) > recommended "
+              f"({profile['recommended_seq_len']}). Extra headroom is fine with packing.")
+    elif profile.get("p99", 0) > configured_seq_len:
+        print(f"  WARNING: {configured_seq_len} will truncate >1% of examples "
+              f"(P99={profile['p99']}). Consider increasing seq_len.")
+
     # Training arguments
     from trl import SFTConfig, SFTTrainer
 
