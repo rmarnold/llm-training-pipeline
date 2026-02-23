@@ -714,6 +714,21 @@ def _convert_packed_to_unpacked(save_path: str) -> bool:
         convert_set = set(convert_keys)
 
         with safe_open(shard_path, framework="pt") as f:
+            shard_keys = set(f.keys())
+
+            # Check if shard was already converted (stale index)
+            missing = convert_set - shard_keys
+            if missing:
+                print(f"  Shard {shard_file}: index lists {len(missing)} packed keys "
+                      f"not in shard (already converted). Rebuilding index...")
+                # Shard has unpacked keys; rebuild index from actual contents
+                for old_key in convert_set:
+                    if old_key in new_weight_map:
+                        del new_weight_map[old_key]
+                for actual_key in shard_keys:
+                    new_weight_map[actual_key] = shard_file
+                continue
+
             meta = f.metadata()
             if meta:
                 metadata = dict(meta)
