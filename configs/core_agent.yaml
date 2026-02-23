@@ -4,7 +4,7 @@ model:
   base_model: "openai/gpt-oss-20b"
   lang_adapter: "checkpoints/lang_rust"  # Merge into base before training
   merge_lang_adapter: true  # Merge lang_rust into base weights
-  max_seq_length: 16384  # Agent sessions are multi-turn
+  max_seq_length: 32768  # Agent sessions are multi-turn (32k with packing)
   load_in_4bit: true
   dtype: null
 
@@ -28,7 +28,7 @@ lora:
 data:
   train_data: "data/rust/core_agent/train"
   val_data: "data/rust/core_agent/val"
-  max_seq_length: 16384
+  max_seq_length: 32768
 
 training:
   num_train_epochs: 2
@@ -44,6 +44,7 @@ training:
   max_grad_norm: 0.5  # Tighter for long-context stability
   weight_decay: 0.01
   optim: "adamw_8bit"
+  packing: true  # Unsloth padding-free batching (3-5x faster, 30% less VRAM)
   seed: 42
 
 logging:
