@@ -71,9 +71,12 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
 
     # Load model
     print(f"\nLoading model: {base_model}")
+    max_seq_length = cli_overrides.get(
+        "max_seq_length", config["model"].get("max_seq_length", 16384),
+    )
     model, tokenizer = load_unsloth_model(
         model_name=base_model,
-        max_seq_length=config["model"].get("max_seq_length", 16384),
+        max_seq_length=max_seq_length,
         load_in_4bit=config["model"].get("load_in_4bit", True),
     )
 
@@ -122,7 +125,9 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         max_grad_norm=config["training"].get("max_grad_norm", 0.5),
         weight_decay=config["training"].get("weight_decay", 0.01),
         optim=config["training"].get("optim", "adamw_8bit"),
-        max_seq_length=config["data"].get("max_seq_length", 16384),
+        max_seq_length=cli_overrides.get(
+            "max_seq_length", config["data"].get("max_seq_length", 16384),
+        ),
         packing=False,
         logging_steps=cli_overrides.get("logging_steps", config["logging"].get("logging_steps", 5)),
         eval_strategy="steps" if eval_dataset else "no",
@@ -155,7 +160,7 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
     print(f"  Output: {output_dir}")
     print(f"  Epochs: {training_args.num_train_epochs}")
     print(f"  LR: {training_args.learning_rate}")
-    print(f"  Max seq length: {config['data'].get('max_seq_length', 16384)}")
+    print(f"  Max seq length: {training_args.max_seq_length}")
 
     resume = cli_overrides.get("resume_from_checkpoint")
     trainer.train(resume_from_checkpoint=resume)
@@ -185,6 +190,8 @@ if __name__ == "__main__":
     parser.add_argument("--save_steps", type=int)
     parser.add_argument("--eval_steps", type=int)
     parser.add_argument("--logging_steps", type=int)
+    parser.add_argument("--max_seq_length", type=int,
+                        help="Override max sequence length for model and SFTConfig")
     parser.add_argument("--output_dir", type=str)
     parser.add_argument("--train_data_path", type=str)
     parser.add_argument("--val_data_path", type=str)
@@ -197,9 +204,9 @@ if __name__ == "__main__":
     for key in ["base_model", "max_steps", "num_train_epochs", "learning_rate",
                  "warmup_ratio", "per_device_train_batch_size",
                  "gradient_accumulation_steps", "save_steps", "eval_steps",
-                 "logging_steps", "output_dir", "train_data_path",
-                 "val_data_path", "resume_from_checkpoint",
-                 "drive_checkpoint_backup"]:
+                 "logging_steps", "max_seq_length", "output_dir",
+                 "train_data_path", "val_data_path",
+                 "resume_from_checkpoint", "drive_checkpoint_backup"]:
         val = getattr(args, key)
         if val is not None:
             cli_overrides[key] = val
