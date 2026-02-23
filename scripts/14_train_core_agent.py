@@ -100,7 +100,7 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         eval_dataset = load_from_disk(val_data_path)
         print(f"  Evaluation examples: {len(eval_dataset):,}")
 
-    # Profile token lengths to validate seq_len setting
+    # Profile token lengths and auto-set optimal seq_len
     from pipeline_lib.data_profiler import profile_seq_lengths
 
     profile = profile_seq_lengths(
@@ -111,12 +111,17 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
     configured_seq_len = cli_overrides.get(
         "max_seq_length", config["data"].get("max_seq_length", 16384),
     )
-    if profile.get("recommended_seq_len") and profile["recommended_seq_len"] < configured_seq_len:
-        print(f"  NOTE: configured seq_len ({configured_seq_len}) > recommended "
-              f"({profile['recommended_seq_len']}). Extra headroom is fine with packing.")
+    recommended = profile.get("recommended_seq_len")
+    if recommended and recommended < configured_seq_len:
+        print(f"  Auto-tuning seq_len: {configured_seq_len} -> {recommended} "
+              f"(P99={profile['p99']}, saves VRAM)")
+        max_seq_length = recommended
     elif profile.get("p99", 0) > configured_seq_len:
-        print(f"  WARNING: {configured_seq_len} will truncate >1% of examples "
-              f"(P99={profile['p99']}). Consider increasing seq_len.")
+        print(f"  WARNING: configured seq_len ({configured_seq_len}) truncates >1% "
+              f"of examples (P99={profile['p99']})")
+        max_seq_length = configured_seq_len
+    else:
+        max_seq_length = configured_seq_len
 
     # Training arguments
     from trl import SFTConfig, SFTTrainer
@@ -143,9 +148,7 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         max_grad_norm=config["training"].get("max_grad_norm", 0.5),
         weight_decay=config["training"].get("weight_decay", 0.01),
         optim=config["training"].get("optim", "adamw_8bit"),
-        max_seq_length=cli_overrides.get(
-            "max_seq_length", config["data"].get("max_seq_length", 16384),
-        ),
+        max_seq_length=max_seq_length,  # Set by profiler or config
         packing=cli_overrides.get("packing", config["training"].get("packing", False)),
         logging_steps=cli_overrides.get("logging_steps", config["logging"].get("logging_steps", 5)),
         eval_strategy="steps" if eval_dataset else "no",
