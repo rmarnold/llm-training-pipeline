@@ -100,28 +100,41 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         eval_dataset = load_from_disk(val_data_path)
         print(f"  Evaluation examples: {len(eval_dataset):,}")
 
-    # Profile token lengths and auto-set optimal seq_len
-    from pipeline_lib.data_profiler import profile_seq_lengths
+    # Detect pre-packed data: has input_ids column, no text column
+    pre_packed = cli_overrides.get("pre_packed", False)
+    if not pre_packed and "input_ids" in train_dataset.column_names and "text" not in train_dataset.column_names:
+        print("  Auto-detected pre-packed dataset (has input_ids, no text column)")
+        pre_packed = True
 
-    profile = profile_seq_lengths(
-        dataset_path=train_data_path,
-        tokenizer=tokenizer,
-        sample_size=5000,
-    )
-    configured_seq_len = cli_overrides.get(
-        "max_seq_length", config["data"].get("max_seq_length", 16384),
-    )
-    recommended = profile.get("recommended_seq_len")
-    if recommended and recommended < configured_seq_len:
-        print(f"  Auto-tuning seq_len: {configured_seq_len} -> {recommended} "
-              f"(P99={profile['p99']}, saves VRAM)")
-        max_seq_length = recommended
-    elif profile.get("p99", 0) > configured_seq_len:
-        print(f"  WARNING: configured seq_len ({configured_seq_len}) truncates >1% "
-              f"of examples (P99={profile['p99']})")
-        max_seq_length = configured_seq_len
+    if pre_packed:
+        # Pre-packed data already has input_ids/attention_mask/labels at fixed seq_len
+        # Read seq_len from the data itself
+        sample_len = len(train_dataset[0]["input_ids"])
+        print(f"  Pre-packed mode: seq_len={sample_len}, packing=False")
+        max_seq_length = sample_len
     else:
-        max_seq_length = configured_seq_len
+        # Profile token lengths and auto-set optimal seq_len
+        from pipeline_lib.data_profiler import profile_seq_lengths
+
+        profile = profile_seq_lengths(
+            dataset_path=train_data_path,
+            tokenizer=tokenizer,
+            sample_size=5000,
+        )
+        configured_seq_len = cli_overrides.get(
+            "max_seq_length", config["data"].get("max_seq_length", 16384),
+        )
+        recommended = profile.get("recommended_seq_len")
+        if recommended and recommended < configured_seq_len:
+            print(f"  Auto-tuning seq_len: {configured_seq_len} -> {recommended} "
+                  f"(P99={profile['p99']}, saves VRAM)")
+            max_seq_length = recommended
+        elif profile.get("p99", 0) > configured_seq_len:
+            print(f"  WARNING: configured seq_len ({configured_seq_len}) truncates >1% "
+                  f"of examples (P99={profile['p99']})")
+            max_seq_length = configured_seq_len
+        else:
+            max_seq_length = configured_seq_len
 
     # Training arguments
     from trl import SFTConfig, SFTTrainer
@@ -149,7 +162,7 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         weight_decay=config["training"].get("weight_decay", 0.01),
         optim=config["training"].get("optim", "adamw_8bit"),
         max_seq_length=max_seq_length,  # Set by profiler or config
-        packing=cli_overrides.get("packing", config["training"].get("packing", False)),
+        packing=False if pre_packed else cli_overrides.get("packing", config["training"].get("packing", False)),
         logging_steps=cli_overrides.get("logging_steps", config["logging"].get("logging_steps", 5)),
         eval_strategy="steps" if eval_dataset else "no",
         eval_steps=cli_overrides.get("eval_steps", config["logging"].get("eval_steps", 250)),
@@ -216,6 +229,8 @@ if __name__ == "__main__":
                         help="Override max sequence length for model and SFTConfig")
     parser.add_argument("--packing", action="store_true",
                         help="Enable sequence packing (Unsloth padding-free batching)")
+    parser.add_argument("--pre_packed", action="store_true",
+                        help="Dataset is pre-packed (skip profiler, force packing=False)")
     parser.add_argument("--output_dir", type=str)
     parser.add_argument("--train_data_path", type=str)
     parser.add_argument("--val_data_path", type=str)
@@ -228,8 +243,8 @@ if __name__ == "__main__":
     for key in ["base_model", "max_steps", "num_train_epochs", "learning_rate",
                  "warmup_ratio", "per_device_train_batch_size",
                  "gradient_accumulation_steps", "save_steps", "eval_steps",
-                 "logging_steps", "max_seq_length", "packing", "output_dir",
-                 "train_data_path", "val_data_path",
+                 "logging_steps", "max_seq_length", "packing", "pre_packed",
+                 "output_dir", "train_data_path", "val_data_path",
                  "resume_from_checkpoint", "drive_checkpoint_backup"]:
         val = getattr(args, key)
         if val is not None:
