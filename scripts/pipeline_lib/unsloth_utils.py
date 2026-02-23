@@ -937,11 +937,12 @@ def cleanup_merged_moe(save_path: str) -> bool:
 
 
 def validate_merged_model(save_path: str) -> bool:
-    """Check if merged model has all expected keys in its safetensor shards.
+    """Check if merged model shards are consistent with the index.
 
-    Compares actual key count from shard files against expected keys from
-    the model class (loaded on meta device — no GPU needed). Returns False
-    if shards are incomplete (e.g. from a corrupted or interrupted conversion).
+    Fully CPU-based — no model loading, no GPU allocation. Verifies:
+    1. All shard files referenced in the index exist
+    2. Actual keys in shard files match what the index claims
+    3. Total key count is reasonable for the model size
 
     This is meant to be called BEFORE deciding to skip a merge — catching
     corrupted Drive restores that look complete (config.json exists) but
@@ -951,7 +952,7 @@ def validate_merged_model(save_path: str) -> bool:
         save_path: Path to the merged model directory.
 
     Returns:
-        True if the model is complete, False if shards are missing keys.
+        True if the model is complete, False if shards are inconsistent.
     """
     import json
 
@@ -961,20 +962,14 @@ def validate_merged_model(save_path: str) -> bool:
 
     try:
         from safetensors import safe_open
-        from transformers import AutoConfig, AutoModelForCausalLM
 
-        # Get expected keys from model class
-        config = AutoConfig.from_pretrained(save_path)
-        with torch.device("meta"):
-            ref_model = AutoModelForCausalLM.from_config(config)
-        expected_keys = set(ref_model.state_dict().keys())
-        del ref_model
-
-        # Count actual keys in shard files (not the index — index could be stale)
         with open(index_path) as f:
             index = json.load(f)
-        shard_files = set(index["weight_map"].values())
+        weight_map = index["weight_map"]
+        index_keys = set(weight_map.keys())
+        shard_files = set(weight_map.values())
 
+        # Read actual keys from each shard file
         actual_keys = set()
         for shard_file in shard_files:
             shard_path = os.path.join(save_path, shard_file)
@@ -984,11 +979,18 @@ def validate_merged_model(save_path: str) -> bool:
             with safe_open(shard_path, framework="pt") as f:
                 actual_keys.update(f.keys())
 
-        missing = expected_keys - actual_keys
-        if missing:
-            print(f"  Merged model incomplete: {len(missing)} keys missing "
-                  f"from shards ({len(actual_keys)} actual vs "
-                  f"{len(expected_keys)} expected)")
+        # Check: every key the index claims must exist in the shards
+        missing_from_shards = index_keys - actual_keys
+        if missing_from_shards:
+            print(f"  Merged model incomplete: index has {len(index_keys)} keys "
+                  f"but shards only contain {len(actual_keys)} "
+                  f"({len(missing_from_shards)} missing)")
+            return False
+
+        # Sanity check: MoE 20B model should have >3000 keys
+        if len(actual_keys) < 3000:
+            print(f"  Merged model suspiciously small: {len(actual_keys)} keys "
+                  f"(expected >3000 for MoE model)")
             return False
 
         return True
