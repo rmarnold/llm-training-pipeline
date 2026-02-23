@@ -128,7 +128,7 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         max_seq_length=cli_overrides.get(
             "max_seq_length", config["data"].get("max_seq_length", 16384),
         ),
-        packing=False,
+        packing=cli_overrides.get("packing", config["training"].get("packing", False)),
         logging_steps=cli_overrides.get("logging_steps", config["logging"].get("logging_steps", 5)),
         eval_strategy="steps" if eval_dataset else "no",
         eval_steps=cli_overrides.get("eval_steps", config["logging"].get("eval_steps", 250)),
@@ -161,6 +161,7 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
     print(f"  Epochs: {training_args.num_train_epochs}")
     print(f"  LR: {training_args.learning_rate}")
     print(f"  Max seq length: {training_args.max_seq_length}")
+    print(f"  Packing: {training_args.packing}")
 
     resume = cli_overrides.get("resume_from_checkpoint")
     trainer.train(resume_from_checkpoint=resume)
@@ -192,6 +193,8 @@ if __name__ == "__main__":
     parser.add_argument("--logging_steps", type=int)
     parser.add_argument("--max_seq_length", type=int,
                         help="Override max sequence length for model and SFTConfig")
+    parser.add_argument("--packing", action="store_true",
+                        help="Enable sequence packing (Unsloth padding-free batching)")
     parser.add_argument("--output_dir", type=str)
     parser.add_argument("--train_data_path", type=str)
     parser.add_argument("--val_data_path", type=str)
@@ -204,7 +207,7 @@ if __name__ == "__main__":
     for key in ["base_model", "max_steps", "num_train_epochs", "learning_rate",
                  "warmup_ratio", "per_device_train_batch_size",
                  "gradient_accumulation_steps", "save_steps", "eval_steps",
-                 "logging_steps", "max_seq_length", "output_dir",
+                 "logging_steps", "max_seq_length", "packing", "output_dir",
                  "train_data_path", "val_data_path",
                  "resume_from_checkpoint", "drive_checkpoint_backup"]:
         val = getattr(args, key)
