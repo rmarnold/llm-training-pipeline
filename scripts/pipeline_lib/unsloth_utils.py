@@ -936,6 +936,68 @@ def cleanup_merged_moe(save_path: str) -> bool:
     return changed
 
 
+def validate_merged_model(save_path: str) -> bool:
+    """Check if merged model has all expected keys in its safetensor shards.
+
+    Compares actual key count from shard files against expected keys from
+    the model class (loaded on meta device — no GPU needed). Returns False
+    if shards are incomplete (e.g. from a corrupted or interrupted conversion).
+
+    This is meant to be called BEFORE deciding to skip a merge — catching
+    corrupted Drive restores that look complete (config.json exists) but
+    have truncated shard data.
+
+    Args:
+        save_path: Path to the merged model directory.
+
+    Returns:
+        True if the model is complete, False if shards are missing keys.
+    """
+    import json
+
+    index_path = os.path.join(save_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return False
+
+    try:
+        from safetensors import safe_open
+        from transformers import AutoConfig, AutoModelForCausalLM
+
+        # Get expected keys from model class
+        config = AutoConfig.from_pretrained(save_path)
+        with torch.device("meta"):
+            ref_model = AutoModelForCausalLM.from_config(config)
+        expected_keys = set(ref_model.state_dict().keys())
+        del ref_model
+
+        # Count actual keys in shard files (not the index — index could be stale)
+        with open(index_path) as f:
+            index = json.load(f)
+        shard_files = set(index["weight_map"].values())
+
+        actual_keys = set()
+        for shard_file in shard_files:
+            shard_path = os.path.join(save_path, shard_file)
+            if not os.path.exists(shard_path):
+                print(f"  Shard missing: {shard_file}")
+                return False
+            with safe_open(shard_path, framework="pt") as f:
+                actual_keys.update(f.keys())
+
+        missing = expected_keys - actual_keys
+        if missing:
+            print(f"  Merged model incomplete: {len(missing)} keys missing "
+                  f"from shards ({len(actual_keys)} actual vs "
+                  f"{len(expected_keys)} expected)")
+            return False
+
+        return True
+
+    except Exception as e:
+        print(f"  Validation error: {e}")
+        return False
+
+
 def _validate_merged_keys(save_path: str) -> None:
     """Validate merged model keys match expected GptOss format.
 
