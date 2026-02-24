@@ -1,9 +1,9 @@
 """GRPO (Group Relative Policy Optimization) RL training with execution rewards.
 
-Trains the model using rule-based rewards from actual Rust code execution:
-- cargo check (compilation)
-- cargo test (correctness)
-- cargo clippy (idiomatic code)
+Trains the model using rule-based rewards from actual code execution.
+Supports multiple languages via evaluator dispatch:
+- Rust: cargo check / cargo test / cargo clippy
+- Python: syntax check / pytest / mypy / ruff
 
 GRPO generates N completions per prompt, computes rewards, and optimizes
 using group-relative advantages (no critic network needed).
@@ -14,6 +14,7 @@ length during training.
 Usage:
     python scripts/18_grpo_rl.py
     python scripts/18_grpo_rl.py --config configs/grpo.yaml
+    python scripts/18_grpo_rl.py --config configs/grpo_python.yaml --language python
     python scripts/18_grpo_rl.py --max_steps 2000
 
 Requires: pip install -e ".[gpt_oss]"
@@ -29,7 +30,7 @@ import json
 import yaml
 
 from pipeline_lib.unsloth_utils import load_unsloth_model, save_adapter, print_trainable_params
-from pipeline_lib.rust_evaluators import compute_execution_reward
+from pipeline_lib.evaluator_dispatch import compute_execution_reward
 
 
 def load_tasks(task_source: str, num_tasks: int = 1000) -> list[dict]:
@@ -92,19 +93,21 @@ def get_curriculum_seq_length(step: int, curriculum: dict) -> int:
 def compute_rewards_batch(
     completions: list[str],
     reward_config: dict,
+    language: str = "rust",
 ) -> list[float]:
     """Compute execution-based rewards for a batch of completions.
 
     Args:
         completions: List of generated code strings.
         reward_config: Reward values from config.
+        language: Target language for evaluator dispatch.
 
     Returns:
         List of float rewards.
     """
     rewards = []
     for code in completions:
-        reward = compute_execution_reward(code, reward_config=reward_config)
+        reward = compute_execution_reward(code, language=language, reward_config=reward_config)
         rewards.append(reward)
     return rewards
 
@@ -155,6 +158,11 @@ def train_grpo(config_path: str = "configs/grpo.yaml", cli_overrides: dict | Non
         print("ERROR: No tasks loaded. Cannot train.")
         return
 
+    # Language for evaluator dispatch (defaults to "rust" for backward compat)
+    # Check top-level config first, then data section (grpo_python.yaml uses data.language)
+    config_language = config.get("language", config.get("data", {}).get("language", "rust"))
+    language = cli_overrides.get("language", config_language)
+
     # Training config
     max_steps = cli_overrides.get("max_steps", config["training"].get("max_steps", 5000))
     num_generations = config["training"].get("num_generations", 4)
@@ -168,6 +176,7 @@ def train_grpo(config_path: str = "configs/grpo.yaml", cli_overrides: dict | Non
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\nGRPO Configuration:")
+    print(f"  Language: {language}")
     print(f"  Max steps: {max_steps}")
     print(f"  Generations per prompt: {num_generations}")
     print(f"  Temperature: {temperature}")
@@ -184,14 +193,14 @@ def train_grpo(config_path: str = "configs/grpo.yaml", cli_overrides: dict | Non
         print("\nUsing TRL GRPOTrainer...")
         _train_with_trl_grpo(
             model, tokenizer, tasks, config, cli_overrides,
-            output_dir, max_steps, reward_config, curriculum,
+            output_dir, max_steps, reward_config, curriculum, language,
         )
     else:
         print("\nTRL GRPOTrainer not available. Using manual GRPO loop...")
         _train_manual_grpo(
             model, tokenizer, tasks, config,
             output_dir, max_steps, num_generations, temperature,
-            max_new_tokens, reward_config, curriculum, save_steps,
+            max_new_tokens, reward_config, curriculum, save_steps, language,
         )
 
     # Save final adapter
@@ -204,7 +213,7 @@ def train_grpo(config_path: str = "configs/grpo.yaml", cli_overrides: dict | Non
 
 def _train_with_trl_grpo(
     model, tokenizer, tasks, config, cli_overrides,
-    output_dir, max_steps, reward_config, _curriculum,
+    output_dir, max_steps, reward_config, _curriculum, language="rust",
 ):
     """Train using TRL's GRPOTrainer.
 
@@ -253,7 +262,7 @@ def _train_with_trl_grpo(
 
     def reward_fn(completions, **_kwargs):
         """Compute execution rewards for generated completions."""
-        return compute_rewards_batch(completions, reward_config)
+        return compute_rewards_batch(completions, reward_config, language=language)
 
     trainer = GRPOTrainer(
         model=model,
@@ -269,7 +278,7 @@ def _train_with_trl_grpo(
 def _train_manual_grpo(
     model, tokenizer, tasks, config,
     output_dir, max_steps, num_generations, temperature,
-    max_new_tokens, reward_config, curriculum, save_steps,
+    max_new_tokens, reward_config, curriculum, save_steps, language="rust",
 ):
     """Manual GRPO training loop (fallback when TRL GRPOTrainer unavailable)."""
     import torch
@@ -329,7 +338,7 @@ def _train_manual_grpo(
                 completions.append(completion)
 
         # Compute rewards
-        rewards = compute_rewards_batch(completions, reward_config)
+        rewards = compute_rewards_batch(completions, reward_config, language=language)
 
         # Group-relative advantage
         mean_reward = sum(rewards) / len(rewards) if rewards else 0
@@ -394,12 +403,14 @@ if __name__ == "__main__":
     parser.add_argument("--logging_steps", type=int)
     parser.add_argument("--output_dir", type=str)
     parser.add_argument("--task_source", type=str)
+    parser.add_argument("--language", type=str, help="Evaluator language (rust, python)")
     args = parser.parse_args()
 
     cli_overrides = {}
     for key in ["checkpoint", "max_steps", "learning_rate",
                  "per_device_train_batch_size", "gradient_accumulation_steps",
-                 "save_steps", "logging_steps", "output_dir", "task_source"]:
+                 "save_steps", "logging_steps", "output_dir", "task_source",
+                 "language"]:
         val = getattr(args, key)
         if val is not None:
             cli_overrides[key] = val

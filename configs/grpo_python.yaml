@@ -1,0 +1,76 @@
+run_name: "gpt-oss-20b-grpo-python-v1"
+
+model:
+  checkpoint: "checkpoints/core_agent_python_ipo"
+  max_seq_length: 32768
+  load_in_4bit: true
+  dtype: null
+
+data:
+  task_source: "data/python/grpo/tasks.jsonl"
+  num_tasks: 1000
+  language: "python"  # Tells 18_grpo_rl.py which evaluator to instantiate
+
+training:
+  num_train_epochs: 1
+  max_steps: 5000
+  learning_rate: 1.0e-6  # Very conservative for RL
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+
+  bf16: true
+  max_grad_norm: 0.5
+  weight_decay: 0.0
+  optim: "adamw_8bit"
+  seed: 42
+
+  # GRPO-specific
+  num_generations: 4  # Samples per prompt for group advantage
+  temperature: 0.7
+  max_new_tokens: 2048
+
+logging:
+  logging_steps: 1
+  eval_steps: 50
+  save_steps: 200
+  save_total_limit: 3
+  report_to: ["tensorboard"]
+
+checkpointing:
+  output_dir: "checkpoints/core_agent_python_grpo"
+
+# Rule-based reward function (Python evaluator)
+rewards:
+  all_tests_pass_lint_clean: 1.0        # pytest green + ruff/mypy clean
+  all_tests_pass_lint_warnings: 0.7     # pytest green + lint warnings only
+  syntax_valid_some_tests_fail: 0.1     # parses/imports OK but tests fail
+  syntax_error: -0.3                    # SyntaxError or ImportError at parse time
+  invalid_tool_call_format: -1.0        # Malformed tool call structure
+
+# Long-context curriculum
+curriculum:
+  enabled: true
+  schedule:
+    - seq_length: 4096
+      steps: 1000
+      description: "Single-file fixes, simple bugs"
+    - seq_length: 8192
+      steps: 2000
+      description: "Multi-file with 2-3 files"
+    - seq_length: 16384
+      steps: 3500
+      description: "Full module navigation"
+    - seq_length: 32768
+      steps: 5000
+      description: "Large repo exploration"
+
+# Execution sandbox (Python toolchain)
+sandbox:
+  syntax_check_timeout: 10    # python -m py_compile / ast.parse
+  pytest_timeout: 300         # Full test suite run
+  mypy_timeout: 60            # Static type checking
+  ruff_timeout: 30            # Linting and style checks
+  max_concurrent_executions: 4

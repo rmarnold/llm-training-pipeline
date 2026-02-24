@@ -8,6 +8,7 @@ Provides subprocess wrappers for:
 - Solution ranking for IPO preference pairs
 
 All cargo commands run in isolated temp directories with timeouts.
+Registered as the "rust" evaluator via evaluator_dispatch.
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from pipeline_lib.evaluator_dispatch import register_evaluator
 
 
 @dataclass
@@ -366,3 +369,23 @@ def rank_solutions_by_execution(
     # Sort by score descending
     ranked.sort(key=lambda x: x[1], reverse=True)
     return ranked
+
+
+@register_evaluator("rust")
+class RustEvaluator:
+    """Evaluator for Rust code using cargo check/test/clippy."""
+
+    def compute_execution_reward(
+        self,
+        code: str,
+        tool_calls: list[dict[str, Any]] | None = None,
+        reward_config: dict[str, float] | None = None,
+    ) -> float:
+        return compute_execution_reward(code, tool_calls=tool_calls, reward_config=reward_config)
+
+    def rank_solutions_by_execution(
+        self,
+        solutions: list[str],
+        tests_code: str | None = None,
+    ) -> list[tuple[str, float, dict[str, bool]]]:
+        return rank_solutions_by_execution(solutions, tests_code=tests_code)
