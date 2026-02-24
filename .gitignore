@@ -51,6 +51,9 @@ __pycache__/
 .pytest_cache/
 *.pyc
 
+# Worktrees
+.worktrees/
+
 # OS
 .DS_Store
 Thumbs.db
