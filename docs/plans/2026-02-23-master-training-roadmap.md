@@ -482,6 +482,120 @@ checkpoints/
 
 ---
 
+## Harmony Format Strategy
+
+All GPT-OSS training data uses the Harmony format (`dataset_formatters/harmony.py`). Harmony provides structured special tokens that enable multi-channel training — the model doesn't just learn to generate code, it learns to *think*, *plan*, *use tools*, and *respond* through dedicated channels.
+
+### Harmony Special Tokens
+
+| Token | Purpose | Training Signal |
+|-------|---------|----------------|
+| `<\|developer\|>` | System-level instructions | Teaches constraint following |
+| `<\|thinking\|>...<\|/thinking\|>` | Internal reasoning | Teaches structured problem-solving |
+| `<\|tool_call\|>` | Structured function calls | Teaches tool selection and argument formatting |
+| `<\|tool_result\|>` | Tool output ingestion | Teaches parsing execution results |
+| `<\|tool_call_id\|>` | Call-result correlation | Teaches multi-tool coordination |
+| `<\|assistant\|>` | Final response | Teaches concise user-facing output |
+
+### Thinking Channel Optimization
+
+The `<|thinking|>` block is the model's scratch space. Training data should use structured 4-phase reasoning:
+
+```
+<|thinking|>
+**Observe**: The test fails with "TypeError: expected str, got int" on line 42.
+**Hypothesize**: The `format_output()` function receives an int where it expects str.
+**Plan**: Read the caller to find where the int originates, then add type conversion.
+**Execute**: apply_patch to add str() conversion at the call site.
+<|/thinking|>
+```
+
+Map `reasoning_effort` to task complexity in the curriculum:
+
+| Curriculum Stage | Seq Length | reasoning_effort | Thinking Pattern |
+|-----------------|-----------|-----------------|-----------------|
+| Single-file fixes | 4096 | low | Observe → Execute (skip hypothesis) |
+| Multi-file (2-3) | 8192 | medium | Full 4-phase |
+| Module navigation | 16384 | high | Full 4-phase + alternative consideration |
+| Large repo | 32768 | high | Full 4-phase + multi-step planning |
+
+**Elastic reasoning** — train the model to produce shorter thinking for easy problems and longer thinking for hard problems, rather than fixed-length reasoning. Include both in training data.
+
+### Tool Call Curriculum
+
+Progressive tool complexity maps to GRPO curriculum stages:
+
+| Stage | Steps | Tool Pattern | Example |
+|-------|-------|-------------|---------|
+| 1. Single tool | 0-1000 | One tool call per turn | `read_file("src/main.rs")` |
+| 2. Chains | 1000-2000 | Sequential tool calls | `read_file → apply_patch → run_tests` |
+| 3. Conditional | 2000-3500 | Branch on tool result | If test fails → read error → re-patch |
+| 4. Planning | 3500-5000 | Think before multi-tool | Plan approach in `<\|thinking\|>`, then execute |
+
+### New Harmony Formatters (Future Work)
+
+Expand beyond the current 6 formatters to cover more developer workflows:
+
+| Formatter | Priority | Purpose | Channels Used |
+|-----------|----------|---------|--------------|
+| `harmony_diff` | P0 | Unified diff generation/application | thinking + tool_call + assistant |
+| `harmony_plan` | P1 | Multi-step plan-then-execute | thinking (plan) + tool_call (execute) |
+| `harmony_review` | P1 | Code review with analysis | thinking (analysis) + assistant (feedback) |
+| `harmony_refactor` | P2 | Before/after refactoring pairs | thinking (rationale) + tool_call + assistant |
+| `harmony_explain` | P2 | Code explanation traces | thinking + assistant |
+| `harmony_multifile` | P2 | Cross-file navigation patterns | tool_call chains across files |
+
+`harmony_diff` is highest priority — the model should learn to generate and apply minimal diffs rather than rewriting entire files. This directly improves the "diff minimality" metric.
+
+### Developer Prompt Diversity
+
+Rotate `<|developer|>` prompts to prevent overfitting to a single persona:
+
+**Per-stage rotation**:
+- Core Agent SFT: "You are a {language} coding agent. Use tools to read, modify, and test code."
+- IPO: "You are a senior {language} engineer. Write minimal, correct patches."
+- GRPO: Randomize from a pool per task:
+  - "Fix the bug without changing the public API."
+  - "Debug this production issue. Minimize your changes."
+  - "Review this code and fix any issues you find."
+  - "Implement the function according to the test specification."
+
+### Composite Reward Shaping (GRPO Enhancement)
+
+Extend beyond binary pass/fail rewards with multi-signal composition:
+
+| Signal | Weight | Description |
+|--------|--------|-------------|
+| Execution correctness | 0.5 | Tests pass + lint clean (existing) |
+| Diff minimality | 0.2 | Bonus for smaller, targeted patches |
+| Tool efficiency | 0.15 | Fewer tool calls to reach correct solution |
+| Thinking quality | 0.15 | Structured thinking traces (gated: only counted when code is correct) |
+
+**P-GRPO gating** — only reward thinking quality and tool efficiency when the code is correct. Rewarding "good reasoning + broken code" teaches the model to rationalize failures.
+
+### Trajectory Quality Requirements
+
+| Metric | Requirement | Rationale |
+|--------|------------|-----------|
+| Turn count | 3-7 per trajectory | < 3 = memorization, > 7 = noise |
+| Thinking blocks | >= 1 per trajectory | Must demonstrate reasoning |
+| Tool calls | >= 2 per trajectory | Must demonstrate read-patch-test cycle |
+| Data mix | 10-20% gold, 40-50% self-gen, 30-40% template | Balances quality and diversity |
+
+**Rejection sampling**: Generate N trajectories per task, keep only those that reach the correct solution. Discard trajectories where the model gets lucky without demonstrating reasoning.
+
+### Self-Play Expansion (Phase 6 — Future)
+
+After initial adapter training succeeds, use self-play to generate new training data:
+
+1. **Bug injection**: Model injects mutations into working code, then must repair them. Creates infinite training data from any repo.
+2. **Rejection sampling at scale**: Generate many solutions per task, keep best N, retrain on winners. Each iteration improves.
+3. **Task self-generation**: Model reads a repo and creates its own coding challenges, then solves them. Filters by execution correctness.
+
+Self-play requires a working adapter (Phase 2-3 complete) before it can begin.
+
+---
+
 ## Risk Mitigations
 
 | Risk | Mitigation |
@@ -505,3 +619,6 @@ The pipeline is complete when:
 3. Adapter hot-swapping works in <1s with PEFT
 4. The adapter registry is populated with eval scores
 5. A new language can be added by following the "Adding New Languages" checklist without modifying any existing code
+6. Thinking traces follow the Observe → Hypothesize → Plan → Execute structure in > 80% of multi-file tasks
+7. Model uses appropriate reasoning_effort scaling (short thinking for easy tasks, long for hard)
+8. Tool call efficiency improves over training (fewer calls to reach correct solution)
