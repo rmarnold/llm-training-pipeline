@@ -31,7 +31,7 @@ training:
   num_generations: 4  # Samples per prompt for group advantage
   temperature: 0.7
   max_new_tokens: 2048
-  max_prompt_length: 1024  # Unsloth recommended default for RL
+  max_prompt_length: 8192  # Match IPO; safe for multi-turn prompts
 
 logging:
   logging_steps: 1
