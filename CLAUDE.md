@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Production LLM training pipeline for a 7B parameter model (LLaMA-style architecture) targeting NVIDIA A100/H100 80GB GPUs. Implements staged training: Pretraining → SFT → DPO → LoRA, with promotion gates between stages.
+**Mission: Sequential fine-tuning with a curriculum** — each training stage builds on the previous session's learned representations, progressively shaping the model from general language understanding to specialized coding agent behavior.
+
+Production LLM training pipeline for a 7B parameter model (LLaMA-style architecture) targeting NVIDIA A100/H100 80GB GPUs. Implements staged training: Pretraining → SFT → DPO → LoRA, with promotion gates between stages. The GPT-OSS 20B pipeline extends this with multi-language code training via sequential fine-tuning from a TUI checkpoint that teaches foundational agent skills (tool-calling, multi-turn debugging, patching), followed by language-specific coding curricula (Rust, Python, TypeScript, Go).
 
 ## Commands
 
@@ -31,6 +33,20 @@ python scripts/17_ipo_preference.py              # IPO preference training
 python scripts/18_grpo_rl.py                     # GRPO RL training
 python scripts/eval_rust_agent.py                # Evaluate Rust agent
 
+# Multi-language code training (sequential fine-tuning from TUI checkpoint)
+python scripts/16_generate_mutations.py --language python    # Python mutations
+python scripts/15_generate_trajectories.py --language python # Python trajectories
+python scripts/14_train_core_agent.py --config configs/core_agent_python.yaml
+python scripts/17_ipo_preference.py --config configs/ipo.yaml  # with Python data
+python scripts/18_grpo_rl.py --config configs/grpo_python.yaml --language python
+python scripts/eval_coding_agent.py --config configs/python_eval.yaml
+
+# Multi-language eval (supports rust, python, typescript, go)
+python scripts/eval_coding_agent.py --config configs/rust_eval.yaml
+python scripts/eval_coding_agent.py --config configs/python_eval.yaml
+python scripts/eval_coding_agent.py --config configs/typescript_eval.yaml
+python scripts/eval_coding_agent.py --config configs/go_eval.yaml
+
 # Resume from latest checkpoint
 bash scripts/resume_pipeline.sh pretrain|sft|dpo
 
@@ -54,6 +70,20 @@ MutationGen (16) → TrajectoryGen (15) → LangAdapter (13) → Merge (19)
                                         CoreAgent (14) → IPO (17) → GRPO (18) → Eval
                                                            ↓          ↓
                                                        [gates]    [gates]
+
+Multi-Language Code Training (sequential fine-tuning from TUI checkpoint):
+TUI Session (separate):
+  Tool Calling SFT → Agent SFT → IPO → GRPO → Merge
+  → checkpoints/coding_tui/final_merged
+
+Code Training Session (per language):
+  Load TUI checkpoint as base_model
+  ↓
+  MutationGen (16 --language X) → TrajectoryGen (15 --language X)
+  ↓
+  CoreAgent (14 --config core_agent_X.yaml) → IPO (17) → GRPO (18 --language X) → Eval
+  ↓
+  eval_coding_agent.py --config X_eval.yaml
 ```
 
 Promotion gates (`configs/promotion_gates.yaml`) define thresholds for advancing between stages (perplexity, accuracy, safety refusal rate). Checked via `scripts/12_check_gates.py`.
@@ -82,6 +112,28 @@ Promotion gates (`configs/promotion_gates.yaml`) define thresholds for advancing
 - **Notebook**: `notebooks/train_gpt_oss_coding_tui.ipynb` — Colab companion with GPU tier auto-config, MoE diagnostic, quality gates
 - **Coding TUI notebook**: `notebooks/train_gpt_oss_coding_tui.ipynb` — 4-phase pipeline (Tool Calling SFT → Agent SFT → IPO → GRPO) with non-blocking quality gates
 - **No FA2 for GPT-OSS**: Unsloth's GPT-OSS patches use eager attention only (no Flash Attention 2 path). In-training eval OOMs on seq_len>=8192 — use `--eval_strategy no` for Agent SFT. Quality gate validates loss from `trainer_state.json` instead.
+
+### Multi-Language Code Training Pipeline
+Sequential fine-tuning from the TUI checkpoint (`checkpoints/coding_tui/final_merged`). The model already knows tool-calling, multi-turn conversation, and patching from TUI training. The code training pipeline teaches language-specific debugging using mutation-derived trajectory data.
+
+- **Evaluator dispatch** (`pipeline_lib/evaluator_dispatch.py`): Registry pattern routing `compute_execution_reward()` and `rank_solutions_by_execution()` by language. Registered evaluators: `rust`, `python`, `typescript`, `go`.
+- **`18_grpo_rl.py --language X`**: Dispatches to language-specific evaluator for GRPO rewards instead of hardcoded Rust.
+- **`eval_coding_agent.py --config X_eval.yaml`**: Unified multi-language evaluation script.
+
+#### Per-Language Backends
+
+| Language | Mutation Runner | Evaluator | Tools | Configs |
+|----------|----------------|-----------|-------|---------|
+| Rust | `cargo_mutants_runner.py` | `rust_evaluators.py` (cargo check/test/clippy) | `data_sources_rust.yaml` | `core_agent.yaml`, `grpo.yaml`, `rust_eval.yaml` |
+| Python | `mutmut_runner.py` | `python_evaluators.py` (pytest/mypy/ruff) | `data_sources_python.yaml` | `core_agent_python.yaml`, `grpo_python.yaml`, `python_eval.yaml` |
+| TypeScript | `stryker_runner.py` | `typescript_evaluators.py` (tsc/jest/eslint) | `data_sources_typescript.yaml` | `core_agent_typescript.yaml`, `grpo_typescript.yaml`, `typescript_eval.yaml` |
+| Go | `go_mutesting_runner.py` | `go_evaluators.py` (go build/test/vet/golangci-lint) | `data_sources_go.yaml` | `core_agent_go.yaml`, `grpo_go.yaml`, `go_eval.yaml` |
+
+#### Required Toolchains
+- **Rust**: `cargo`, `cargo-mutants`
+- **Python**: `python`, `pytest`, `mypy`, `ruff`
+- **TypeScript**: `node`, `npx`, StrykerJS (`npx stryker`), `tsc`, `jest`, `eslint`
+- **Go**: `go`, `go-mutesting`, `golangci-lint` (optional, degrades gracefully)
 
 ### MoE Expert LoRA (Critical for GPT-OSS 20B)
 - **Unsloth Bug #3405**: Default target modules (`gate_proj`, `up_proj`, `down_proj`) silently miss MoE expert FFN layers. Only attention gets LoRA (~31.8M params), experts (~19B params) stay frozen.
