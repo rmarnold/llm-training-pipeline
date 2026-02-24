@@ -1,0 +1,75 @@
+run_name: "gpt-oss-20b-grpo-typescript-v1"
+
+model:
+  checkpoint: "checkpoints/core_agent_typescript_ipo"
+  max_seq_length: 32768
+  load_in_4bit: true
+  dtype: null
+
+data:
+  task_source: "data/typescript/grpo/tasks.jsonl"
+  num_tasks: 1000
+  language: "typescript"  # Tells 18_grpo_rl.py which evaluator to instantiate
+
+training:
+  num_train_epochs: 1
+  max_steps: 5000
+  learning_rate: 1.0e-6  # Very conservative for RL
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+
+  bf16: true
+  max_grad_norm: 0.5
+  weight_decay: 0.0
+  optim: "adamw_8bit"
+  seed: 42
+
+  # GRPO-specific
+  num_generations: 4  # Samples per prompt for group advantage
+  temperature: 0.7
+  max_new_tokens: 2048
+
+logging:
+  logging_steps: 1
+  eval_steps: 50
+  save_steps: 200
+  save_total_limit: 3
+  report_to: ["tensorboard"]
+
+checkpointing:
+  output_dir: "checkpoints/core_agent_typescript_grpo"
+
+# Rule-based reward function (TypeScript evaluator)
+rewards:
+  all_tests_pass_lint_clean: 1.0        # jest green + eslint clean + tsc clean
+  all_tests_pass_lint_warnings: 0.7     # jest green + lint/type warnings only
+  type_check_valid_some_tests_fail: 0.1  # tsc clean but jest failures
+  type_check_error: -0.3                # tsc --noEmit reports errors
+  invalid_tool_call_format: -1.0        # Malformed tool call structure
+
+# Long-context curriculum
+curriculum:
+  enabled: true
+  schedule:
+    - seq_length: 4096
+      steps: 1000
+      description: "Single-file fixes, simple type errors"
+    - seq_length: 8192
+      steps: 2000
+      description: "Multi-file with 2-3 modules"
+    - seq_length: 16384
+      steps: 3500
+      description: "Full module navigation"
+    - seq_length: 32768
+      steps: 5000
+      description: "Large repo exploration"
+
+# Execution sandbox (TypeScript toolchain)
+sandbox:
+  tsc_timeout: 30       # npx tsc --noEmit (type checking)
+  jest_timeout: 300     # npx jest (full test suite run)
+  eslint_timeout: 30    # npx eslint (linting and style checks)
+  max_concurrent_executions: 4

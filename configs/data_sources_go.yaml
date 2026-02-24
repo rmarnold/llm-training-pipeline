@@ -1,0 +1,106 @@
+datasets:
+  # ==========================================================================
+  # CORE_AGENT DATA (Agent Trajectories + Tool Use)
+  # ==========================================================================
+  core_agent:
+    - name: "go-agent-trajectories"
+      source: "synthetic/generated"
+      description: "Agent trajectories from 15_generate_trajectories.py (Go)"
+      samples: 5K
+      weight: 1.0
+      format: "harmony_agent"
+      trajectory_types:
+        - "fix_failing_tests"
+        - "fix_build_errors"
+        - "fix_go_vet_warnings"
+        - "fix_golangci_lint_issues"
+        - "add_feature_with_tdd"
+
+    - name: "go-mutation-debug-pairs"
+      source: "synthetic/generated"
+      description: "Debug pairs from 16_generate_mutations.py (go-mutesting)"
+      samples: 10K
+      weight: 1.0
+      format: "harmony_debug"
+
+  # ==========================================================================
+  # IPO DATA (Preference Pairs)
+  # ==========================================================================
+  ipo:
+    - name: "go-execution-preferences"
+      source: "synthetic/generated"
+      description: "Preference pairs ranked by execution (go build/test/vet/lint)"
+      samples: 10K
+      weight: 1.0
+      format: "harmony_preference"
+
+  # ==========================================================================
+  # GRPO TASKS (RL Training)
+  # ==========================================================================
+  grpo:
+    - name: "go-coding-tasks"
+      source: "synthetic/generated"
+      description: "Go tasks with test suites for RL reward"
+      samples: 1K
+      weight: 1.0
+      format: "harmony_task"
+
+  # ==========================================================================
+  # EVALUATION DATA
+  # ==========================================================================
+  evaluation:
+    - name: "go-eval-tasks"
+      source: "custom/eval_tasks"
+      description: "200 held-out Go tasks for evaluation"
+      samples: 200
+      weight: 1.0
+      format: "harmony_task"
+
+# Curated Go repositories for go-mutesting data generation.
+#
+# Repos are selected for:
+#   - Self-contained stdlib-only builds (no cgo, no complex system deps)
+#   - Strong test suites that catch a high proportion of mutations
+#   - Standard gofmt + golangci-lint compliance
+#   - Active maintenance and community use
+go_repos:
+  quality_criteria:
+    min_stars: 100
+    has_ci: true
+    go_test_passes: true
+    golangci_lint_clean: true
+    uses_gofmt: true
+    active_last_12_months: true
+
+  categories:
+    networking:
+      - "valyala/fasthttp"
+
+    cli:
+      - "spf13/cobra"
+      - "urfave/cli"
+
+    data_structures:
+      - "emirpasic/gods"
+      - "deckarep/golang-set"
+
+    json:
+      - "tidwall/gjson"
+      - "buger/jsonparser"
+
+    logging:
+      - "uber-go/zap"
+      - "sirupsen/logrus"
+
+    testing:
+      - "stretchr/testify"
+
+    errors:
+      - "pkg/errors"
+      - "cockroachdb/errors"
+
+    concurrency:
+      - "sourcegraph/conc"
+
+    config:
+      - "spf13/viper"

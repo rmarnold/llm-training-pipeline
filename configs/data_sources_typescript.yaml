@@ -1,0 +1,105 @@
+datasets:
+  # ==========================================================================
+  # CORE_AGENT DATA (Agent Trajectories + Tool Use)
+  # ==========================================================================
+  core_agent:
+    - name: "typescript-agent-trajectories"
+      source: "synthetic/generated"
+      description: "Agent trajectories from generate_trajectories.py (TypeScript)"
+      samples: 5K
+      weight: 1.0
+      format: "harmony_agent"
+      trajectory_types:
+        - "fix_type_errors"
+        - "fix_failing_jest_tests"
+        - "fix_eslint_violations"
+        - "add_feature_with_tdd"
+        - "refactor_to_strict_types"
+
+    - name: "typescript-mutation-debug-pairs"
+      source: "synthetic/generated"
+      description: "Debug pairs from stryker_runner.py / generate_mutations.py"
+      samples: 10K
+      weight: 1.0
+      format: "harmony_debug"
+
+  # ==========================================================================
+  # IPO DATA (Preference Pairs)
+  # ==========================================================================
+  ipo:
+    - name: "typescript-execution-preferences"
+      source: "synthetic/generated"
+      description: "Preference pairs ranked by execution (tsc/jest/eslint)"
+      samples: 10K
+      weight: 1.0
+      format: "harmony_preference"
+
+  # ==========================================================================
+  # GRPO TASKS (RL Training)
+  # ==========================================================================
+  grpo:
+    - name: "typescript-coding-tasks"
+      source: "synthetic/generated"
+      description: "TypeScript tasks with Jest test suites for RL reward"
+      samples: 1K
+      weight: 1.0
+      format: "harmony_task"
+
+  # ==========================================================================
+  # EVALUATION DATA
+  # ==========================================================================
+  evaluation:
+    - name: "typescript-eval-tasks"
+      source: "custom/eval_tasks"
+      description: "200 held-out TypeScript tasks for evaluation"
+      samples: 200
+      weight: 1.0
+      format: "harmony_task"
+
+# Curated TypeScript repositories for StrykerJS mutation data generation.
+#
+# Repos should have a complete Jest test suite that passes on a clean
+# `npm install && npx jest` run so that Stryker can establish a baseline.
+# Workspace repos are listed with a `package:` key targeting the core
+# package to avoid compiling the entire monorepo.
+typescript_repos:
+  quality_criteria:
+    min_stars: 50
+    has_ci: true
+    jest_test_passes: true
+    max_eslint_warnings: 5
+    uses_prettier: true
+    active_last_12_months: true
+
+  categories:
+    utilities:
+      - "lodash/lodash"
+      - "sindresorhus/type-fest"
+
+    http:
+      - "axios/axios"
+
+    state_management:
+      - repo: "reduxjs/redux"
+        package: "redux"
+
+    validation:
+      - "colinhacks/zod"
+      - "jquense/yup"
+
+    date_handling:
+      - "date-fns/date-fns"
+
+    testing:
+      - repo: "jestjs/jest"
+        package: "jest-cli"
+
+    build_tools:
+      - repo: "vitejs/vite"
+        package: "vite"
+
+    cli:
+      - "SBoudrias/Inquirer.js"
+
+    data_structures:
+      - "immerjs/immer"
