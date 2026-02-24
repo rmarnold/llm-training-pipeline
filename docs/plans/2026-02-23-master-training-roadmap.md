@@ -68,6 +68,18 @@ Phase 4: Cross-Language Validation
 
 Phase 5: Production Packaging
   '-- Adapter registry, inference router, deployment config
+
+Phase 6: Advanced Agent Capabilities (~31-55 GPU-days)
+  |-- 6a. Codebase Navigation          [P0] — repo maps, symbol search
+  |-- 6b. Planning Before Coding       [P0] — structured plan-then-execute
+  |-- 6c. Error Recovery & Backtracking [P0] — Verifier/Judger/Reflector
+  |-- 6d. Web Research & Self-Learning  [P0] — search docs, learn libraries
+  |-- 6e. Multi-Agent Coordination      [P1] — delegate_subtask, role switching
+  |-- 6f. Testing & Test Generation     [P1] — TDD workflows, coverage gaps
+  '-- 6g. Git Operations               [P1] — diffs, commits, PR review
+
+Phase 7: Self-Play & Continuous Improvement (Future)
+  '-- Bug injection, rejection sampling, task self-generation, multi-agent self-play
 ```
 
 ---
@@ -596,6 +608,236 @@ Self-play requires a working adapter (Phase 2-3 complete) before it can begin.
 
 ---
 
+## Phase 6: Advanced Agent Capabilities
+
+After language-specific adapters are trained and validated (Phases 1-5), the model needs higher-order skills to function as a truly self-sufficient coding agent. These capabilities are trained as extensions to the existing per-language adapters — not separate adapters.
+
+### Phase 6a: Codebase Navigation (P0)
+
+**Why**: Agents fail at multi-file tasks (21% vs 65% single-file). Navigation is the bottleneck, not code generation. Hybrid-Gym (Feb 2026) shows 25.4% SWE-bench improvement from navigation training alone.
+
+**New tools**: `list_directory`, `find_references`, `get_call_graph`, `search_symbols`
+
+**Training data**:
+- 5-10K navigation trajectories via Hybrid-Gym synthetic tasks (0.07c/example)
+- Repo exploration tasks: "Find where `validate_token` is called and what error handling exists"
+- Teach the thinking channel to maintain a mental model of repo structure
+
+**New formatter**: `harmony_navigation` — repo exploration traces with file tree context
+
+**GRPO reward signals**:
+- `files_found_relevant`: +0.2 — did the agent find the right files?
+- `search_efficiency`: +0.1 — fewer hops to reach target code
+- `unnecessary_reads`: -0.1 — penalty for reading irrelevant files
+
+### Phase 6b: Planning Before Coding (P0)
+
+**Why**: Planning doubles SWE-bench scores. Blueprint2Code validates this on small models. CodePlan (Microsoft) demonstrates repo-level planning.
+
+**Training data**:
+- 3-5K plan-then-execute trajectories
+- Plans decompose tasks into ordered steps with file dependencies
+- Include plans that get revised mid-execution (initial plan was wrong)
+
+**New formatter**: `harmony_plan` — structured plan in thinking channel, then execution
+
+**Thinking channel pattern**:
+```
+<|thinking|>
+## Plan
+1. Read src/auth.rs to understand current token validation
+2. Read src/main.rs to find all callers of validate_token()
+3. Apply patch to make validate_token async
+4. Update callers to .await the result
+5. Run cargo test to verify
+6. Run cargo clippy for style
+
+Dependencies: Step 4 depends on Step 3. Step 5 depends on Step 4.
+<|/thinking|>
+```
+
+**GRPO reward**: `plan_completeness` (+0.15 if plan covers all modified files)
+
+### Phase 6c: Error Recovery & Backtracking (P0)
+
+**Why**: 30% of trajectories require course correction. BacktrackAgent (EMNLP 2025) proves error detection is trainable via SFT+RL with Verifier/Judger/Reflector pattern.
+
+**Training data**:
+- 3-5K recovery trajectories where initial approach fails
+- Model detects failure, reasons about why, tries alternative
+- Include "echo trap" detection — recognizing when retrying the same approach won't work
+
+**Thinking channel pattern** (Verifier → Judger → Reflector):
+```
+<|thinking|>
+**Verify**: The patch compiled but cargo test still fails with the same error.
+**Judge**: My fix addressed the wrong call site — line 42 is a different validate_token.
+**Reflect**: I need to find the CORRECT call site. Let me search for the one in the auth middleware, not the test helper.
+<|/thinking|>
+```
+
+**GRPO reward signals**:
+- `recovered_from_failure`: +0.3 — successfully fixed after initial failure
+- `repeated_same_approach`: -0.3 — tried identical fix twice
+- `backtracked_appropriately`: +0.2 — recognized failure and changed strategy
+
+### Phase 6d: Web Research & Self-Learning (P0)
+
+**Why**: DocPrompting shows 52% pass@1 improvement. Search-R1 shows 41% over RAG baselines. A self-sufficient agent must learn new libraries without human help.
+
+**New tools**: `web_search(query)`, `fetch_url(url)`, `read_docs(library, item)`
+
+**Training data**:
+- 5-8K research trajectories: "I don't know this library → search → read docs → write code → test"
+- 2-3K preference pairs: good research (targeted search, extract key info) vs. bad (blind guessing)
+- 1K GRPO tasks requiring unfamiliar libraries
+
+**Key skills to train**:
+1. **Knowledge gap recognition** (R-Tuning) — "I should look this up" vs. "I know this"
+2. **Query formulation** — specific queries (`"reqwest bytes_stream async Rust"`) beat vague ones
+3. **Documentation extraction** — summarize key API details in thinking channel
+4. **Version awareness** — check installed version before searching docs
+5. **Conflict resolution** — when StackOverflow contradicts official docs, trust docs for installed version
+
+**Thinking channel as research notebook**:
+```
+<|thinking|>
+## Research Notes: tantivy crate (v0.22)
+- Index::create_in_dir(path, schema) → creates index
+- SchemaBuilder: add_text_field(), add_u64_field()
+- IMPORTANT: writer.commit() required after adding documents
+- IMPORTANT: Requires Rust 1.70+
+I have enough to implement. The key gotcha is commit() after writes.
+<|/thinking|>
+```
+
+**GRPO reward signals**:
+- `searched_and_needed`: +0.1 — search was necessary and used
+- `searched_unnecessarily`: -0.05 — trivially known, didn't need to search
+- `didnt_search_and_failed`: -0.3 — hallucinated an API that doesn't exist
+- `novel_library_task_pass_rate`: target 50%
+
+**Search-R1's retrieved-token-masking**: During GRPO training, mask out search result tokens from loss computation. Only train on the model's own generated tokens.
+
+### Phase 6e: Multi-Agent Coordination (P1)
+
+**Why**: AgentCoder's 3-role decomposition (planner/coder/tester) achieves 96.3% on HumanEval. SERA validates that 8K trajectories suffice for specialization. Complex multi-file tasks benefit from delegation.
+
+**Implementation**: Delegation as tool call — no new special tokens needed.
+
+**New tool**: `delegate_subtask(role, task, context)`
+
+**Available roles** (all played by the same model with different developer prompts):
+- **Planner**: Decomposes complex tasks into ordered subtasks
+- **Reviewer**: Checks code for correctness, style, safety
+- **Tester**: Writes and runs comprehensive tests
+- **Debugger**: Diagnoses and fixes specific errors
+
+**Training data**:
+- 5K role-specific trajectories (model operating in each role)
+- 5K orchestrator trajectories (model delegating and synthesizing)
+- 2-3K preference pairs: good delegation vs. monolithic single-pass
+- Include tasks where delegation is unnecessary (simple fixes) — model must learn NOT to delegate trivially
+
+**Harmony encoding** (uses existing tokens):
+```
+<|thinking|>
+This task modifies 3 files across 2 modules. I should implement the core change
+myself and delegate review and testing.
+<|/thinking|>
+<|tool_call|>
+{"id": "del_01", "name": "delegate_subtask", "arguments": {"role": "planner", "task": "Decompose: add connection pooling to src/db/", "context": {"files": ["src/db/mod.rs", "src/db/pool.rs"]}}}
+<|tool_result|>
+<|tool_call_id|>del_01
+{"subtasks": [{"id": 1, "description": "Add pool struct", "files": ["src/db/pool.rs"]}, ...]}
+```
+
+**GRPO reward signals**:
+- `delegation_efficiency`: +0.2 — appropriate delegation improved outcome
+- `unnecessary_delegation`: -0.3 — delegated a trivial task
+- `conflict_resolved`: +0.3 — resolved disagreement between sub-agents
+- `role_adherence`: target 90% — sub-agent stays in assigned role
+
+### Phase 6f: Testing & Test Generation (P1)
+
+**Why**: TDFlow shows 27.8% improvement. Test generation is "the final frontier" for autonomous repair.
+
+**Training data**: 2-3K TDD trajectories (write test → implement → verify → iterate)
+
+**GRPO reward**: `test_coverage_delta` (+0.15 for adding tests that cover new paths)
+
+### Phase 6g: Git Operations (P1)
+
+**Why**: All production workflows require git. AIDev-pop (Feb 2026) provides 33,596 free agentic PR examples.
+
+**New tools**: `git_diff`, `git_log`, `git_blame`, `create_branch`, `commit_changes`
+
+**Training data**: 2-3K git operation trajectories from AIDev-pop dataset
+
+### Phase 6 Timeline
+
+| Sub-phase | Depends On | Training Data | Compute |
+|-----------|-----------|---------------|---------|
+| 6a. Navigation | Phases 2-3 complete | 5-10K trajectories | 3-5 GPU-days |
+| 6b. Planning | 6a | 3-5K trajectories | 2-3 GPU-days |
+| 6c. Error Recovery | 6a, 6b | 3-5K trajectories | 3-5 GPU-days |
+| 6d. Web Research | 6a | 5-8K trajectories + tool infra | 5-7 GPU-days |
+| 6e. Multi-Agent | 6a, 6b, 6c | 10K trajectories | 5-7 GPU-days |
+| 6f. Test Generation | 6a | 2-3K trajectories | 2-3 GPU-days |
+| 6g. Git Operations | 6a | 2-3K trajectories | 1-2 GPU-days |
+
+**Total Phase 6**: ~31-55 GPU-days, ~35-50K training examples
+
+### Phase 6 Promotion Gates
+
+```yaml
+phase_6_gates:
+  # Navigation (6a)
+  multi_file_task_pass_rate: 0.50       # Up from baseline ~21%
+  file_localization_accuracy: 0.70
+
+  # Planning (6b)
+  plan_completeness: 0.75
+  plan_execution_success: 0.60
+
+  # Error Recovery (6c)
+  recovery_rate: 0.50                   # Recovers from 50%+ of failures
+  echo_trap_detection: 0.70            # Recognizes repeated failed approach
+
+  # Web Research (6d)
+  novel_library_pass_rate: 0.50
+  search_efficiency: 0.70              # 70%+ of searches are useful
+  hallucinated_api_rate: 0.03          # <3% nonexistent APIs
+
+  # Multi-Agent (6e)
+  delegation_precision: 0.75
+  delegation_recall: 0.80
+  conflict_resolution_rate: 0.60
+  unnecessary_delegation_rate: 0.10    # <10%
+
+  # Test Generation (6f)
+  generated_test_validity: 0.80        # 80%+ generated tests compile and are meaningful
+
+  # Git (6g)
+  valid_diff_generation: 0.85
+  commit_message_quality: 0.70         # Scored by LLM judge
+```
+
+---
+
+## Phase 7: Self-Play & Continuous Improvement (Future)
+
+After Phase 6 produces a capable agent, use self-play to generate infinite training data:
+
+1. **Bug Injection + Repair** (SWE-RL): Model injects mutations into working code, then must repair them. Creates training data from any repo without human labels.
+2. **Rejection Sampling at Scale**: Generate N solutions per task, keep best, retrain on winners. Each iteration improves the model.
+3. **Task Self-Generation**: Model reads repos and creates its own coding challenges, solves them, filters by execution correctness.
+4. **Multi-Agent Self-Play** (MARS, MAE): Multiple model instances play planner/coder/reviewer/tester roles, debate and improve each other's output, trained via GRPO.
+
+Requires a fully functional agent from Phases 1-6 before starting.
+
+---
+
 ## Risk Mitigations
 
 | Risk | Mitigation |
@@ -607,6 +849,12 @@ Self-play requires a working adapter (Phase 2-3 complete) before it can begin.
 | Language toolchain unavailable | go_evaluators degrades gracefully without golangci-lint; all evaluators have timeout guards |
 | Bad adapter corrupts production | Adapter registry tracks status; only "production" adapters served |
 | Cross-language interference | MoA by design — adapters never share weights |
+| Model always delegates (lazy agent) | Include simple tasks where delegation is penalized; 50/50 mix of single-agent and multi-agent data |
+| Search API costs during training | Cache all web responses; local mirror of docs.rs for Rust; estimated $50-100 for 10K trajectories |
+| Hallucinated tool calls to nonexistent APIs | Existing hallucinated_api_rate metric + GRPO penalty for didnt_search_and_failed |
+| Context window overflow from search results | Teach distillation in thinking channel; default max_chars=8000 for fetch_url; Search-R1 retrieved-token masking |
+| Delegation loops (A → B → A) | Explicit no-re-delegation constraint in sub-agent developer prompts; max depth=2 |
+| Echo trap (retrying same failed approach) | BacktrackAgent-style Verifier/Judger/Reflector pattern in thinking channel; GRPO penalty for repeated_same_approach |
 
 ---
 
@@ -614,11 +862,22 @@ Self-play requires a working adapter (Phase 2-3 complete) before it can begin.
 
 The pipeline is complete when:
 
+**Language Adapters (Phases 1-5)**:
 1. All 4 language adapters pass their evaluation targets (Phase 4 metrics table)
 2. No adapter regresses TUI baseline by more than 5% on general benchmarks
 3. Adapter hot-swapping works in <1s with PEFT
 4. The adapter registry is populated with eval scores
 5. A new language can be added by following the "Adding New Languages" checklist without modifying any existing code
+
+**Harmony Format Quality**:
 6. Thinking traces follow the Observe → Hypothesize → Plan → Execute structure in > 80% of multi-file tasks
 7. Model uses appropriate reasoning_effort scaling (short thinking for easy tasks, long for hard)
 8. Tool call efficiency improves over training (fewer calls to reach correct solution)
+
+**Advanced Capabilities (Phase 6)**:
+9. Multi-file task pass rate > 50% (up from ~21% baseline)
+10. Model plans before coding on complex tasks (plan_completeness > 75%)
+11. Model recovers from failures > 50% of the time (no echo traps)
+12. Model can learn and use unfamiliar libraries via web research (novel_library_pass_rate > 50%)
+13. Model delegates appropriately on complex tasks (delegation_precision > 75%, unnecessary_delegation < 10%)
+14. Model generates valid tests for untested code (test_validity > 80%)
