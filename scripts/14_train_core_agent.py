@@ -164,7 +164,7 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         max_seq_length=max_seq_length,  # Set by profiler or config
         packing=False if pre_packed else cli_overrides.get("packing", config["training"].get("packing", False)),
         logging_steps=cli_overrides.get("logging_steps", config["logging"].get("logging_steps", 5)),
-        eval_strategy="steps" if eval_dataset else "no",
+        eval_strategy=cli_overrides.get("eval_strategy", "steps" if eval_dataset else "no"),
         eval_steps=cli_overrides.get("eval_steps", config["logging"].get("eval_steps", 250)),
         save_strategy="steps",
         save_steps=cli_overrides.get("save_steps", config["logging"].get("save_steps", 250)),
@@ -224,6 +224,8 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_accumulation_steps", type=int)
     parser.add_argument("--save_steps", type=int)
     parser.add_argument("--eval_steps", type=int)
+    parser.add_argument("--eval_strategy", type=str,
+                        help="Eval strategy: 'no', 'steps', or 'epoch' (default: 'steps' if val data)")
     parser.add_argument("--logging_steps", type=int)
     parser.add_argument("--max_seq_length", type=int,
                         help="Override max sequence length for model and SFTConfig")
@@ -243,8 +245,8 @@ if __name__ == "__main__":
     for key in ["base_model", "max_steps", "num_train_epochs", "learning_rate",
                  "warmup_ratio", "per_device_train_batch_size",
                  "gradient_accumulation_steps", "save_steps", "eval_steps",
-                 "logging_steps", "max_seq_length", "packing", "pre_packed",
-                 "output_dir", "train_data_path", "val_data_path",
+                 "eval_strategy", "logging_steps", "max_seq_length", "packing",
+                 "pre_packed", "output_dir", "train_data_path", "val_data_path",
                  "resume_from_checkpoint", "drive_checkpoint_backup"]:
         val = getattr(args, key)
         if val is not None:
