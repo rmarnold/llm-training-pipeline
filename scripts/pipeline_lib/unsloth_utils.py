@@ -37,6 +37,7 @@ def load_unsloth_model(
     load_in_4bit: bool = True,
     dtype: torch.dtype | None = None,
     tiled_mlp: bool = True,
+    offload_embedding: bool = True,
 ) -> tuple[Any, Any]:
     """Load a model with Unsloth optimizations.
 
@@ -49,6 +50,8 @@ def load_unsloth_model(
             Chunks MLP ops along the sequence dimension. Adds ~1.3x step
             time but enables much longer context (290K+ QLoRA on H100).
             See: unsloth.ai/docs/blog/500k-context-length-fine-tuning
+        offload_embedding: Offload embedding/LM-head to CPU during training.
+            Saves ~1GB VRAM. Recommended by Unsloth for RL/long-context.
 
     Returns:
         (model, tokenizer) tuple.
@@ -62,6 +65,7 @@ def load_unsloth_model(
         dtype=dtype,
         full_finetuning=False,
         unsloth_tiled_mlp=tiled_mlp,
+        offload_embedding=offload_embedding,
     )
 
     return model, tokenizer

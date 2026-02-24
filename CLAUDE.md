@@ -113,6 +113,7 @@ Promotion gates (`configs/promotion_gates.yaml`) define thresholds for advancing
 - **Coding TUI notebook**: `notebooks/train_gpt_oss_coding_tui.ipynb` — 4-phase pipeline (Tool Calling SFT → Agent SFT → IPO → GRPO) with non-blocking quality gates
 - **GPT-OSS Attention**: FA2/FA3 are **incompatible** with GPT-OSS (attention sinks cause wrong loss). Unsloth uses **Flex Attention** during training (O(N) memory, sliding window + full attention pattern). However, eval/inference falls back to eager attention due to Unsloth Bug #3363 (Flex produces gibberish with left padding). Use `--eval_strategy no` for Agent SFT; quality gate validates loss from `trainer_state.json`.
 - **Tiled MLP** (`unsloth_tiled_mlp=True`): Enabled by default in `load_unsloth_model()`. Chunks MLP ops along sequence dimension for ~40% VRAM savings. Enables 290K+ context with QLoRA on H100. ~1.3x step time trade-off. See: unsloth.ai/docs/blog/500k-context-length-fine-tuning
+- **Embedding offload** (`offload_embedding=True`): Enabled by default in `load_unsloth_model()`. Moves embedding/LM-head layers to CPU during training, saving ~1GB VRAM. Recommended by Unsloth for RL and long-context workloads.
 
 ### Multi-Language Code Training Pipeline
 Sequential fine-tuning from the TUI checkpoint (`checkpoints/coding_tui/final_merged`). The model already knows tool-calling, multi-turn conversation, and patching from TUI training. The code training pipeline teaches language-specific debugging using mutation-derived trajectory data.

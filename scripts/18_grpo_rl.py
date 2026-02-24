@@ -253,6 +253,7 @@ def _train_with_trl_grpo(
         num_generations=config["training"].get("num_generations", 4),
         temperature=config["training"].get("temperature", 0.7),
         max_completion_length=config["training"].get("max_new_tokens", 2048),
+        max_prompt_length=config["training"].get("max_prompt_length", 1024),
         logging_steps=cli_overrides.get("logging_steps", config["logging"].get("logging_steps", 1)),
         save_steps=cli_overrides.get("save_steps", config["logging"].get("save_steps", 200)),
         save_total_limit=config["logging"].get("save_total_limit", 3),
