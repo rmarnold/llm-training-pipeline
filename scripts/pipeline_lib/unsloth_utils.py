@@ -36,6 +36,7 @@ def load_unsloth_model(
     max_seq_length: int = 8192,
     load_in_4bit: bool = True,
     dtype: torch.dtype | None = None,
+    tiled_mlp: bool = True,
 ) -> tuple[Any, Any]:
     """Load a model with Unsloth optimizations.
 
@@ -44,6 +45,10 @@ def load_unsloth_model(
         max_seq_length: Maximum sequence length for training.
         load_in_4bit: Use 4-bit quantization (recommended for 20B model).
         dtype: Torch dtype. None = auto-detect.
+        tiled_mlp: Enable Tiled MLP for ~40% lower MLP activation VRAM.
+            Chunks MLP ops along the sequence dimension. Adds ~1.3x step
+            time but enables much longer context (290K+ QLoRA on H100).
+            See: unsloth.ai/docs/blog/500k-context-length-fine-tuning
 
     Returns:
         (model, tokenizer) tuple.
@@ -56,6 +61,7 @@ def load_unsloth_model(
         load_in_4bit=load_in_4bit,
         dtype=dtype,
         full_finetuning=False,
+        unsloth_tiled_mlp=tiled_mlp,
     )
 
     return model, tokenizer
