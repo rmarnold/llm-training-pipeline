@@ -81,6 +81,7 @@ Promotion gates (`configs/promotion_gates.yaml`) define thresholds for advancing
 - **Evaluation metrics**: `cargo_check_pass_rate`, `cargo_test_pass_rate`, `clippy_clean_rate` with targets in `configs/rust_eval.yaml`
 - **Notebook**: `notebooks/train_gpt_oss_coding_tui.ipynb` — Colab companion with GPU tier auto-config, MoE diagnostic, quality gates
 - **Coding TUI notebook**: `notebooks/train_gpt_oss_coding_tui.ipynb` — 4-phase pipeline (Tool Calling SFT → Agent SFT → IPO → GRPO) with non-blocking quality gates
+- **No FA2 for GPT-OSS**: Unsloth's GPT-OSS patches use eager attention only (no Flash Attention 2 path). In-training eval OOMs on seq_len>=8192 — use `--eval_strategy no` for Agent SFT. Quality gate validates loss from `trainer_state.json` instead.
 
 ### MoE Expert LoRA (Critical for GPT-OSS 20B)
 - **Unsloth Bug #3405**: Default target modules (`gate_proj`, `up_proj`, `down_proj`) silently miss MoE expert FFN layers. Only attention gets LoRA (~31.8M params), experts (~19B params) stay frozen.
