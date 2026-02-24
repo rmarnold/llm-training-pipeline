@@ -108,23 +108,32 @@ def pack_sft_dataset(
     packed_labels: list[list[int]] = []
 
     current_chunk: list[int] = []
+    # Track where each example starts within the chunk so we can mask
+    # cross-example boundary tokens in labels (prevent the model from
+    # learning to predict the start of example B from end of example A).
+    boundary_offsets: list[int] = []
 
     for tokens in all_token_ids:
         if len(current_chunk) + len(tokens) <= seq_len:
-            # Fits in current chunk
+            # Fits in current chunk — record boundary if not the first example
+            if current_chunk:
+                boundary_offsets.append(len(current_chunk))
             current_chunk.extend(tokens)
         else:
             # Flush current chunk (pad to seq_len)
             if current_chunk:
                 _flush_chunk(current_chunk, seq_len, pad_token_id,
-                             packed_input_ids, packed_attention_mask, packed_labels)
+                             packed_input_ids, packed_attention_mask, packed_labels,
+                             boundary_offsets)
             # Start new chunk with this example
             current_chunk = list(tokens)
+            boundary_offsets = []
 
     # Flush final chunk
     if current_chunk:
         _flush_chunk(current_chunk, seq_len, pad_token_id,
-                     packed_input_ids, packed_attention_mask, packed_labels)
+                     packed_input_ids, packed_attention_mask, packed_labels,
+                     boundary_offsets)
 
     num_packed = len(packed_input_ids)
 
@@ -205,12 +214,24 @@ def _flush_chunk(
     packed_input_ids: list[list[int]],
     packed_attention_mask: list[list[int]],
     packed_labels: list[list[int]],
+    boundary_offsets: list[int] | None = None,
 ) -> None:
-    """Pad a chunk to seq_len and append to output lists."""
+    """Pad a chunk to seq_len and append to output lists.
+
+    Args:
+        boundary_offsets: Positions where a new example starts within the chunk.
+            Labels at these positions are set to -100 to prevent the model from
+            learning to predict the first token of example B from the context of
+            example A (cross-example contamination).
+    """
     pad_len = seq_len - len(current_chunk)
     input_ids = current_chunk + [pad_token_id] * pad_len
     attention_mask = [1] * len(current_chunk) + [0] * pad_len
     labels = list(current_chunk) + [-100] * pad_len
+
+    # Mask cross-example boundary tokens
+    for offset in boundary_offsets or []:
+        labels[offset] = -100
 
     packed_input_ids.append(input_ids)
     packed_attention_mask.append(attention_mask)

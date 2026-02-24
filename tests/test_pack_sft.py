@@ -130,6 +130,96 @@ class TestLabelMasking:
         assert masks == [[1, 1, 1, 0, 0]]
         assert labels == [[10, 20, 30, -100, -100]]
 
+    def test_flush_chunk_with_boundary_offsets(self):
+        """Boundary offsets should mask the first token of each subsequent example."""
+        ids, masks, labels = [], [], []
+        # Simulate chunk: example A=[10, 20], example B=[30, 40], pad
+        _flush_chunk([10, 20, 30, 40], 6, 0, ids, masks, labels, boundary_offsets=[2])
+
+        assert ids == [[10, 20, 30, 40, 0, 0]]
+        assert masks == [[1, 1, 1, 1, 0, 0]]
+        # Position 2 is the boundary — label should be -100
+        assert labels == [[10, 20, -100, 40, -100, -100]]
+
+    def test_cross_example_boundary_masking(self, fake_tokenizer, temp_dir):
+        """When multiple examples are packed into one chunk, the first token of
+        each subsequent example should have labels=-100 to prevent cross-example
+        contamination."""
+        src = os.path.join(temp_dir, "src")
+        out = os.path.join(temp_dir, "out")
+
+        # 3 examples of 3 chars each = 9 tokens total
+        # With seq_len=20, all 3 fit in one chunk:
+        #   [a, b, c, d, e, f, g, h, i, PAD, ...]
+        #    ex1      ex2      ex3
+        #   Boundaries at positions 3 and 6
+        _make_dataset(["abc", "def", "ghi"], src)
+
+        result = pack_sft_dataset(
+            dataset_path=src,
+            tokenizer=fake_tokenizer,
+            seq_len=20,
+            output_path=out,
+            val_fraction=0,
+        )
+
+        assert result["packed_sequences"] == 1
+
+        from datasets import load_from_disk
+        ds = load_from_disk(result["train_path"])
+        row = ds[0]
+
+        # Example 1 tokens: all have real labels (no boundary before first example)
+        assert row["labels"][0] == ord("a")
+        assert row["labels"][1] == ord("b")
+        assert row["labels"][2] == ord("c")
+
+        # Position 3: boundary (first token of example 2) — must be -100
+        assert row["labels"][3] == -100, (
+            f"Cross-example boundary at position 3 should be -100, got {row['labels'][3]}"
+        )
+        # Rest of example 2 has real labels
+        assert row["labels"][4] == ord("e")
+        assert row["labels"][5] == ord("f")
+
+        # Position 6: boundary (first token of example 3) — must be -100
+        assert row["labels"][6] == -100, (
+            f"Cross-example boundary at position 6 should be -100, got {row['labels'][6]}"
+        )
+        # Rest of example 3 has real labels
+        assert row["labels"][7] == ord("h")
+        assert row["labels"][8] == ord("i")
+
+        # Padding positions: all -100
+        assert row["labels"][9:] == [-100] * 11
+
+        # input_ids should still have all real tokens (boundaries only affect labels)
+        assert row["input_ids"][:9] == [ord(c) for c in "abcdefghi"]
+
+    def test_single_example_no_boundary_masking(self, fake_tokenizer, temp_dir):
+        """A chunk with only one example should have no boundary masking."""
+        src = os.path.join(temp_dir, "src")
+        out = os.path.join(temp_dir, "out")
+
+        # One long example that fills most of the chunk
+        _make_dataset(["abcdefgh"], src)
+
+        result = pack_sft_dataset(
+            dataset_path=src,
+            tokenizer=fake_tokenizer,
+            seq_len=10,
+            output_path=out,
+            val_fraction=0,
+        )
+
+        from datasets import load_from_disk
+        ds = load_from_disk(result["train_path"])
+        row = ds[0]
+
+        # All 8 real positions should have real labels (no boundaries)
+        assert row["labels"][:8] == [ord(c) for c in "abcdefgh"]
+        assert row["labels"][8:] == [-100, -100]
+
 
 class TestTruncation:
     """Test handling of over-length examples."""
