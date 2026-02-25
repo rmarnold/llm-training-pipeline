@@ -89,12 +89,13 @@ def _run_smoke_test(
     test_prompt: str,
     max_new_tokens: int = 256,
 ) -> None:
-    """Validate merged model via safetensor inspection + Unsloth inference.
+    """Validate merged model via safetensor inspection + inference.
 
     Two-phase validation:
     1. Direct safetensor weight inspection (no transformers version dependency)
-    2. Text generation via FastLanguageModel (avoids AutoModelForCausalLM
-       which cannot load packed MoE expert format on transformers 4.x)
+    2. Text generation via AutoModelForCausalLM with eager attention
+       (cleanup_merged_moe converts to unpacked format, eager avoids
+       Flex Attention gibberish on GPT-OSS — Bug #3363)
     """
     import torch
     print(f"\nRunning smoke test...")
@@ -185,25 +186,28 @@ def _run_smoke_test(
     except Exception as e:
         print(f"  Phase 1 FAILED: {e}")
 
-    # Phase 2: Text generation via Unsloth
+    # Phase 2: Text generation via AutoModelForCausalLM with eager attention.
     # cleanup_merged_moe() converts packed expert format to unpacked nn.Linear
-    # format with proper transpose, and remaps router keys. This allows both
-    # Unsloth FastLanguageModel and AutoModelForCausalLM to load the model.
+    # format, so AutoModelForCausalLM can load the model directly.
     #
-    # GPT-OSS + Flex Attention = gibberish (Unsloth Bug #3363).
-    # Use model.eval() + torch.no_grad() instead of for_inference().
-    print(f"\n  Phase 2: Inference test (Unsloth)...")
+    # Unsloth's FastLanguageModel configures Flex Attention internally, which
+    # produces gibberish on GPT-OSS (Bug #3363). Using AutoModelForCausalLM
+    # with attn_implementation="eager" avoids this entirely.
+    print(f"\n  Phase 2: Inference test (eager attention)...")
     inference_ok = False
     try:
-        from unsloth import FastLanguageModel
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        model, tokenizer = FastLanguageModel.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             hf_path,
-            max_seq_length=4096,
-            load_in_4bit=False,      # merged model is bf16, don't re-quantize
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="eager",
+            trust_remote_code=True,
         )
-        # Do NOT call for_inference() — Flex Attention gibberish (Bug #3363)
+        tokenizer = AutoTokenizer.from_pretrained(
+            hf_path, trust_remote_code=True,
+        )
         model.eval()
 
         inputs = tokenizer(test_prompt, return_tensors="pt").to(model.device)
@@ -224,19 +228,26 @@ def _run_smoke_test(
             print(f"  {line}")
         print(f"  {'─' * 50}")
 
+        # Garbage detection: empty, low diversity, endoftext flooding, low letter ratio
         response_clean = response.strip()
-        unique_chars = len(set(response_clean[:100]))
+        unique_chars = len(set(response_clean[:200]))
         endoftext_count = response_clean.count("<|endoftext|>")
+        sample = response_clean[:300]
+        letter_count = sum(1 for c in sample if c.isalpha())
+        letter_ratio = letter_count / max(len(sample), 1)
         is_garbage = (
             response_clean == ""
-            or unique_chars < 5
+            or unique_chars < 8
             or endoftext_count > 3
+            or letter_ratio < 0.3
         )
         if is_garbage:
             print(f"  Phase 2 FAILED: garbage/empty output "
-                  f"(unique_chars={unique_chars}, endoftext={endoftext_count})")
+                  f"(unique_chars={unique_chars}, endoftext={endoftext_count}, "
+                  f"letter_ratio={letter_ratio:.2f})")
         else:
-            print(f"  Phase 2 PASSED: coherent output")
+            print(f"  Phase 2 PASSED: coherent output "
+                  f"(unique_chars={unique_chars}, letter_ratio={letter_ratio:.2f})")
             inference_ok = True
 
         del model, tokenizer
