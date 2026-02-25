@@ -40,18 +40,21 @@ def main():
         model, tokenizer = FastLanguageModel.from_pretrained(
             args.checkpoint,
             max_seq_length=8192,
-            load_in_4bit=True,
+            load_in_4bit=False,      # merged model is bf16
             dtype=torch.bfloat16,
         )
-        FastLanguageModel.for_inference(model)
+        # GPT-OSS + Flex Attention = gibberish (Unsloth Bug #3363).
+        # Use eager attention via model.set_mode() instead of for_inference().
+        model.eval()
 
         inputs = tokenizer(args.prompt, return_tensors="pt").to(model.device)
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=args.max_tokens,
-            temperature=0.1,
-            do_sample=True,
-        )
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=args.max_tokens,
+                temperature=0.1,
+                do_sample=True,
+            )
         response = tokenizer.decode(
             outputs[0][inputs["input_ids"].shape[1]:],
             skip_special_tokens=False,

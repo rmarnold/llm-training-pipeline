@@ -189,23 +189,29 @@ def _run_smoke_test(
     # cleanup_merged_moe() converts packed expert format to unpacked nn.Linear
     # format with proper transpose, and remaps router keys. This allows both
     # Unsloth FastLanguageModel and AutoModelForCausalLM to load the model.
+    #
+    # GPT-OSS + Flex Attention = gibberish (Unsloth Bug #3363).
+    # Use model.eval() + torch.no_grad() instead of for_inference().
     print(f"\n  Phase 2: Inference test (Unsloth)...")
+    inference_ok = False
     try:
         from unsloth import FastLanguageModel
 
         model, tokenizer = FastLanguageModel.from_pretrained(
             hf_path,
             max_seq_length=4096,
-            load_in_4bit=True,
+            load_in_4bit=False,      # merged model is bf16, don't re-quantize
             dtype=torch.bfloat16,
         )
-        FastLanguageModel.for_inference(model)
+        # Do NOT call for_inference() — Flex Attention gibberish (Bug #3363)
+        model.eval()
 
         inputs = tokenizer(test_prompt, return_tensors="pt").to(model.device)
-        outputs = model.generate(
-            **inputs, max_new_tokens=max_new_tokens,
-            temperature=0.1, do_sample=True,
-        )
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs, max_new_tokens=max_new_tokens,
+                temperature=0.1, do_sample=True,
+            )
         response = tokenizer.decode(
             outputs[0][inputs["input_ids"].shape[1]:],
             skip_special_tokens=False,
@@ -218,21 +224,33 @@ def _run_smoke_test(
             print(f"  {line}")
         print(f"  {'─' * 50}")
 
-        is_garbage = response.strip() == "" or len(set(response[:100])) < 5
+        response_clean = response.strip()
+        unique_chars = len(set(response_clean[:100]))
+        endoftext_count = response_clean.count("<|endoftext|>")
+        is_garbage = (
+            response_clean == ""
+            or unique_chars < 5
+            or endoftext_count > 3
+        )
         if is_garbage:
-            print(f"  Phase 2 FAILED: garbage/empty output")
+            print(f"  Phase 2 FAILED: garbage/empty output "
+                  f"(unique_chars={unique_chars}, endoftext={endoftext_count})")
         else:
             print(f"  Phase 2 PASSED: coherent output")
+            inference_ok = True
 
         del model, tokenizer
         import gc; gc.collect()
         torch.cuda.empty_cache()
 
-    except Exception as e:
-        print(f"  Phase 2 FAILED: {e}")
+    except Exception as ex:
+        print(f"  Phase 2 FAILED: {type(ex).__name__}: {ex}")
 
-    # Overall verdict
-    print(f"\n  Smoke test: {'PASSED' if weights_ok else 'FAILED'}")
+    # Overall verdict — both phases must pass
+    overall = weights_ok and inference_ok
+    print(f"\n  Smoke test: {'PASSED' if overall else 'FAILED'}")
+    if weights_ok and not inference_ok:
+        print(f"  (Weights OK but inference failed — model may still work for training)")
 
 
 if __name__ == "__main__":
