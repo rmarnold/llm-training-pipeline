@@ -143,6 +143,8 @@ def train_grpo(config_path: str = "configs/grpo.yaml", cli_overrides: dict | Non
         model_name=checkpoint,
         max_seq_length=max_seq_length,
         load_in_4bit=config["model"].get("load_in_4bit", True),
+        tiled_mlp=True,           # GRPO runs at 32K+ context; needs VRAM savings
+        offload_embedding=True,   # GRPO runs at 32K+ context; needs VRAM savings
     )
     print_trainable_params(model)
 

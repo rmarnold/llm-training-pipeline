@@ -59,6 +59,8 @@ def train_lang_adapter(config_path="configs/lang_rust.yaml", cli_overrides=None)
         max_seq_length=config["model"].get("max_seq_length", 8192),
         load_in_4bit=config["model"].get("load_in_4bit", True),
         dtype=None,  # Auto-detect
+        tiled_mlp=False,
+        offload_embedding=False,
     )
 
     # Apply LoRA

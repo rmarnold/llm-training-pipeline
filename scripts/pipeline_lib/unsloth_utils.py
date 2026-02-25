@@ -36,8 +36,8 @@ def load_unsloth_model(
     max_seq_length: int = 8192,
     load_in_4bit: bool = True,
     dtype: torch.dtype | None = None,
-    tiled_mlp: bool = True,
-    offload_embedding: bool = True,
+    tiled_mlp: bool = False,
+    offload_embedding: bool = False,
 ) -> tuple[Any, Any]:
     """Load a model with Unsloth optimizations.
 
@@ -49,9 +49,11 @@ def load_unsloth_model(
         tiled_mlp: Enable Tiled MLP for ~40% lower MLP activation VRAM.
             Chunks MLP ops along the sequence dimension. Adds ~1.3x step
             time but enables much longer context (290K+ QLoRA on H100).
+            Only enable for long-context stages (GRPO at 32K+).
             See: unsloth.ai/docs/blog/500k-context-length-fine-tuning
         offload_embedding: Offload embedding/LM-head to CPU during training.
-            Saves ~1GB VRAM. Recommended by Unsloth for RL/long-context.
+            Saves ~1GB VRAM but adds PCIe latency per step. Only enable
+            for long-context/RL stages where VRAM is tight.
 
     Returns:
         (model, tokenizer) tuple.

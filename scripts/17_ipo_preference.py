@@ -52,6 +52,8 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
         model_name=checkpoint,
         max_seq_length=max_seq_length,
         load_in_4bit=config["model"].get("load_in_4bit", True),
+        tiled_mlp=False,
+        offload_embedding=False,
     )
 
     # Apply LoRA if the checkpoint doesn't already have adapters

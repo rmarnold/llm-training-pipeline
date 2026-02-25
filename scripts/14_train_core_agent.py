@@ -78,6 +78,8 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         model_name=base_model,
         max_seq_length=max_seq_length,
         load_in_4bit=config["model"].get("load_in_4bit", True),
+        tiled_mlp=False,
+        offload_embedding=False,
     )
 
     # Apply LoRA (higher rank for agent behavior)
