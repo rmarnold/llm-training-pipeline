@@ -1,0 +1,111 @@
+# SOTA Capability Taxonomy — Go
+# Defines what the target model should learn and how to generate training data.
+version: "1.0.0"
+language: "go"
+
+categories:
+  behavioral:
+    description: "How the model behaves as an assistant"
+    capabilities:
+      helpfulness:
+        description: "Provides useful, actionable responses to coding questions"
+        harmony_format: "harmony_agent"
+        eval_signal: "sota_judged"
+        weight: 0.15
+        data_generation_strategy: "sota_trajectory"
+      safety:
+        description: "Refuses harmful requests, avoids generating dangerous code"
+        harmony_format: "harmony_agent"
+        eval_signal: "safety_refusal_rate"
+        weight: 0.10
+        data_generation_strategy: "sota_preference"
+      uncertainty_calibration:
+        description: "Expresses appropriate uncertainty, asks for clarification"
+        harmony_format: "harmony_agent"
+        eval_signal: "sota_judged"
+        weight: 0.05
+        data_generation_strategy: "sota_preference"
+
+  skills:
+    description: "Core coding capabilities"
+    capabilities:
+      code_generation:
+        description: "Generates correct, idiomatic Go code from specifications"
+        harmony_format: "harmony_task"
+        eval_signal: "go_build_pass_rate"
+        weight: 0.15
+        data_generation_strategy: "sota_trajectory"
+      debugging:
+        description: "Diagnoses and fixes compilation errors and test failures"
+        harmony_format: "harmony_debug"
+        eval_signal: "go_test_pass_rate"
+        weight: 0.15
+        data_generation_strategy: "mutation_plus_sota"
+      planning:
+        description: "Breaks complex tasks into steps, reasons about approach"
+        harmony_format: "harmony_agent"
+        eval_signal: "iterations_to_green_median"
+        weight: 0.05
+        data_generation_strategy: "sota_trajectory"
+      test_writing:
+        description: "Writes comprehensive test cases for Go code"
+        harmony_format: "harmony_task"
+        eval_signal: "go_test_pass_rate"
+        weight: 0.05
+        data_generation_strategy: "sota_trajectory"
+
+  knowledge:
+    description: "Language and ecosystem knowledge"
+    capabilities:
+      language_semantics:
+        description: "Understands goroutines, channels, interfaces, embedding, error handling"
+        harmony_format: "harmony_code"
+        eval_signal: "go_build_pass_rate"
+        weight: 0.04
+        data_generation_strategy: "web_extraction"
+      std_library:
+        description: "Knows standard library APIs and correct usage patterns"
+        harmony_format: "harmony_completion"
+        eval_signal: "hallucinated_api_rate"
+        weight: 0.04
+        data_generation_strategy: "web_extraction"
+      ecosystem_packages:
+        description: "Knows popular packages (gin, cobra, viper, etc.) and their APIs"
+        harmony_format: "harmony_code"
+        eval_signal: "hallucinated_api_rate"
+        weight: 0.04
+        data_generation_strategy: "web_extraction"
+      idiomatic_patterns:
+        description: "Uses Go idioms (error wrapping, table-driven tests, functional options)"
+        harmony_format: "harmony_code"
+        eval_signal: "go_vet_clean_rate"
+        weight: 0.04
+        data_generation_strategy: "web_extraction"
+      linting:
+        description: "Writes code that passes golangci-lint with standard configuration"
+        harmony_format: "harmony_code"
+        eval_signal: "golangci_lint_clean_rate"
+        weight: 0.04
+        data_generation_strategy: "web_extraction"
+
+  procedural:
+    description: "Multi-step agent workflows"
+    capabilities:
+      multi_step_debugging:
+        description: "Iteratively reads errors, hypothesizes, patches, and verifies"
+        harmony_format: "harmony_agent"
+        eval_signal: "iterations_to_green_median"
+        weight: 0.15
+        data_generation_strategy: "mutation_plus_sota"
+      tool_use:
+        description: "Correctly formats and sequences tool calls"
+        harmony_format: "harmony_agent"
+        eval_signal: "tool_call_format_accuracy"
+        weight: 0.10
+        data_generation_strategy: "sota_trajectory"
+      state_tracking:
+        description: "Maintains context across multi-turn debugging sessions"
+        harmony_format: "harmony_agent"
+        eval_signal: "iterations_to_green_median"
+        weight: 0.05
+        data_generation_strategy: "sota_trajectory"

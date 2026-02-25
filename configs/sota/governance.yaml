@@ -1,0 +1,80 @@
+# SOTA Data Pipeline — Governance Configuration
+# Shared across all languages. Changes require MAJOR version bump.
+version: "1.0.0"
+changelog_path: "data/sota/CHANGELOG.md"
+
+license_policy:
+  permissive:
+    - MIT
+    - Apache-2.0
+    - BSD-2-Clause
+    - BSD-3-Clause
+    - ISC
+    - Unlicense
+    - CC0-1.0
+  attribution_required:
+    - CC-BY-4.0
+    - CC-BY-SA-4.0
+  blocked:
+    - GPL-2.0
+    - GPL-3.0
+    - AGPL-3.0
+    - SSPL-1.0
+    - BUSL-1.1
+    - CC-BY-NC-4.0
+
+pii_scrubbing:
+  enabled: true
+  code_aware: true  # avoid scrubbing variable names that look like PII patterns
+  patterns:
+    email: '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    phone: '\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+    ssn: '\d{3}-\d{2}-\d{4}'
+    credit_card: '\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b'
+    api_key: '(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*["\']?[a-zA-Z0-9_\-]{16,}'
+    aws_key: 'AKIA[0-9A-Z]{16}'
+    private_key: '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'
+
+oracle:
+  default_model: "claude-sonnet-4-20250514"
+  task_overrides:
+    trajectory_generation: "claude-sonnet-4-20250514"
+    preference_judgment: "claude-sonnet-4-20250514"
+    capability_extraction: "claude-sonnet-4-20250514"
+    taxonomy_review: "claude-sonnet-4-20250514"
+  temperature:
+    generation: 0.7
+    judgment: 0.1
+    extraction: 0.0
+  max_retries: 3
+  timeout_seconds: 120
+
+versioning:
+  scheme: "semver"
+  changelog_path: "data/sota/CHANGELOG.md"
+  major_bump_triggers:
+    - "eval benchmark change"
+    - "governance policy change"
+    - "provenance schema change"
+  minor_bump_triggers:
+    - "new capability added to taxonomy"
+    - "threshold adjustment"
+  patch_bump_triggers:
+    - "data regeneration with same config"
+    - "bug fix in pipeline"
+
+contamination_checking:
+  enabled: true
+  eval_benchmarks:
+    - "HumanEval"
+    - "MBPP"
+    - "SWE-bench"
+    - "SWE-bench-lite"
+    - "LiveCodeBench"
+    - "BigCodeBench"
+    - "CrossCodeEval"
+    - "DS-1000"
+  dedup_method: "minhash"
+  minhash_threshold: 0.8
+  cross_split_check: true
+  ngram_size: 5

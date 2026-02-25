@@ -1,0 +1,139 @@
+# SOTA Data Pipeline — Provenance Schema
+# Every generated training example must carry these metadata fields.
+# Changes require a MAJOR version bump.
+version: "1.0.0"
+
+required_fields:
+  # Identity
+  example_id:
+    type: "string"
+    format: "uuid4"
+    description: "Unique identifier for this training example"
+
+  pipeline_version:
+    type: "string"
+    format: "semver"
+    description: "Version of the SOTA pipeline that generated this example"
+
+  phase:
+    type: "string"
+    enum:
+      - "phase1_collection"
+      - "phase2_extraction"
+      - "phase3a_sft"
+      - "phase3b_preference"
+      - "phase3c_reward"
+      - "phase3d_replay"
+    description: "Pipeline phase that produced this example"
+
+  taxonomy_capability:
+    type: "string"
+    description: "Capability from the taxonomy this example trains"
+
+  taxonomy_category:
+    type: "string"
+    enum: ["behavioral", "skills", "knowledge", "procedural"]
+    description: "Top-level taxonomy category"
+
+  # Oracle fields
+  oracle_model:
+    type: "string"
+    description: "Model ID used to generate or judge this example"
+
+  oracle_temperature:
+    type: "number"
+    description: "Temperature setting used for oracle generation"
+
+  oracle_system_prompt_hash:
+    type: "string"
+    format: "sha256"
+    description: "SHA-256 hash of the system prompt sent to the oracle"
+
+  # Source fields
+  source_url:
+    type: "string"
+    format: "url"
+    nullable: true
+    description: "URL of the source material (null for synthetic)"
+
+  source_license:
+    type: "string"
+    description: "SPDX license identifier of the source"
+
+  source_repo:
+    type: "string"
+    nullable: true
+    description: "Repository name (owner/repo) if from GitHub/GitLab"
+
+  source_commit:
+    type: "string"
+    nullable: true
+    description: "Commit SHA of the source snapshot"
+
+  # Quality fields
+  pii_scrubbed:
+    type: "boolean"
+    description: "Whether PII scrubbing was applied"
+
+  contamination_checked:
+    type: "boolean"
+    description: "Whether eval contamination check was run"
+
+  dedup_hash:
+    type: "string"
+    format: "minhash"
+    description: "MinHash signature for deduplication"
+
+optional_fields:
+  harmony_format:
+    type: "string"
+    enum:
+      - "harmony_code"
+      - "harmony_completion"
+      - "harmony_agent"
+      - "harmony_preference"
+      - "harmony_task"
+      - "harmony_debug"
+    description: "Harmony formatter used to produce the final training example"
+
+  language:
+    type: "string"
+    enum: ["rust", "python", "typescript", "go"]
+    description: "Target programming language"
+
+  quality_score:
+    type: "number"
+    minimum: 0.0
+    maximum: 1.0
+    description: "Aggregate quality score from QA checks"
+
+  generation_timestamp:
+    type: "string"
+    format: "iso8601"
+    description: "When this example was generated"
+
+batch_log_format:
+  description: "Each pipeline run produces a batch log in data/sota/{language}/provenance/"
+  filename_pattern: "batch_{phase}_{timestamp}.jsonl"
+  fields:
+    batch_id:
+      type: "string"
+      format: "uuid4"
+    phase:
+      type: "string"
+    started_at:
+      type: "string"
+      format: "iso8601"
+    completed_at:
+      type: "string"
+      format: "iso8601"
+    example_count:
+      type: "integer"
+    oracle_model:
+      type: "string"
+    oracle_total_tokens:
+      type: "integer"
+    config_hash:
+      type: "string"
+      format: "sha256"
+      description: "Hash of the full config snapshot used for this batch"
