@@ -105,7 +105,7 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
         optim=config["training"].get("optim", "adamw_8bit"),
         # IPO-specific
         loss_type=config["training"].get("loss_type", "ipo"),
-        beta=config["training"].get("beta", 0.1),
+        beta=cli_overrides.get("beta", config["training"].get("beta", 0.1)),
         max_length=config["training"].get("max_length", 16384),
         max_prompt_length=config["training"].get("max_prompt_length", 8192),
         # Logging
@@ -163,6 +163,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str)
     parser.add_argument("--train_data_path", type=str)
     parser.add_argument("--val_data_path", type=str)
+    parser.add_argument("--beta", type=float, help="IPO/DPO beta parameter")
     parser.add_argument("--resume_from_checkpoint", type=str)
     args = parser.parse_args()
 
@@ -170,7 +171,7 @@ if __name__ == "__main__":
     for key in ["checkpoint", "max_steps", "num_train_epochs", "learning_rate", "warmup_ratio",
                  "per_device_train_batch_size", "gradient_accumulation_steps",
                  "save_steps", "eval_steps", "logging_steps", "output_dir",
-                 "train_data_path", "val_data_path", "resume_from_checkpoint"]:
+                 "train_data_path", "val_data_path", "beta", "resume_from_checkpoint"]:
         val = getattr(args, key)
         if val is not None:
             cli_overrides[key] = val
