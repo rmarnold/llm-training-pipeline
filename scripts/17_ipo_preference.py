@@ -118,6 +118,9 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
         beta=cli_overrides.get("beta", config["training"].get("beta", 0.1)),
         max_length=config["training"].get("max_length", 16384),
         max_prompt_length=config["training"].get("max_prompt_length", 8192),
+        # Precompute reference log probs once before training to avoid
+        # running the reference forward pass every step (saves ~15-20 GiB VRAM).
+        precompute_ref_log_probs=config["training"].get("precompute_ref_log_probs", True),
         # Logging
         logging_steps=cli_overrides.get("logging_steps", config["logging"].get("logging_steps", 5)),
         eval_strategy="steps" if eval_dataset else "no",
@@ -138,10 +141,21 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
         processing_class=tokenizer,
     )
 
+    # Clear any leaked VRAM from preprocessing before training starts
+    import gc
+    import torch
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        free_gb = torch.cuda.mem_get_info()[0] / 1024**3
+        total_gb = torch.cuda.mem_get_info()[1] / 1024**3
+        print(f"\nVRAM before training: {total_gb - free_gb:.1f} / {total_gb:.1f} GiB used")
+
     print(f"\nStarting IPO training...")
     print(f"  Output: {output_dir}")
     print(f"  Loss type: {training_args.loss_type}")
     print(f"  Beta: {training_args.beta}")
+    print(f"  Precompute ref log probs: {training_args.precompute_ref_log_probs}")
     print(f"  LR: {training_args.learning_rate}")
 
     resume = cli_overrides.get("resume_from_checkpoint")
