@@ -73,9 +73,19 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
     train_dataset = load_from_disk(train_data_path)
     print(f"  Training pairs: {len(train_dataset):,}")
 
+    # Rename pref_* columns to DPOTrainer's expected format
+    col_map = {"pref_prompt": "prompt", "pref_chosen": "chosen", "pref_rejected": "rejected"}
+    renames = {k: v for k, v in col_map.items() if k in train_dataset.column_names}
+    if renames:
+        train_dataset = train_dataset.rename_columns(renames)
+        print(f"  Renamed columns: {renames}")
+
     eval_dataset = None
     if val_data_path and os.path.exists(val_data_path):
         eval_dataset = load_from_disk(val_data_path)
+        eval_renames = {k: v for k, v in col_map.items() if k in eval_dataset.column_names}
+        if eval_renames:
+            eval_dataset = eval_dataset.rename_columns(eval_renames)
         print(f"  Evaluation pairs: {len(eval_dataset):,}")
 
     # Training arguments
