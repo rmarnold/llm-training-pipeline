@@ -58,12 +58,13 @@ def load_unsloth_model(
     Returns:
         (model, tokenizer) tuple.
     """
-    # Fix router keys before Unsloth loads — Unsloth patches GptOssForCausalLM
-    # to use router.linear.weight/bias, but merged models have router.weight/bias.
-    # Without this fix, Unsloth raises "Critical error since some weights are
-    # not initialized" for all 48 router keys (24 layers x weight+bias).
+    # Unsloth patches GptOssForCausalLM to use unpacked expert format
+    # (experts.down_projs.{i}.weight) and wrapped router keys (router.linear.weight).
+    # Merged models may have packed experts (experts.down_proj) and raw router keys
+    # (router.weight). Without this fix, Unsloth raises "Critical error since some
+    # weights are not initialized" for thousands of expert + router keys.
     if os.path.isdir(model_name):
-        fix_router_keys_for_unsloth(model_name)
+        ensure_unsloth_format(model_name)
 
     from unsloth import FastLanguageModel
 
@@ -1364,7 +1365,7 @@ def fix_router_keys_for_unsloth(model_path: str) -> bool:
     """
     import json
 
-    # For adapter checkpoints, fix the base model's router keys
+    # For adapter checkpoints, fix the base model
     adapter_config_path = os.path.join(model_path, "adapter_config.json")
     if os.path.exists(adapter_config_path):
         with open(adapter_config_path) as f:
@@ -1400,6 +1401,86 @@ def fix_router_keys_for_unsloth(model_path: str) -> bool:
 
     print(f"  Fixing router keys for Unsloth compatibility: {model_path}")
     return _fix_router_keys(model_path, expected_keys)
+
+
+def ensure_unsloth_format(model_path: str) -> bool:
+    """Convert merged model to Unsloth's expected format (experts + router keys).
+
+    Unsloth patches GptOssForCausalLM to use:
+    1. UNPACKED expert format: ``experts.down_projs.{i}.weight`` (nn.Linear per expert)
+    2. Wrapped router keys: ``router.linear.weight/bias``
+
+    But merged models from ``cleanup_merged_moe()`` / ``merge_and_export()`` may have:
+    1. PACKED expert format: ``experts.down_proj`` (3D tensor)
+    2. Raw router keys: ``router.weight/bias``
+
+    This function converts both on disk before Unsloth loads the model.
+    Handles adapter checkpoints (reads ``adapter_config.json`` for base model path).
+
+    Safe to call multiple times (idempotent).
+
+    Args:
+        model_path: Path to model directory or adapter checkpoint.
+
+    Returns:
+        True if any conversion was performed.
+    """
+    import json
+    import re
+
+    # For adapter checkpoints, fix the base model
+    adapter_config_path = os.path.join(model_path, "adapter_config.json")
+    if os.path.exists(adapter_config_path):
+        with open(adapter_config_path) as f:
+            adapter_config = json.load(f)
+        base_model = adapter_config.get("base_model_name_or_path", "")
+        if base_model and os.path.isdir(base_model):
+            return ensure_unsloth_format(base_model)
+        return False  # Remote base model, can't fix
+
+    # Check if this is a local model directory with safetensors
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return False
+
+    with open(index_path) as f:
+        weight_map = json.load(f)["weight_map"]
+
+    changed = False
+
+    # 1. Expert format: packed -> unpacked for Unsloth
+    has_packed = any(
+        re.match(r".*\.experts\.(gate_up_proj|down_proj)$", k) for k in weight_map
+    )
+    if has_packed:
+        print(f"  Converting packed experts to unpacked format for Unsloth: {model_path}")
+        if _convert_packed_to_unpacked(model_path):
+            changed = True
+            # Re-read weight map after conversion (router keys may have been
+            # remapped by _convert_packed_to_unpacked too)
+            with open(index_path) as f:
+                weight_map = json.load(f)["weight_map"]
+
+    # 2. Router keys: router.weight -> router.linear.weight for Unsloth
+    has_plain_router = any(
+        ".mlp.router.weight" in k and ".router.linear." not in k
+        for k in weight_map
+    )
+    if has_plain_router:
+        expected_keys = set()
+        for k in weight_map:
+            if ".mlp.router." in k and ".router.linear." not in k:
+                expected_keys.add(k.replace(".mlp.router.", ".mlp.router.linear."))
+            else:
+                expected_keys.add(k)
+        print(f"  Fixing router keys for Unsloth compatibility: {model_path}")
+        if _fix_router_keys(model_path, expected_keys):
+            changed = True
+
+    if not changed:
+        print(f"  Model already in Unsloth format: {model_path}")
+
+    return changed
 
 
 def validate_merged_model(save_path: str) -> bool:

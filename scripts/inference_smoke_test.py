@@ -113,11 +113,11 @@ def _load_adapter_model(checkpoint: str):
     """Load an adapter checkpoint via Unsloth (base model + LoRA adapter)."""
     import torch
 
-    # Fix router keys before Unsloth loads — Unsloth expects router.linear.weight
-    # but merged models use router.weight (see cleanup_merged_moe).
+    # Unsloth expects unpacked experts + router.linear.weight format.
+    # Merged models may have packed experts + router.weight format.
     try:
-        from pipeline_lib.unsloth_utils import fix_router_keys_for_unsloth
-        fix_router_keys_for_unsloth(checkpoint)
+        from pipeline_lib.unsloth_utils import ensure_unsloth_format
+        ensure_unsloth_format(checkpoint)
     except ImportError:
         pass  # Running standalone without pipeline_lib
 
