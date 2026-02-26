@@ -70,7 +70,7 @@ def _load_merged_model(checkpoint: str):
 
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto",
         attn_implementation="eager",
         trust_remote_code=True,
@@ -78,6 +78,8 @@ def _load_merged_model(checkpoint: str):
     tokenizer = AutoTokenizer.from_pretrained(
         checkpoint, trust_remote_code=True,
     )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     model.eval()
     return model, tokenizer
 
@@ -135,6 +137,7 @@ def main():
                 max_new_tokens=args.max_tokens,
                 temperature=0.1,
                 do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
             )
         response = tokenizer.decode(
             outputs[0][inputs["input_ids"].shape[1]:],

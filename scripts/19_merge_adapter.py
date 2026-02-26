@@ -200,7 +200,7 @@ def _run_smoke_test(
 
         model = AutoModelForCausalLM.from_pretrained(
             hf_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto",
             attn_implementation="eager",
             trust_remote_code=True,
@@ -210,11 +210,18 @@ def _run_smoke_test(
         )
         model.eval()
 
+        # Ensure pad_token_id is set (StopIteration fix)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        if model.generation_config.pad_token_id is None:
+            model.generation_config.pad_token_id = tokenizer.eos_token_id
+
         inputs = tokenizer(test_prompt, return_tensors="pt").to(model.device)
         with torch.no_grad():
             outputs = model.generate(
                 **inputs, max_new_tokens=max_new_tokens,
                 temperature=0.1, do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
             )
         response = tokenizer.decode(
             outputs[0][inputs["input_ids"].shape[1]:],
@@ -255,7 +262,9 @@ def _run_smoke_test(
         torch.cuda.empty_cache()
 
     except Exception as ex:
+        import traceback
         print(f"  Phase 2 FAILED: {type(ex).__name__}: {ex}")
+        traceback.print_exc()
 
     # Overall verdict — both phases must pass
     overall = weights_ok and inference_ok
