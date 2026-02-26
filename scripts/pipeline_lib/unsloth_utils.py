@@ -829,6 +829,197 @@ def _convert_packed_to_unpacked(save_path: str) -> bool:
     return True
 
 
+def _convert_unpacked_to_packed(save_path: str) -> bool:
+    """Convert unpacked nn.Linear expert tensors back to packed 3D format.
+
+    Reverse of _convert_packed_to_unpacked(). Converts:
+
+      - ``experts.gate_up_projs.{i}.weight`` ``[2*intermediate, hidden]`` ->
+        ``experts.gate_up_proj`` ``[num_experts, hidden, 2*intermediate]``
+      - ``experts.down_projs.{i}.weight`` ``[hidden, intermediate]`` ->
+        ``experts.down_proj`` ``[num_experts, intermediate, hidden]``
+
+    Includes reverse transpose (nn.Linear ``(out, in)`` -> packed ``(in, out)``)
+    and router key remapping (``router.linear.X`` -> ``router.X`` if needed).
+
+    Args:
+        save_path: Path to the merged model directory with safetensors.
+
+    Returns:
+        True if conversion was performed, False if already packed.
+    """
+    import json
+    import re
+    import tempfile
+    from collections import defaultdict
+
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    index_path = os.path.join(save_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return False
+
+    with open(index_path) as f:
+        index = json.load(f)
+    weight_map = index["weight_map"]
+
+    # Detect unpacked expert keys
+    unpacked_pattern = re.compile(
+        r"(.*\.experts)\.(gate_up_projs|down_projs)\.(\d+)\.(weight|bias)$"
+    )
+    unpacked_keys = [k for k in weight_map if unpacked_pattern.match(k)]
+    if not unpacked_keys:
+        return False
+
+    print(f"  Re-packing {len(unpacked_keys)} unpacked expert tensors to packed format...")
+
+    # --- Determine router key mapping dynamically ---
+    router_rename: dict[str, str] = {}
+    try:
+        from transformers import AutoConfig, AutoModelForCausalLM
+
+        config = AutoConfig.from_pretrained(save_path)
+        with torch.device("meta"):
+            ref_model = AutoModelForCausalLM.from_config(config)
+        expected_keys = set(ref_model.state_dict().keys())
+        del ref_model
+
+        for k in weight_map:
+            if ".router." not in k:
+                continue
+            if k not in expected_keys:
+                if ".router.linear." in k:
+                    candidate = k.replace(".router.linear.", ".router.")
+                    if candidate in expected_keys:
+                        router_rename[k] = candidate
+    except Exception as e:
+        print(f"  Warning: Could not detect router key format: {e}")
+        # Fallback: reverse the documented cleanup remapping
+        for k in weight_map:
+            if ".router.linear." in k:
+                router_rename[k] = k.replace(".router.linear.", ".router.")
+
+    # --- Group keys to convert by shard file ---
+    keys_to_convert = set(unpacked_keys) | set(router_rename.keys())
+    shard_groups: dict[str, list[str]] = defaultdict(list)
+    for key in keys_to_convert:
+        shard_groups[weight_map[key]].append(key)
+
+    new_weight_map = dict(weight_map)
+
+    for shard_file, convert_keys in shard_groups.items():
+        shard_path = os.path.join(save_path, shard_file)
+        new_tensors: dict[str, torch.Tensor] = {}
+        metadata: dict[str, str] = {}
+        convert_set = set(convert_keys)
+
+        with safe_open(shard_path, framework="pt") as f:
+            meta = f.metadata()
+            if meta:
+                metadata = dict(meta)
+
+            # Copy all keys that don't need conversion
+            for key in f.keys():
+                if key not in convert_set:
+                    new_tensors[key] = f.get_tensor(key)
+
+            # Group unpacked expert tensors by (prefix, proj_type)
+            expert_groups: dict[tuple, dict[int, dict[str, torch.Tensor]]] = {}
+
+            for key in convert_keys:
+                # Router key: just rename
+                if key in router_rename:
+                    new_key = router_rename[key]
+                    new_tensors[new_key] = f.get_tensor(key)
+                    del new_weight_map[key]
+                    new_weight_map[new_key] = shard_file
+                    continue
+
+                match = unpacked_pattern.match(key)
+                if match:
+                    prefix, proj_plural, idx_str, suffix = match.groups()
+                    idx = int(idx_str)
+                    group_key = (prefix, proj_plural)
+                    if group_key not in expert_groups:
+                        expert_groups[group_key] = {}
+                    if idx not in expert_groups[group_key]:
+                        expert_groups[group_key][idx] = {}
+                    expert_groups[group_key][idx][suffix] = f.get_tensor(key)
+                    del new_weight_map[key]
+
+        # Re-pack each expert group into a single 3D tensor
+        for (prefix, proj_plural), experts_dict in expert_groups.items():
+            num_experts = max(experts_dict.keys()) + 1
+
+            # Sanity check: all expert indices must be present
+            missing = [i for i in range(num_experts) if i not in experts_dict]
+            if missing:
+                raise RuntimeError(
+                    f"Incomplete expert group {prefix}.{proj_plural}: "
+                    f"missing indices {missing[:5]} (expected 0-{num_experts-1}). "
+                    f"Expert tensors may be split across shards."
+                )
+
+            # gate_up_projs -> gate_up_proj, down_projs -> down_proj
+            proj_singular = proj_plural[:-1]
+
+            for suffix in ["weight", "bias"]:
+                if suffix not in experts_dict.get(0, {}):
+                    continue
+
+                tensors = []
+                for i in range(num_experts):
+                    t = experts_dict[i][suffix]
+                    if suffix == "weight":
+                        # Reverse transpose: nn.Linear (out, in) -> packed (in, out)
+                        t = t.T.contiguous()
+                    tensors.append(t)
+
+                if suffix == "bias":
+                    packed_key = f"{prefix}.{proj_singular}_bias"
+                else:
+                    packed_key = f"{prefix}.{proj_singular}"
+
+                new_tensors[packed_key] = torch.stack(tensors, dim=0)
+                new_weight_map[packed_key] = shard_file
+
+        # Atomic write: save to temp file, verify, then rename
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            suffix=".safetensors", dir=save_path,
+        )
+        os.close(tmp_fd)
+        try:
+            save_file(new_tensors, tmp_path, metadata=metadata)
+            with safe_open(tmp_path, framework="pt") as verify:
+                verify_keys = set(verify.keys())
+            expected_shard_keys = set(new_tensors.keys())
+            if verify_keys != expected_shard_keys:
+                raise RuntimeError(
+                    f"Verification failed: wrote {len(expected_shard_keys)} keys "
+                    f"but read back {len(verify_keys)}"
+                )
+            os.replace(tmp_path, shard_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+
+    # Update index
+    index["weight_map"] = new_weight_map
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2, sort_keys=True)
+
+    packed_count = sum(1 for k in new_weight_map
+                       if re.match(r".*\.experts\.(gate_up_proj|down_proj)$", k))
+    print(f"  Repacked: {len(unpacked_keys)} unpacked -> {packed_count} packed expert tensors")
+    if router_rename:
+        print(f"  Remapped: {len(router_rename)} router keys")
+    print(f"  Total keys: {len(new_weight_map)}")
+
+    return True
+
+
 def cleanup_merged_moe(save_path: str) -> bool:
     """Clean up Unsloth's merged MoE model output for transformers 4.x.
 
@@ -942,9 +1133,28 @@ def cleanup_merged_moe(save_path: str) -> bool:
         print(f"  Removed {len(scale_keys)} MXFP4 scale artifacts")
         changed = True
 
-    # --- 3. Convert packed expert tensors to unpacked nn.Linear format ---
-    if _convert_packed_to_unpacked(save_path):
-        changed = True
+    # --- 3. Ensure expert format matches model class expectations ---
+    # The model class may expect packed (transformers 4.57+) or unpacked format.
+    # Only convert if there's actually a mismatch.
+    from transformers import AutoConfig, AutoModelForCausalLM
+    try:
+        _cfg = AutoConfig.from_pretrained(save_path)
+        with torch.device("meta"):
+            _ref = AutoModelForCausalLM.from_config(_cfg)
+        _expected = set(_ref.state_dict().keys())
+        del _ref
+        _model_wants_unpacked = any(
+            re.match(r".*\.experts\.(gate_up_projs|down_projs)\.\d+\.", k)
+            for k in _expected
+        )
+    except Exception:
+        _model_wants_unpacked = True  # Default: assume unpacking needed
+
+    if _model_wants_unpacked:
+        if _convert_packed_to_unpacked(save_path):
+            changed = True
+    else:
+        print(f"  Model class expects packed expert format — skipping unpack")
 
     # --- 4. Validate key format ---
     # Re-read index after potential conversion
@@ -961,6 +1171,73 @@ def cleanup_merged_moe(save_path: str) -> bool:
         print(f"  No cleanup needed — merged model is ready")
 
     return changed
+
+
+def ensure_expert_format(save_path: str) -> bool:
+    """Ensure merged model's expert weights match the format expected by the model class.
+
+    After merge + cleanup, safetensors may be in unpacked nn.Linear format
+    (experts.down_projs.{i}.weight) while the model class expects packed 3D
+    format (experts.down_proj), or vice versa. This function detects and fixes
+    any mismatch by converting the safetensors on disk.
+
+    Safe to call multiple times (idempotent).
+
+    Args:
+        save_path: Path to merged model directory.
+
+    Returns:
+        True if any conversion was performed.
+    """
+    import json
+    import re
+
+    index_path = os.path.join(save_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return False
+
+    with open(index_path) as f:
+        weight_map = json.load(f)["weight_map"]
+
+    # Detect current format in safetensors
+    has_packed = any(
+        re.match(r".*\.experts\.(gate_up_proj|down_proj)$", k) for k in weight_map
+    )
+    has_unpacked = any(
+        re.match(r".*\.experts\.(gate_up_projs|down_projs)\.\d+\.", k) for k in weight_map
+    )
+
+    if not has_packed and not has_unpacked:
+        return False  # No expert weights found
+
+    # Detect expected format from model class
+    try:
+        from transformers import AutoConfig, AutoModelForCausalLM
+
+        config = AutoConfig.from_pretrained(save_path)
+        with torch.device("meta"):
+            ref_model = AutoModelForCausalLM.from_config(config)
+        expected_keys = set(ref_model.state_dict().keys())
+        del ref_model
+    except Exception as e:
+        print(f"  Warning: Could not detect model format expectations: {e}")
+        return False
+
+    expects_packed = any(
+        re.match(r".*\.experts\.(gate_up_proj|down_proj)$", k) for k in expected_keys
+    )
+    expects_unpacked = any(
+        re.match(r".*\.experts\.(gate_up_projs|down_projs)\.\d+\.", k) for k in expected_keys
+    )
+
+    if has_unpacked and not has_packed and expects_packed and not expects_unpacked:
+        print(f"  Expert format mismatch: safetensors=unpacked, model=packed")
+        return _convert_unpacked_to_packed(save_path)
+    elif has_packed and not has_unpacked and expects_unpacked and not expects_packed:
+        print(f"  Expert format mismatch: safetensors=packed, model=unpacked")
+        return _convert_packed_to_unpacked(save_path)
+
+    return False
 
 
 def validate_merged_model(save_path: str) -> bool:

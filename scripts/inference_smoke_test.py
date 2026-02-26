@@ -23,6 +23,11 @@ import json
 import os
 import sys
 
+# Allow importing from pipeline_lib (sibling directory)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
 
 def _is_garbage(response: str) -> bool:
     """Detect garbage/incoherent model output.
@@ -55,6 +60,18 @@ def _is_garbage(response: str) -> bool:
     if letter_ratio < 0.3:
         return True
 
+    # Repetition: any 2-3 word phrase repeating 5+ times
+    # indicates degenerate output (e.g., "main content, main content, ...")
+    words = clean[:500].split()
+    if len(words) >= 10:
+        from collections import Counter
+        for n in (2, 3):
+            ngrams = [" ".join(words[i:i+n]) for i in range(len(words) - n + 1)]
+            if ngrams:
+                most_common_freq = Counter(ngrams).most_common(1)[0][1]
+                if most_common_freq >= 5:
+                    return True
+
     return False
 
 
@@ -67,6 +84,14 @@ def _load_merged_model(checkpoint: str):
     """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    # Ensure expert weights are in the format the model class expects
+    # (cleanup_merged_moe may have unpacked them, but model may want packed)
+    try:
+        from pipeline_lib.unsloth_utils import ensure_expert_format
+        ensure_expert_format(checkpoint)
+    except ImportError:
+        pass  # Running standalone without pipeline_lib
 
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint,

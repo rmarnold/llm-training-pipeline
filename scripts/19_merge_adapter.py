@@ -198,6 +198,10 @@ def _run_smoke_test(
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        # Ensure expert weights match model class expectations
+        from pipeline_lib.unsloth_utils import ensure_expert_format
+        ensure_expert_format(hf_path)
+
         model = AutoModelForCausalLM.from_pretrained(
             hf_path,
             dtype=torch.bfloat16,
@@ -248,6 +252,20 @@ def _run_smoke_test(
             or endoftext_count > 3
             or letter_ratio < 0.3
         )
+
+        # Repetition: any 2-3 word phrase repeating 5+ times
+        if not is_garbage:
+            from collections import Counter
+            words = response_clean[:500].split()
+            if len(words) >= 10:
+                for n in (2, 3):
+                    ngrams = [" ".join(words[i:i+n]) for i in range(len(words) - n + 1)]
+                    if ngrams:
+                        most_common_freq = Counter(ngrams).most_common(1)[0][1]
+                        if most_common_freq >= 5:
+                            is_garbage = True
+                            break
+
         if is_garbage:
             print(f"  Phase 2 FAILED: garbage/empty output "
                   f"(unique_chars={unique_chars}, endoftext={endoftext_count}, "
