@@ -58,6 +58,13 @@ def load_unsloth_model(
     Returns:
         (model, tokenizer) tuple.
     """
+    # Fix router keys before Unsloth loads — Unsloth patches GptOssForCausalLM
+    # to use router.linear.weight/bias, but merged models have router.weight/bias.
+    # Without this fix, Unsloth raises "Critical error since some weights are
+    # not initialized" for all 48 router keys (24 layers x weight+bias).
+    if os.path.isdir(model_name):
+        fix_router_keys_for_unsloth(model_name)
+
     from unsloth import FastLanguageModel
 
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -1230,14 +1237,169 @@ def ensure_expert_format(save_path: str) -> bool:
         re.match(r".*\.experts\.(gate_up_projs|down_projs)\.\d+\.", k) for k in expected_keys
     )
 
+    expert_fixed = False
     if has_unpacked and not has_packed and expects_packed and not expects_unpacked:
         print(f"  Expert format mismatch: safetensors=unpacked, model=packed")
-        return _convert_unpacked_to_packed(save_path)
+        expert_fixed = _convert_unpacked_to_packed(save_path)
     elif has_packed and not has_unpacked and expects_unpacked and not expects_packed:
         print(f"  Expert format mismatch: safetensors=packed, model=unpacked")
-        return _convert_packed_to_unpacked(save_path)
+        expert_fixed = _convert_packed_to_unpacked(save_path)
 
-    return False
+    # Also fix router keys even when expert format is already correct.
+    # Note: expert conversion functions also remap router keys, so only
+    # run this if expert conversion didn't already happen.
+    router_fixed = False
+    if not expert_fixed:
+        router_fixed = _fix_router_keys(save_path, expected_keys)
+
+    return expert_fixed or router_fixed
+
+
+def _fix_router_keys(save_path: str, expected_keys: set[str]) -> bool:
+    """Fix router key format mismatch between safetensors and expected keys.
+
+    Handles bidirectional conversion:
+    - ``router.weight/bias`` -> ``router.linear.weight/bias`` (for Unsloth)
+    - ``router.linear.weight/bias`` -> ``router.weight/bias`` (for AutoModelForCausalLM)
+
+    Args:
+        save_path: Path to merged model directory with safetensors.
+        expected_keys: Set of expected state_dict keys to match against.
+
+    Returns:
+        True if any router keys were renamed on disk.
+    """
+    import json
+    from collections import defaultdict
+
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    index_path = os.path.join(save_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return False
+
+    with open(index_path) as f:
+        index = json.load(f)
+    weight_map = index["weight_map"]
+
+    # Build rename mapping for router keys
+    router_rename: dict[str, str] = {}
+    for k in weight_map:
+        if ".router." not in k:
+            continue
+        if k in expected_keys:
+            continue  # Already matches
+        # Try both directions
+        if ".router.linear." in k:
+            candidate = k.replace(".router.linear.", ".router.")
+        else:
+            candidate = k.replace(".mlp.router.", ".mlp.router.linear.")
+        if candidate in expected_keys:
+            router_rename[k] = candidate
+
+    if not router_rename:
+        return False
+
+    print(f"  Fixing {len(router_rename)} router keys on disk...")
+
+    # Group by shard file
+    shard_groups: dict[str, list[str]] = defaultdict(list)
+    for key in router_rename:
+        shard_groups[weight_map[key]].append(key)
+
+    new_weight_map = dict(weight_map)
+
+    for shard_file, keys in shard_groups.items():
+        shard_path = os.path.join(save_path, shard_file)
+        new_tensors: dict[str, torch.Tensor] = {}
+        metadata: dict[str, str] = {}
+        keys_set = set(keys)
+
+        with safe_open(shard_path, framework="pt") as f:
+            shard_metadata = f.metadata() or {}
+            metadata.update(shard_metadata)
+            for key in f.keys():
+                tensor = f.get_tensor(key)
+                if key in keys_set:
+                    new_key = router_rename[key]
+                    new_tensors[new_key] = tensor
+                    del new_weight_map[key]
+                    new_weight_map[new_key] = shard_file
+                else:
+                    new_tensors[key] = tensor
+
+        save_file(new_tensors, shard_path, metadata=metadata)
+
+    # Update index
+    index["weight_map"] = dict(sorted(new_weight_map.items()))
+    with open(index_path, "w") as f:
+        json.dump(index, f, indent=2)
+
+    sample = list(router_rename.items())[:2]
+    for old, new in sample:
+        print(f"    {old} -> {new}")
+    print(f"  Remapped {len(router_rename)} router keys")
+
+    return True
+
+
+def fix_router_keys_for_unsloth(model_path: str) -> bool:
+    """Fix router keys in safetensors to match Unsloth's expected format.
+
+    Unsloth patches GptOssForCausalLM to use ``router.linear.weight/bias``
+    instead of the raw transformers ``router.weight/bias``. This function
+    converts router keys on disk before Unsloth loads the model.
+
+    Handles both direct model paths and adapter checkpoints (reads
+    ``adapter_config.json`` to find the base model path).
+
+    Safe to call multiple times (idempotent).
+
+    Args:
+        model_path: Path to model directory or adapter checkpoint.
+
+    Returns:
+        True if any router keys were renamed.
+    """
+    import json
+
+    # For adapter checkpoints, fix the base model's router keys
+    adapter_config_path = os.path.join(model_path, "adapter_config.json")
+    if os.path.exists(adapter_config_path):
+        with open(adapter_config_path) as f:
+            adapter_config = json.load(f)
+        base_model = adapter_config.get("base_model_name_or_path", "")
+        if base_model and os.path.isdir(base_model):
+            return fix_router_keys_for_unsloth(base_model)
+        return False  # Remote base model, can't fix
+
+    # Check if this is a local model directory with safetensors
+    index_path = os.path.join(model_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return False
+
+    with open(index_path) as f:
+        weight_map = json.load(f)["weight_map"]
+
+    # Check if router keys are already in Unsloth format
+    has_plain_router = any(
+        ".mlp.router.weight" in k and ".router.linear." not in k
+        for k in weight_map
+    )
+    if not has_plain_router:
+        return False  # Already in router.linear.X format or no router keys
+
+    # Build expected keys: router.weight -> router.linear.weight
+    expected_keys = set()
+    for k in weight_map:
+        if ".mlp.router." in k and ".router.linear." not in k:
+            expected_keys.add(k.replace(".mlp.router.", ".mlp.router.linear."))
+        else:
+            expected_keys.add(k)
+
+    print(f"  Fixing router keys for Unsloth compatibility: {model_path}")
+    return _fix_router_keys(model_path, expected_keys)
 
 
 def validate_merged_model(save_path: str) -> bool:
