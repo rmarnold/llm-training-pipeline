@@ -53,11 +53,21 @@ if [ -d "/workspace" ]; then
 fi
 
 # HuggingFace token (RunPod secret)
+# RunPod sets env vars on PID 1 but SSH sessions don't inherit them.
+# Source from /proc/1/environ as fallback.
+if [ -z "${HF_TOKEN:-}" ] && [ -f /proc/1/environ ]; then
+    _hf_from_proc=$(tr '\0' '\n' < /proc/1/environ 2>/dev/null | grep '^HF_TOKEN=' | cut -d= -f2-)
+    if [ -n "$_hf_from_proc" ]; then
+        export HF_TOKEN="$_hf_from_proc"
+    fi
+    unset _hf_from_proc
+fi
+
 if [ -n "${RUNPOD_SECRET_HF_TOKEN:-}" ]; then
     export HF_TOKEN="$RUNPOD_SECRET_HF_TOKEN"
     log "HF_TOKEN set from RUNPOD_SECRET_HF_TOKEN"
 elif [ -n "${HF_TOKEN:-}" ]; then
-    log "HF_TOKEN already set"
+    log "HF_TOKEN set (${#HF_TOKEN} chars)"
 else
     log "WARNING: No HF_TOKEN found. Some datasets may fail to download."
     log "Set RUNPOD_SECRET_HF_TOKEN in RunPod secrets or export HF_TOKEN."
@@ -88,6 +98,9 @@ case "$BATCH_PROFILE" in
         exit 1
         ;;
 esac
+
+# --- Model and checkpoint paths ---
+RUN_NAME="gpt-oss-20b-coding-tui"
 
 # --- H100 Sequence Lengths ---
 TC_SEQ_LEN=8192
@@ -543,22 +556,24 @@ phase_grpo() {
     log "Max steps: $GRPO_MAX_STEPS"
     log "Generations per prompt: $GRPO_NUM_GEN"
 
-    # GRPO requires language-specific task data (e.g., data/rust/grpo/tasks.jsonl).
-    # For TUI-only pipeline, skip GRPO if no task source is available.
-    local grpo_task_source="data/rust/grpo/tasks.jsonl"
+    # Generate TUI GRPO tasks if they don't exist yet.
+    local grpo_task_source="data/coding_tui/grpo_tasks.jsonl"
     if [ ! -f "$grpo_task_source" ]; then
-        log "GRPO task data not found at $grpo_task_source (TUI-only pipeline)."
-        log "Skipping GRPO — run language-specific training to generate task data."
-        update_gate "grpo" "status" '"skipped_no_tasks"'
-        return 0
+        log "Generating TUI GRPO tasks from training data..."
+        python3 scripts/generate_tui_grpo_tasks.py \
+            $([ "$QUICK_TEST" = true ] && echo "--quick-test") \
+            --output "$grpo_task_source" \
+            2>&1 | tee -a "$LOG_FILE"
     fi
 
     python3 scripts/18_grpo_rl.py \
+        --config configs/grpo_tui.yaml \
         --checkpoint "$grpo_base" \
         --per_device_train_batch_size "$GRPO_BATCH" \
         --gradient_accumulation_steps "$GRPO_GRAD" \
         --max_steps "$GRPO_MAX_STEPS" \
         --task_source "$grpo_task_source" \
+        --language tui \
         --output_dir checkpoints/agent_sft_grpo \
         2>&1 | tee -a "$LOG_FILE"
 
@@ -656,6 +671,23 @@ phase_export() {
     else
         log "ERROR: Export failed — no output in $EXPORT_DIR"
         return 1
+    fi
+
+    # Upload to HuggingFace Hub if token available
+    if [ -n "${HF_TOKEN:-}" ] && [ -d "$EXPORT_DIR/hf" ]; then
+        local hf_repo="rarnold/${RUN_NAME:-gpt-oss-20b-coding-tui}"
+        log "Uploading to HuggingFace Hub: $hf_repo"
+        python3 -c "
+from huggingface_hub import HfApi
+api = HfApi()
+api.create_repo('$hf_repo', exist_ok=True, private=True)
+api.upload_folder(
+    folder_path='$EXPORT_DIR/hf',
+    repo_id='$hf_repo',
+    commit_message='Upload from TUI training pipeline',
+)
+print(f'Uploaded to https://huggingface.co/$hf_repo')
+" 2>&1 | tee -a "$LOG_FILE" || log "WARNING: HF Hub upload failed. Model available locally at $EXPORT_DIR/hf"
     fi
 }
 
