@@ -75,11 +75,14 @@ _PHASE_CLEANUP_RULES: dict[tuple[str, str], dict] = {
     },
     ("agent_sft", "agent_sft_ipo"): {
         "delete": [
-            "checkpoints/gpt-oss-20b-coding-tui-merged",
             "checkpoints/agent_sft/checkpoint-*",
         ],
         "keep": [
             "checkpoints/agent_sft/final",
+            # NOTE: merged model must survive through IPO/GRPO/export —
+            # all adapters reference it via adapter_config.json's
+            # base_model_name_or_path. Deleted after export instead.
+            "checkpoints/gpt-oss-20b-coding-tui-merged",
         ],
     },
     ("agent_sft_ipo", "agent_sft_grpo"): {
@@ -93,6 +96,7 @@ _PHASE_CLEANUP_RULES: dict[tuple[str, str], dict] = {
     },
     ("agent_sft_grpo", "export"): {
         "delete": [
+            "checkpoints/gpt-oss-20b-coding-tui-merged",
             "checkpoints/agent_sft_ipo",
             "checkpoints/agent_sft_grpo/checkpoint-*",
         ],

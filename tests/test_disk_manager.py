@@ -180,8 +180,8 @@ class TestCleanupBetweenPhases:
         # merged dir should survive (it's in keep)
         assert os.path.exists(merged)
 
-    def test_agent_sft_to_ipo_cleans_merged_model(self, dm, temp_dir):
-        """The biggest win: ~40GB merged model deleted after Agent SFT."""
+    def test_agent_sft_to_ipo_preserves_merged_model(self, dm, temp_dir):
+        """Merged model must survive through IPO/GRPO — adapters reference it."""
         _make_checkpoint_tree(temp_dir, "checkpoints/agent_sft")
         merged = os.path.join(
             temp_dir, "checkpoints/gpt-oss-20b-coding-tui-merged"
@@ -191,10 +191,40 @@ class TestCleanupBetweenPhases:
             f.write(b"\x00" * 4096)
 
         result = dm.cleanup_between_phases("agent_sft", "agent_sft_ipo")
-        assert not os.path.exists(merged)
+        # Merged model must survive (adapters reference it via adapter_config.json)
+        assert os.path.exists(merged)
         # agent_sft/final should survive
         assert os.path.exists(
             os.path.join(temp_dir, "checkpoints/agent_sft/final")
+        )
+        # Only intermediate checkpoints should be deleted
+        remaining = list(
+            (dm.base_dir / "checkpoints/agent_sft").glob("checkpoint-*")
+        )
+        assert len(remaining) == 0
+
+    def test_grpo_to_export_cleans_merged_model(self, dm, temp_dir):
+        """Merged model (~40GB) deleted after GRPO, before export cleanup."""
+        _make_checkpoint_tree(temp_dir, "checkpoints/agent_sft_grpo")
+        merged = os.path.join(
+            temp_dir, "checkpoints/gpt-oss-20b-coding-tui-merged"
+        )
+        os.makedirs(merged, exist_ok=True)
+        with open(os.path.join(merged, "big_model.bin"), "wb") as f:
+            f.write(b"\x00" * 4096)
+        # Also create agent_sft_ipo (deleted in this phase)
+        _make_checkpoint_tree(temp_dir, "checkpoints/agent_sft_ipo")
+
+        result = dm.cleanup_between_phases("agent_sft_grpo", "export")
+        # Merged model should now be deleted
+        assert not os.path.exists(merged)
+        # agent_sft_ipo should be deleted
+        assert not os.path.exists(
+            os.path.join(temp_dir, "checkpoints/agent_sft_ipo")
+        )
+        # agent_sft_grpo/final should survive
+        assert os.path.exists(
+            os.path.join(temp_dir, "checkpoints/agent_sft_grpo/final")
         )
 
     def test_unknown_transition_is_noop(self, dm):
