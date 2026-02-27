@@ -543,11 +543,22 @@ phase_grpo() {
     log "Max steps: $GRPO_MAX_STEPS"
     log "Generations per prompt: $GRPO_NUM_GEN"
 
+    # GRPO requires language-specific task data (e.g., data/rust/grpo/tasks.jsonl).
+    # For TUI-only pipeline, skip GRPO if no task source is available.
+    local grpo_task_source="data/rust/grpo/tasks.jsonl"
+    if [ ! -f "$grpo_task_source" ]; then
+        log "GRPO task data not found at $grpo_task_source (TUI-only pipeline)."
+        log "Skipping GRPO — run language-specific training to generate task data."
+        update_gate "grpo" "status" '"skipped_no_tasks"'
+        return 0
+    fi
+
     python3 scripts/18_grpo_rl.py \
         --checkpoint "$grpo_base" \
         --per_device_train_batch_size "$GRPO_BATCH" \
         --gradient_accumulation_steps "$GRPO_GRAD" \
         --max_steps "$GRPO_MAX_STEPS" \
+        --task_source "$grpo_task_source" \
         --output_dir checkpoints/agent_sft_grpo \
         2>&1 | tee -a "$LOG_FILE"
 
