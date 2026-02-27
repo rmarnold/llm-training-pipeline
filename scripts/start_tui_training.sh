@@ -51,6 +51,11 @@ echo ""
 # Launch in screen with logging
 screen -dmS "$SESSION_NAME" bash -c "cd $PROJECT_DIR && bash scripts/run_tui_pipeline.sh $* 2>&1 | tee $LOG_FILE; echo 'Pipeline finished. Press Enter to exit.'; read"
 
-echo "Pipeline started. Attaching in 2 seconds..."
-sleep 2
-screen -r "$SESSION_NAME"
+echo "Pipeline started."
+if [ -t 1 ]; then
+    echo "Attaching in 2 seconds..."
+    sleep 2
+    screen -r "$SESSION_NAME"
+else
+    echo "Non-interactive session detected. Attach with: screen -r $SESSION_NAME"
+fi

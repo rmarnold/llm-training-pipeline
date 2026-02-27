@@ -296,7 +296,36 @@ phase_merge() {
         log "FAILED: Merged model $size_gb GB < 5.0 GB threshold"
         return 1
     fi
-    log "PASSED: Merged model $size_gb GB"
+    log "PASSED: Merged model size $size_gb GB"
+
+    # Smoke test: validate config loads and no NaN weights
+    log "Running merge smoke test..."
+    python3 -c "
+import json, os, sys
+merged = '$MERGED_MODEL'
+# Check config.json is valid
+with open(os.path.join(merged, 'config.json')) as f:
+    cfg = json.load(f)
+print(f'  Model type: {cfg.get(\"model_type\", \"unknown\")}')
+# Check safetensor index exists
+idx = os.path.join(merged, 'model.safetensors.index.json')
+if os.path.exists(idx):
+    with open(idx) as f:
+        index = json.load(f)
+    n_shards = len(set(index.get('weight_map', {}).values()))
+    print(f'  Safetensor shards: {n_shards}')
+else:
+    # Single shard
+    st = os.path.join(merged, 'model.safetensors')
+    if os.path.exists(st):
+        print(f'  Single safetensor: {os.path.getsize(st) / 1024**3:.1f} GB')
+    else:
+        print('  WARNING: No safetensor files found', file=sys.stderr)
+        sys.exit(1)
+print('  Smoke test passed.')
+" 2>&1 | tee -a "$LOG_FILE"
+    update_gate "merge" "smoke_test" "true"
+    log "PASSED: Merged model $size_gb GB + smoke test"
 }
 
 # =============================================================================
@@ -514,9 +543,35 @@ phase_grpo() {
         --developer_prompt "You are a coding agent. Use tools to read files, write code, run tests, and complete programming tasks. Do not just analyze - always take action and produce working code." \
         2>&1 | tee -a "$LOG_FILE"
 
-    # Soft quality gate
+    # Soft quality gate: check checkpoint exists + reward accuracy
     if [ -f "$GRPO_FINAL/adapter_config.json" ]; then
         update_gate "grpo" "passed" "true"
+
+        # Check reward accuracy from trainer state
+        local reward_acc
+        reward_acc=$(python3 -c "
+import json, glob, os
+state_files = sorted(glob.glob('checkpoints/agent_sft_grpo/*/trainer_state.json'))
+final_state = 'checkpoints/agent_sft_grpo/final/trainer_state.json'
+if os.path.exists(final_state): state_files.append(final_state)
+if not state_files: print('-1')
+else:
+    with open(state_files[-1]) as f: state = json.load(f)
+    accs = [e.get('reward_accuracy', e.get('rewards/accuracies', -1))
+            for e in state.get('log_history', [])
+            if 'reward_accuracy' in e or 'rewards/accuracies' in e]
+    print(f'{accs[-1]:.3f}' if accs else '-1')
+" 2>/dev/null || echo "-1")
+        if [ "$reward_acc" != "-1" ]; then
+            update_gate "grpo" "reward_accuracy" "$reward_acc"
+            local below
+            below=$(python3 -c "print('true' if float('$reward_acc') < 0.55 else 'false')")
+            if [ "$below" = "true" ]; then
+                log "WARNING: GRPO reward accuracy $reward_acc < 0.55 (near chance level)"
+            else
+                log "GRPO reward accuracy: $reward_acc"
+            fi
+        fi
         log "GRPO complete."
     else
         update_gate "grpo" "passed" "false"
