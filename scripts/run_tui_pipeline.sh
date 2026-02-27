@@ -41,12 +41,15 @@ log_section() { echo "" | tee -a "$LOG_FILE"; echo "$(printf '=%.0s' {1..70})" |
 export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
-# Redirect caches to /workspace volume (200GB) instead of container disk (20GB)
+# Redirect caches and temp to /workspace volume (200GB) instead of container disk (20GB)
 if [ -d "/workspace" ]; then
     export HF_HOME="/workspace/.cache/huggingface"
     export TORCH_HOME="/workspace/.cache/torch"
     export XDG_CACHE_HOME="/workspace/.cache"
-    mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME"
+    export TMPDIR="/workspace/tmp"
+    export TEMP="/workspace/tmp"
+    export TMP="/workspace/tmp"
+    mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" "$TMPDIR"
 fi
 
 # HuggingFace token (RunPod secret)
