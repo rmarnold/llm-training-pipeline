@@ -1,0 +1,58 @@
+run_name: "gpt-oss-20b-grpo-tui-v1"
+
+model:
+  checkpoint: "checkpoints/agent_sft_ipo/final"
+  max_seq_length: 8192
+  load_in_4bit: true
+  dtype: null
+
+# Top-level language key: tells 18_grpo_rl.py to dispatch to TUIEvaluator.
+# No execution sandbox is required — rewards are format-based only.
+language: "tui"
+
+data:
+  task_source: "data/coding_tui/grpo_tasks.jsonl"
+  num_tasks: 500
+
+training:
+  num_train_epochs: 1
+  max_steps: 200      # TUI GRPO is lighter than code GRPO
+  learning_rate: 5.0e-7
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.1
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  bf16: true
+  max_grad_norm: 0.5
+  weight_decay: 0.0
+  optim: "adamw_8bit"
+  seed: 42
+
+  # GRPO-specific
+  num_generations: 4    # Samples per prompt for group-relative advantage
+  temperature: 0.7
+  max_new_tokens: 1024  # TUI responses are shorter than full code solutions
+  max_prompt_length: 4096
+
+logging:
+  logging_steps: 1
+  save_steps: 50
+  save_total_limit: 3
+  report_to: ["tensorboard"]
+
+checkpointing:
+  output_dir: "checkpoints/agent_sft_grpo"
+
+# Format-based reward weights (no execution sandbox).
+# These map to keys read by TUIEvaluator.compute_execution_reward().
+rewards:
+  harmony_format_weight: 0.3   # Max score for <|assistant|> + ending token
+  tool_call_weight: 0.3        # Max score for valid JSON tool calls
+  completeness_weight: 0.3     # Max score for non-truncated response
+  repetition_penalty: -0.3     # Applied when same 50+ char chunk repeats 3+ times
+  empty_penalty: -0.5          # Applied for blank completions
+
+# Curriculum disabled: TUI tasks are uniform in difficulty and short in length.
+# Enable for long-context agent trajectories in future iterations.
+curriculum:
+  enabled: false

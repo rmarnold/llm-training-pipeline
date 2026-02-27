@@ -145,6 +145,10 @@ def _ensure_evaluators_loaded() -> None:
             import pipeline_lib.go_evaluators  # noqa: F401
         except ImportError:
             pass
+        try:
+            import pipeline_lib.tui_evaluators  # noqa: F401
+        except ImportError:
+            pass
 
 
 # Auto-load evaluators on module import
