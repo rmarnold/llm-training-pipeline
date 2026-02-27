@@ -548,10 +548,7 @@ phase_grpo() {
         --per_device_train_batch_size "$GRPO_BATCH" \
         --gradient_accumulation_steps "$GRPO_GRAD" \
         --max_steps "$GRPO_MAX_STEPS" \
-        --num_generations "$GRPO_NUM_GEN" \
         --output_dir checkpoints/agent_sft_grpo \
-        --reward_mode coding_tui \
-        --developer_prompt "You are a coding agent. Use tools to read files, write code, run tests, and complete programming tasks. Do not just analyze - always take action and produce working code." \
         2>&1 | tee -a "$LOG_FILE"
 
     # Soft quality gate: check checkpoint exists + reward accuracy
