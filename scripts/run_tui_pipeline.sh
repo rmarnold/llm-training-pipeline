@@ -634,6 +634,12 @@ phase_export() {
         log "Base model: $MERGED_MODEL"
     fi
 
+    # Install GGUF build deps (cmake, libcurl) non-interactively
+    if ! command -v cmake &>/dev/null; then
+        log "Installing cmake and libcurl for GGUF export..."
+        apt-get update -qq && apt-get install -y -qq cmake libcurl4-openssl-dev 2>&1 | tail -1
+    fi
+
     python3 scripts/19_merge_adapter.py \
         --adapter_path "$adapter_path" \
         --output_dir "$EXPORT_DIR" \
@@ -641,7 +647,16 @@ phase_export() {
         $base_model_arg \
         2>&1 | tee -a "$LOG_FILE"
 
-    log "Export complete: $EXPORT_DIR"
+    # If GGUF failed but HF succeeded, still consider export successful
+    if [ -d "$EXPORT_DIR/hf" ]; then
+        log "Export complete: $EXPORT_DIR"
+        if [ ! -d "$EXPORT_DIR/gguf_q4" ]; then
+            log "WARNING: GGUF export failed. HF format available. Run GGUF separately if needed."
+        fi
+    else
+        log "ERROR: Export failed — no output in $EXPORT_DIR"
+        return 1
+    fi
 }
 
 # =============================================================================
