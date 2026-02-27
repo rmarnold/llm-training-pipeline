@@ -38,27 +38,33 @@ def prepare_tool_calling(output_dir="data/coding_tui/tool_calling/train", quick_
             all_examples.append(formatted)
     print(f"  Glaive: {len(all_examples)} examples")
 
-    # 2. xLAM-60K
+    # 2. xLAM-60K (gated dataset — requires HF_TOKEN)
     print("Downloading Salesforce/xlam-function-calling-60k...")
-    ds = load_dataset("Salesforce/xlam-function-calling-60k", split="train")
-    limit = 200 if quick_test else len(ds)
-    count_before = len(all_examples)
-    for ex in ds.select(range(min(limit, len(ds)))):
-        formatted = _format_xlam(ex)
-        if formatted:
-            all_examples.append(formatted)
-    print(f"  xLAM: {len(all_examples) - count_before} examples")
+    try:
+        ds = load_dataset("Salesforce/xlam-function-calling-60k", split="train")
+        limit = 200 if quick_test else len(ds)
+        count_before = len(all_examples)
+        for ex in ds.select(range(min(limit, len(ds)))):
+            formatted = _format_xlam(ex)
+            if formatted:
+                all_examples.append(formatted)
+        print(f"  xLAM: {len(all_examples) - count_before} examples")
+    except Exception as e:
+        print(f"  WARNING: xLAM download failed (gated dataset, needs HF_TOKEN): {e}")
 
     # 3. Hermes v1
     print("Downloading NousResearch/hermes-function-calling-v1...")
-    ds = load_dataset("NousResearch/hermes-function-calling-v1", split="train")
-    limit = 300 if quick_test else len(ds)
-    count_before = len(all_examples)
-    for ex in ds.select(range(min(limit, len(ds)))):
-        formatted = format_hermes_function_calling(ex)
-        if formatted:
-            all_examples.append(formatted)
-    print(f"  Hermes: {len(all_examples) - count_before} examples")
+    try:
+        ds = load_dataset("NousResearch/hermes-function-calling-v1", split="train")
+        limit = 300 if quick_test else len(ds)
+        count_before = len(all_examples)
+        for ex in ds.select(range(min(limit, len(ds)))):
+            formatted = format_hermes_function_calling(ex)
+            if formatted:
+                all_examples.append(formatted)
+        print(f"  Hermes: {len(all_examples) - count_before} examples")
+    except Exception as e:
+        print(f"  WARNING: Hermes download failed: {e}")
 
     _save_dataset(all_examples, output_dir)
     print(f"Total tool calling examples: {len(all_examples)}")
@@ -139,24 +145,30 @@ def prepare_preferences(output_dir="data/coding_tui/preference/train", quick_tes
 
     # 1. hh-rlhf
     print("Downloading Anthropic/hh-rlhf...")
-    ds = load_dataset("Anthropic/hh-rlhf", split="train")
-    limit = 300 if quick_test else min(20000, len(ds))
-    for ex in ds.select(range(min(limit, len(ds)))):
-        formatted = _format_hh_rlhf(ex)
-        if formatted:
-            all_examples.append(formatted)
-    print(f"  hh-rlhf: {len(all_examples)} examples")
+    try:
+        ds = load_dataset("Anthropic/hh-rlhf", split="train")
+        limit = 300 if quick_test else min(20000, len(ds))
+        for ex in ds.select(range(min(limit, len(ds)))):
+            formatted = _format_hh_rlhf(ex)
+            if formatted:
+                all_examples.append(formatted)
+        print(f"  hh-rlhf: {len(all_examples)} examples")
+    except Exception as e:
+        print(f"  WARNING: hh-rlhf download failed: {e}")
 
     # 2. CodeFeedback
     print("Downloading m-a-p/CodeFeedback-Filtered-Instruction...")
     count_before = len(all_examples)
-    ds = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction", split="train")
-    limit = 200 if quick_test else min(10000, len(ds))
-    for ex in ds.select(range(min(limit, len(ds)))):
-        formatted = _format_code_feedback(ex)
-        if formatted:
-            all_examples.append(formatted)
-    print(f"  CodeFeedback: {len(all_examples) - count_before} examples")
+    try:
+        ds = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction", split="train")
+        limit = 200 if quick_test else min(10000, len(ds))
+        for ex in ds.select(range(min(limit, len(ds)))):
+            formatted = _format_code_feedback(ex)
+            if formatted:
+                all_examples.append(formatted)
+        print(f"  CodeFeedback: {len(all_examples) - count_before} examples")
+    except Exception as e:
+        print(f"  WARNING: CodeFeedback download failed: {e}")
 
     _save_dataset(all_examples, output_dir, columns=["text", "pref_prompt", "pref_chosen", "pref_rejected"])
     print(f"Total preference examples: {len(all_examples)}")
