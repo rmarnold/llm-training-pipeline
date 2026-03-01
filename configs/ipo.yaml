@@ -32,6 +32,11 @@ training:
   max_length: 16384
   max_prompt_length: 8192
 
+  # Precompute reference model log probs once before training starts.
+  # Eliminates per-step reference forward pass, saving ~15-20 GiB VRAM.
+  # Required for batch_size > 1 on H100 80GB with 20B MoE model.
+  precompute_ref_log_probs: true
+
 logging:
   logging_steps: 5
   eval_steps: 100

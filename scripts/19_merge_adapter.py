@@ -89,12 +89,13 @@ def _run_smoke_test(
     test_prompt: str,
     max_new_tokens: int = 256,
 ) -> None:
-    """Validate merged model via safetensor inspection + Unsloth inference.
+    """Validate merged model via safetensor inspection + inference.
 
     Two-phase validation:
     1. Direct safetensor weight inspection (no transformers version dependency)
-    2. Text generation via FastLanguageModel (avoids AutoModelForCausalLM
-       which cannot load packed MoE expert format on transformers 4.x)
+    2. Text generation via AutoModelForCausalLM with eager attention
+       (cleanup_merged_moe converts to unpacked format, eager avoids
+       Flex Attention gibberish on GPT-OSS — Bug #3363)
     """
     import torch
     print(f"\nRunning smoke test...")
@@ -185,27 +186,47 @@ def _run_smoke_test(
     except Exception as e:
         print(f"  Phase 1 FAILED: {e}")
 
-    # Phase 2: Text generation via Unsloth
+    # Phase 2: Text generation via AutoModelForCausalLM with eager attention.
     # cleanup_merged_moe() converts packed expert format to unpacked nn.Linear
-    # format with proper transpose, and remaps router keys. This allows both
-    # Unsloth FastLanguageModel and AutoModelForCausalLM to load the model.
-    print(f"\n  Phase 2: Inference test (Unsloth)...")
+    # format, so AutoModelForCausalLM can load the model directly.
+    #
+    # Unsloth's FastLanguageModel configures Flex Attention internally, which
+    # produces gibberish on GPT-OSS (Bug #3363). Using AutoModelForCausalLM
+    # with attn_implementation="eager" avoids this entirely.
+    print(f"\n  Phase 2: Inference test (eager attention)...")
+    inference_ok = False
     try:
-        from unsloth import FastLanguageModel
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        model, tokenizer = FastLanguageModel.from_pretrained(
+        # Ensure expert weights match model class expectations
+        from pipeline_lib.unsloth_utils import ensure_expert_format
+        ensure_expert_format(hf_path)
+
+        model = AutoModelForCausalLM.from_pretrained(
             hf_path,
-            max_seq_length=4096,
-            load_in_4bit=True,
             dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="eager",
+            trust_remote_code=True,
         )
-        FastLanguageModel.for_inference(model)
+        tokenizer = AutoTokenizer.from_pretrained(
+            hf_path, trust_remote_code=True,
+        )
+        model.eval()
+
+        # Ensure pad_token_id is set (StopIteration fix)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        if model.generation_config.pad_token_id is None:
+            model.generation_config.pad_token_id = tokenizer.eos_token_id
 
         inputs = tokenizer(test_prompt, return_tensors="pt").to(model.device)
-        outputs = model.generate(
-            **inputs, max_new_tokens=max_new_tokens,
-            temperature=0.1, do_sample=True,
-        )
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs, max_new_tokens=max_new_tokens,
+                temperature=0.1, do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
         response = tokenizer.decode(
             outputs[0][inputs["input_ids"].shape[1]:],
             skip_special_tokens=False,
@@ -218,21 +239,56 @@ def _run_smoke_test(
             print(f"  {line}")
         print(f"  {'─' * 50}")
 
-        is_garbage = response.strip() == "" or len(set(response[:100])) < 5
+        # Garbage detection: empty, low diversity, endoftext flooding, low letter ratio
+        response_clean = response.strip()
+        unique_chars = len(set(response_clean[:200]))
+        endoftext_count = response_clean.count("<|endoftext|>")
+        sample = response_clean[:300]
+        letter_count = sum(1 for c in sample if c.isalpha())
+        letter_ratio = letter_count / max(len(sample), 1)
+        is_garbage = (
+            response_clean == ""
+            or unique_chars < 8
+            or endoftext_count > 3
+            or letter_ratio < 0.3
+        )
+
+        # Repetition: any 2-3 word phrase repeating 5+ times
+        if not is_garbage:
+            from collections import Counter
+            words = response_clean[:500].split()
+            if len(words) >= 10:
+                for n in (2, 3):
+                    ngrams = [" ".join(words[i:i+n]) for i in range(len(words) - n + 1)]
+                    if ngrams:
+                        most_common_freq = Counter(ngrams).most_common(1)[0][1]
+                        if most_common_freq >= 5:
+                            is_garbage = True
+                            break
+
         if is_garbage:
-            print(f"  Phase 2 FAILED: garbage/empty output")
+            print(f"  Phase 2 FAILED: garbage/empty output "
+                  f"(unique_chars={unique_chars}, endoftext={endoftext_count}, "
+                  f"letter_ratio={letter_ratio:.2f})")
         else:
-            print(f"  Phase 2 PASSED: coherent output")
+            print(f"  Phase 2 PASSED: coherent output "
+                  f"(unique_chars={unique_chars}, letter_ratio={letter_ratio:.2f})")
+            inference_ok = True
 
         del model, tokenizer
         import gc; gc.collect()
         torch.cuda.empty_cache()
 
-    except Exception as e:
-        print(f"  Phase 2 FAILED: {e}")
+    except Exception as ex:
+        import traceback
+        print(f"  Phase 2 FAILED: {type(ex).__name__}: {ex}")
+        traceback.print_exc()
 
-    # Overall verdict
-    print(f"\n  Smoke test: {'PASSED' if weights_ok else 'FAILED'}")
+    # Overall verdict — both phases must pass
+    overall = weights_ok and inference_ok
+    print(f"\n  Smoke test: {'PASSED' if overall else 'FAILED'}")
+    if weights_ok and not inference_ok:
+        print(f"  (Weights OK but inference failed — model may still work for training)")
 
 
 if __name__ == "__main__":

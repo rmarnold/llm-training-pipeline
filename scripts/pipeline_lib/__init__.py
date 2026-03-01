@@ -13,6 +13,9 @@ def __getattr__(name: str):
     if name == "OOMRecoveryCallback":
         from .training_callbacks import OOMRecoveryCallback
         return OOMRecoveryCallback
+    if name == "DiskManager":
+        from .disk_manager import DiskManager
+        return DiskManager
     raise AttributeError(f"module 'pipeline_lib' has no attribute {name!r}")
 
 
@@ -20,4 +23,5 @@ __all__ = [
     "unwrap_compiled_model",
     "load_compiled_checkpoint",
     "OOMRecoveryCallback",
+    "DiskManager",
 ]

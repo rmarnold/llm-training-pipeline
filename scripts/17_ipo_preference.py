@@ -73,9 +73,19 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
     train_dataset = load_from_disk(train_data_path)
     print(f"  Training pairs: {len(train_dataset):,}")
 
+    # Rename pref_* columns to DPOTrainer's expected format
+    col_map = {"pref_prompt": "prompt", "pref_chosen": "chosen", "pref_rejected": "rejected"}
+    renames = {k: v for k, v in col_map.items() if k in train_dataset.column_names}
+    if renames:
+        train_dataset = train_dataset.rename_columns(renames)
+        print(f"  Renamed columns: {renames}")
+
     eval_dataset = None
     if val_data_path and os.path.exists(val_data_path):
         eval_dataset = load_from_disk(val_data_path)
+        eval_renames = {k: v for k, v in col_map.items() if k in eval_dataset.column_names}
+        if eval_renames:
+            eval_dataset = eval_dataset.rename_columns(eval_renames)
         print(f"  Evaluation pairs: {len(eval_dataset):,}")
 
     # Training arguments
@@ -105,9 +115,12 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
         optim=config["training"].get("optim", "adamw_8bit"),
         # IPO-specific
         loss_type=config["training"].get("loss_type", "ipo"),
-        beta=config["training"].get("beta", 0.1),
+        beta=cli_overrides.get("beta", config["training"].get("beta", 0.1)),
         max_length=config["training"].get("max_length", 16384),
         max_prompt_length=config["training"].get("max_prompt_length", 8192),
+        # Precompute reference log probs once before training to avoid
+        # running the reference forward pass every step (saves ~15-20 GiB VRAM).
+        precompute_ref_log_probs=config["training"].get("precompute_ref_log_probs", True),
         # Logging
         logging_steps=cli_overrides.get("logging_steps", config["logging"].get("logging_steps", 5)),
         eval_strategy="steps" if eval_dataset else "no",
@@ -128,10 +141,21 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
         processing_class=tokenizer,
     )
 
+    # Clear any leaked VRAM from preprocessing before training starts
+    import gc
+    import torch
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        free_gb = torch.cuda.mem_get_info()[0] / 1024**3
+        total_gb = torch.cuda.mem_get_info()[1] / 1024**3
+        print(f"\nVRAM before training: {total_gb - free_gb:.1f} / {total_gb:.1f} GiB used")
+
     print(f"\nStarting IPO training...")
     print(f"  Output: {output_dir}")
     print(f"  Loss type: {training_args.loss_type}")
     print(f"  Beta: {training_args.beta}")
+    print(f"  Precompute ref log probs: {training_args.precompute_ref_log_probs}")
     print(f"  LR: {training_args.learning_rate}")
 
     resume = cli_overrides.get("resume_from_checkpoint")
@@ -163,6 +187,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str)
     parser.add_argument("--train_data_path", type=str)
     parser.add_argument("--val_data_path", type=str)
+    parser.add_argument("--beta", type=float, help="IPO/DPO beta parameter")
     parser.add_argument("--resume_from_checkpoint", type=str)
     args = parser.parse_args()
 
@@ -170,7 +195,7 @@ if __name__ == "__main__":
     for key in ["checkpoint", "max_steps", "num_train_epochs", "learning_rate", "warmup_ratio",
                  "per_device_train_batch_size", "gradient_accumulation_steps",
                  "save_steps", "eval_steps", "logging_steps", "output_dir",
-                 "train_data_path", "val_data_path", "resume_from_checkpoint"]:
+                 "train_data_path", "val_data_path", "beta", "resume_from_checkpoint"]:
         val = getattr(args, key)
         if val is not None:
             cli_overrides[key] = val
