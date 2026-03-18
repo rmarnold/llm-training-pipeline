@@ -94,7 +94,33 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
     val_data_path = cli_overrides.get("val_data_path", config["data"].get("val_data"))
 
     print(f"\nLoading training data: {train_data_path}")
-    train_dataset = load_from_disk(train_data_path)
+    # Support both flat datasets and directories of sub-datasets.
+    # The trajectory generator saves to subdirs (e.g. from_strandset/,
+    # from_mutations/) — merge them all into a single dataset.
+    try:
+        train_dataset = load_from_disk(train_data_path)
+    except (FileNotFoundError, ValueError):
+        import glob
+        from datasets import concatenate_datasets
+
+        sub_dirs = sorted(glob.glob(os.path.join(train_data_path, "*/")))
+        if not sub_dirs:
+            raise FileNotFoundError(
+                f"No dataset found at {train_data_path} or its subdirectories"
+            )
+        parts = []
+        for d in sub_dirs:
+            try:
+                ds = load_from_disk(d.rstrip("/"))
+                parts.append(ds)
+                print(f"  Loaded {d}: {len(ds):,} examples")
+            except Exception as e:
+                print(f"  Skipping {d}: {e}")
+        if not parts:
+            raise FileNotFoundError(
+                f"No valid datasets found in subdirectories of {train_data_path}"
+            )
+        train_dataset = concatenate_datasets(parts)
     print(f"  Training examples: {len(train_dataset):,}")
 
     eval_dataset = None
