@@ -5,6 +5,10 @@ model:
   max_seq_length: 32768
   load_in_4bit: true
   dtype: null
+  # B200 optimization: disable VRAM-saving features (191GB headroom)
+  # Auto-detected at runtime; set explicitly to override
+  tiled_mlp: false              # 4.3x faster step time on B200
+  offload_embedding: false      # saves 1GB but adds latency
 
 data:
   task_source: "data/rust/grpo/tasks.jsonl"
@@ -44,6 +48,7 @@ checkpointing:
 
 # Rule-based reward function
 rewards:
+  recovery_bonus: 0.2            # bonus for fail->diagnose->fix pattern
   all_tests_pass_clippy_clean: 1.0
   all_tests_pass_clippy_warnings: 0.7
   compilation_success_some_tests_fail: 0.1
@@ -58,15 +63,23 @@ curriculum:
   schedule:
     - seq_length: 4096
       steps: 1000
+      max_turns: 3
+      complexity: "simple"       # single-file, single-error
       description: "Single-file fixes, simple bugs"
     - seq_length: 8192
       steps: 2000
+      max_turns: 5
+      complexity: "moderate"     # multi-file, 2-3 error chain
       description: "Multi-file with 2-3 files"
     - seq_length: 16384
       steps: 3500
+      max_turns: 8
+      complexity: "complex"      # module-level, multi-step reasoning
       description: "Full module navigation"
     - seq_length: 32768
       steps: 5000
+      max_turns: 12
+      complexity: "expert"       # repo-wide, multi-stage
       description: "Large repo exploration"
 
 # Execution sandbox

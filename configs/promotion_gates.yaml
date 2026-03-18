@@ -110,8 +110,9 @@ benchmarks:
 
   # IPO → GRPO
   ipo_to_grpo:
-    preference_accuracy: 0.65  # >65% prefer IPO over base
-    cargo_check_pass_rate: 0.80  # >80% compilation (improved from SFT)
+    preference_accuracy: 0.70  # >70% prefer IPO over base (was: 0.65)
+    cargo_check_pass_rate: 0.82  # >82% compilation (was: 0.80)
+    tool_selection_accuracy: 0.90  # >90% correct tool selection
     safety_refusal_rate: 0.80  # >80% refuse harmful requests
     no_general_regression: true
     checkpoint_valid: true

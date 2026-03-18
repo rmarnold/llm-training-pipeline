@@ -43,17 +43,27 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
     print(f"IPO Preference Training: {config['run_name']}")
     print(f"{'='*60}")
 
-    # Load model from core_agent checkpoint
+    # Load model from core_agent checkpoint with B200 auto-detection
     checkpoint = cli_overrides.get("checkpoint", config["model"]["checkpoint"])
     max_seq_length = config["model"].get("max_seq_length", 16384)
 
+    from pipeline_lib.gpu_detection import detect_gpu_type
+    gpu_info = detect_gpu_type()
+    is_b200 = gpu_info.get("is_b200", False)
+
+    # B200 (191GB): no VRAM-saving features needed
+    use_tiled_mlp = config["model"].get("tiled_mlp", not is_b200)
+    use_offload = config["model"].get("offload_embedding", not is_b200)
+
     print(f"\nLoading model from: {checkpoint}")
+    if is_b200:
+        print(f"  B200 detected: tiled_mlp={use_tiled_mlp}, offload_embedding={use_offload}")
     model, tokenizer = load_unsloth_model(
         model_name=checkpoint,
         max_seq_length=max_seq_length,
         load_in_4bit=config["model"].get("load_in_4bit", True),
-        tiled_mlp=False,
-        offload_embedding=False,
+        tiled_mlp=use_tiled_mlp,
+        offload_embedding=use_offload,
     )
 
     # Apply LoRA if the checkpoint doesn't already have adapters
@@ -140,6 +150,24 @@ def train_ipo(config_path: str = "configs/ipo.yaml", cli_overrides: dict | None 
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
     )
+
+    # KL divergence monitoring — abort if preference margins diverge
+    from transformers import TrainerCallback
+
+    class KLMonitorCallback(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs and "rewards/margins" in logs:
+                margin = logs["rewards/margins"]
+                kl_config = config.get("kl_monitoring", {})
+                warn_thresh = kl_config.get("warn_threshold", 0.3)
+                abort_thresh = kl_config.get("abort_threshold", 0.5)
+                if margin > abort_thresh:
+                    print(f"WARNING: KL divergence too high ({margin:.3f} > {abort_thresh}), stopping")
+                    control.should_training_stop = True
+                elif margin > warn_thresh:
+                    print(f"  KL warning: margin={margin:.3f} (threshold={abort_thresh})")
+
+    trainer.add_callback(KLMonitorCallback())
 
     # Clear any leaked VRAM from preprocessing before training starts
     import gc

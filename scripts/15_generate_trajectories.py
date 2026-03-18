@@ -80,6 +80,19 @@ TRAJECTORY_TEMPLATES = {
             "Write tests first, then implement."
         ),
     },
+    "plan_and_execute": {
+        "developer_prompt": (
+            "You are a Rust coding agent. Break down the task into steps, "
+            "then execute each step. Use tools to read files, understand "
+            "the codebase, and apply fixes."
+        ),
+        "task_template": (
+            "Implement the following change:\n\n"
+            "{description}\n\n"
+            "The relevant files are in the project. Start by understanding "
+            "the codebase structure, then plan your approach before making changes."
+        ),
+    },
 }
 
 
@@ -277,6 +290,248 @@ def generate_multi_step_trajectory(
     }
 
 
+def generate_planning_trajectory(
+    buggy_code: str,
+    fixed_code: str,
+    error_message: str,
+    file_path: str = "src/lib.rs",
+) -> dict[str, Any]:
+    """Generate a trajectory with explicit planning before execution.
+
+    Pattern: think about plan -> explore -> plan steps -> execute each step -> verify
+    """
+    template = TRAJECTORY_TEMPLATES["plan_and_execute"]
+
+    task = template["task_template"].format(
+        buggy_code=buggy_code[:3000],
+        error_message=error_message[:2000],
+        file_path=file_path,
+        description=f"Fix the error in `{file_path}`:\n```\n{error_message[:1000]}\n```",
+    )
+
+    # Step 1: Search/explore the codebase structure
+    search_call = _make_tool_call("repo_search", {"query": file_path.rsplit("/", 1)[-1].replace(".rs", "")})
+    search_result = _make_tool_result(
+        search_call["id"],
+        f"Found references in:\n  {file_path}\n  src/main.rs\n  tests/integration.rs",
+    )
+
+    # Step 2: Read the file to understand context
+    read_call = _make_tool_call("read_file", {"path": file_path})
+    read_result = _make_tool_result(read_call["id"], buggy_code[:4000])
+
+    # Step 3: Read a related file for broader context
+    related_path = "src/main.rs" if file_path != "src/main.rs" else "src/utils.rs"
+    read2_call = _make_tool_call("read_file", {"path": related_path})
+    read2_result = _make_tool_result(
+        read2_call["id"],
+        f"// {related_path}\nuse crate::*;\n\nfn main() {{\n    // uses functions from {file_path}\n}}",
+    )
+
+    # Step 4: Apply the planned fix
+    diff = _generate_simple_diff(buggy_code, fixed_code, file_path)
+    patch_call = _make_tool_call("apply_patch", {"diff": diff})
+    patch_result = _make_tool_result(patch_call["id"], "Patch applied successfully.")
+
+    # Step 5: Run tests to verify
+    test_call = _make_tool_call("run_tests", {"cmd": "cargo test"})
+    test_result = _make_tool_result(test_call["id"], "test result: ok. 0 passed; 0 failed; 0 ignored")
+
+    trajectory = [
+        {
+            "thinking": (
+                "I need to understand the codebase before making changes. "
+                "Let me search for related files first."
+            ),
+            "tool_calls": [search_call],
+            "tool_results": [search_result],
+        },
+        {
+            "thinking": (
+                f"Found references in multiple files. Let me read `{file_path}` "
+                "to understand the error context."
+            ),
+            "tool_calls": [read_call],
+            "tool_results": [read_result],
+        },
+        {
+            "thinking": (
+                f"I see the error in `{file_path}`. Let me also check `{related_path}` "
+                "to understand how this module is used, so my fix doesn't break callers."
+            ),
+            "tool_calls": [read2_call],
+            "tool_results": [read2_result],
+        },
+        {
+            "thinking": (
+                f"Now I have a clear picture. Here's my plan:\n"
+                f"1. Fix the root cause in `{file_path}` — the error says: "
+                f"{error_message[:200]}\n"
+                f"2. The fix should be minimal and not change the public API\n"
+                f"3. Verify with cargo test\n\n"
+                "Let me apply the fix."
+            ),
+            "tool_calls": [patch_call],
+            "tool_results": [patch_result],
+        },
+        {
+            "thinking": "Fix applied. Running tests to verify everything works.",
+            "tool_calls": [test_call],
+            "tool_results": [test_result],
+            "response": "The fix has been applied and all tests pass.",
+        },
+    ]
+
+    return {
+        "task": task,
+        "trajectory": trajectory,
+        "developer_prompt": template["developer_prompt"],
+    }
+
+
+def generate_self_correction_trajectory(
+    buggy_code: str,
+    fixed_code: str,
+    error_message: str,
+    file_path: str = "src/lib.rs",
+) -> dict[str, Any]:
+    """Generate a trajectory with explicit diagnosis and correction.
+
+    6-turn pattern:
+    1. Read file
+    2. Apply wrong fix (plausible but incorrect)
+    3. Run tests -> fail
+    4. Diagnose: read error output, think about what went wrong
+    5. Apply correct fix
+    6. Run tests -> pass
+
+    The key difference from generate_multi_step_trajectory is the
+    explicit diagnosis step (turn 4) with detailed thinking about
+    WHY the first attempt failed.
+    """
+    template = TRAJECTORY_TEMPLATES["fix_compilation_error"]
+
+    task = template["task_template"].format(
+        buggy_code=buggy_code[:3000],
+        error_message=error_message[:2000],
+        file_path=file_path,
+        description="",
+    )
+
+    # Step 1: Read file
+    read_call = _make_tool_call("read_file", {"path": file_path})
+    read_result = _make_tool_result(read_call["id"], buggy_code[:4000])
+
+    # Step 2: First (wrong) attempt — plausible but incorrect
+    wrong_patch = _generate_simple_diff(buggy_code, buggy_code, file_path)
+    wrong_call = _make_tool_call("apply_patch", {"diff": wrong_patch})
+    wrong_result = _make_tool_result(wrong_call["id"], "Patch applied successfully.")
+
+    # Step 3: Tests fail
+    test_fail_call = _make_tool_call("run_tests", {"cmd": "cargo test"})
+    test_fail_result = _make_tool_result(
+        test_fail_call["id"],
+        f"test result: FAILED.\n{error_message[:1000]}",
+    )
+
+    # Step 4: Diagnostic — re-read the error and the file
+    diag_call = _make_tool_call("read_file", {"path": file_path})
+    diag_result = _make_tool_result(diag_call["id"], buggy_code[:4000])
+
+    # Step 5: Apply correct fix
+    diff = _generate_simple_diff(buggy_code, fixed_code, file_path)
+    fix_call = _make_tool_call("apply_patch", {"diff": diff})
+    fix_result = _make_tool_result(fix_call["id"], "Patch applied successfully.")
+
+    # Step 6: Tests pass
+    test_pass_call = _make_tool_call("run_tests", {"cmd": "cargo test"})
+    test_pass_result = _make_tool_result(
+        test_pass_call["id"],
+        "test result: ok. 0 passed; 0 failed; 0 ignored",
+    )
+
+    # Build a richer diagnostic thinking based on error type
+    if "borrow" in error_message.lower() or "lifetime" in error_message.lower():
+        wrong_reasoning = (
+            "I addressed the symptom (the type error) rather than the root cause "
+            "(the lifetime issue). The error message says the borrowed value does "
+            "not live long enough, which means I need to change the ownership "
+            "model, not just the type annotation."
+        )
+    elif "type" in error_message.lower() or "mismatch" in error_message.lower():
+        wrong_reasoning = (
+            "I tried to fix the type mismatch with a cast, but the real issue "
+            "is that the function signature expects a different type entirely. "
+            "I need to change the argument type, not force a conversion."
+        )
+    elif "test" in error_message.lower() or "assert" in error_message.lower():
+        wrong_reasoning = (
+            "My first fix addressed the compilation but broke the logic. "
+            "The test assertion shows the expected output differs from what "
+            "my code produces. I need to fix the algorithm, not just the types."
+        )
+    else:
+        wrong_reasoning = (
+            "My first attempt was a surface-level fix that didn't address "
+            "the root cause. Looking at the error more carefully, I can see "
+            "the real issue is in the logic flow, not just syntax."
+        )
+
+    trajectory = [
+        {
+            "thinking": f"Let me read `{file_path}` to understand the issue.",
+            "tool_calls": [read_call],
+            "tool_results": [read_result],
+        },
+        {
+            "thinking": (
+                "I think I see the problem. Let me try a quick fix."
+            ),
+            "tool_calls": [wrong_call],
+            "tool_results": [wrong_result],
+        },
+        {
+            "thinking": "Let me verify by running tests.",
+            "tool_calls": [test_fail_call],
+            "tool_results": [test_fail_result],
+        },
+        {
+            "thinking": (
+                f"The tests still fail. Let me re-read the code and error carefully "
+                f"to understand what went wrong.\n\n"
+                f"My first fix was wrong because: {wrong_reasoning}\n\n"
+                f"Let me re-read the file to find the correct approach."
+            ),
+            "tool_calls": [diag_call],
+            "tool_results": [diag_result],
+        },
+        {
+            "thinking": (
+                "Now I understand the root cause. The correct fix is different "
+                "from my initial attempt. Let me apply it."
+            ),
+            "tool_calls": [fix_call],
+            "tool_results": [fix_result],
+        },
+        {
+            "thinking": "Applied the correct fix. Let me verify it passes all tests.",
+            "tool_calls": [test_pass_call],
+            "tool_results": [test_pass_result],
+            "response": (
+                "Fixed! My first attempt was wrong — I addressed the symptom "
+                "rather than the root cause. After re-reading the error and code, "
+                "I applied the correct fix and all tests pass now."
+            ),
+        },
+    ]
+
+    return {
+        "task": task,
+        "trajectory": trajectory,
+        "developer_prompt": template["developer_prompt"],
+    }
+
+
 def _generate_simple_diff(old_code: str, new_code: str, file_path: str) -> str:
     """Generate a simplified unified diff between old and new code."""
     old_lines = old_code.splitlines(keepends=True)
@@ -299,6 +554,8 @@ def generate_trajectories_from_mutations(
     output_dir: str,
     max_samples: int = 5000,
     multi_step_ratio: float = 0.3,
+    planning_ratio: float = 0.2,
+    self_correction_ratio: float = 0.15,
 ) -> int:
     """Generate trajectory data from cargo-mutants output.
 
@@ -307,6 +564,8 @@ def generate_trajectories_from_mutations(
         output_dir: Output directory for HF dataset.
         max_samples: Maximum number of trajectories to generate.
         multi_step_ratio: Fraction of trajectories with multi-step retries.
+        planning_ratio: Fraction with planning/decomposition trajectories.
+        self_correction_ratio: Fraction with explicit self-correction trajectories.
 
     Returns:
         Number of trajectories generated.
@@ -351,9 +610,14 @@ def generate_trajectories_from_mutations(
         else:
             ttype = "fix_compilation_error"
 
-        # Generate multi-step or single-step
-        if random.random() < multi_step_ratio:
+        # Select trajectory type: multi-step, planning, self-correction, or basic fix
+        roll = random.random()
+        if roll < multi_step_ratio:
             traj = generate_multi_step_trajectory(buggy, fixed, error, file_path)
+        elif roll < multi_step_ratio + planning_ratio:
+            traj = generate_planning_trajectory(buggy, fixed, error, file_path)
+        elif roll < multi_step_ratio + planning_ratio + self_correction_ratio:
+            traj = generate_self_correction_trajectory(buggy, fixed, error, file_path)
         else:
             traj = generate_fix_trajectory(buggy, fixed, error, file_path, ttype)
 
@@ -469,6 +733,8 @@ def main(
     max_samples: int = 5000,
     include_strandset: bool = True,
     multi_step_ratio: float = 0.3,
+    planning_ratio: float = 0.2,
+    self_correction_ratio: float = 0.15,
 ) -> None:
     """Generate all trajectory training data.
 
@@ -478,6 +744,8 @@ def main(
         max_samples: Max trajectories per source.
         include_strandset: Whether to include Strandset-derived trajectories.
         multi_step_ratio: Fraction with multi-step retry behavior.
+        planning_ratio: Fraction with planning/decomposition trajectories.
+        self_correction_ratio: Fraction with explicit self-correction trajectories.
     """
     print(f"\n{'='*60}")
     print("Generating Agent Trajectory Training Data")
@@ -494,6 +762,7 @@ def main(
         mutation_output = os.path.join(output_dir, "from_mutations")
         count = generate_trajectories_from_mutations(
             mutations_path, mutation_output, max_samples, multi_step_ratio,
+            planning_ratio, self_correction_ratio,
         )
         total += count
     else:
@@ -529,6 +798,10 @@ if __name__ == "__main__":
     parser.add_argument("--max_samples", type=int, default=5000)
     parser.add_argument("--no-strandset", action="store_true", help="Skip Strandset generation")
     parser.add_argument("--multi_step_ratio", type=float, default=0.3)
+    parser.add_argument("--planning_ratio", type=float, default=0.2,
+                        help="Fraction of trajectories with planning/decomposition")
+    parser.add_argument("--self_correction_ratio", type=float, default=0.15,
+                        help="Fraction of trajectories with explicit self-correction")
     args = parser.parse_args()
 
     main(
@@ -537,4 +810,6 @@ if __name__ == "__main__":
         max_samples=args.max_samples,
         include_strandset=not args.no_strandset,
         multi_step_ratio=args.multi_step_ratio,
+        planning_ratio=args.planning_ratio,
+        self_correction_ratio=args.self_correction_ratio,
     )

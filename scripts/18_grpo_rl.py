@@ -33,6 +33,9 @@ from pipeline_lib.unsloth_utils import load_unsloth_model, save_adapter, print_t
 from pipeline_lib.evaluator_dispatch import compute_execution_reward
 
 
+_COMPLEXITY_ORDER = {"simple": 0, "moderate": 1, "complex": 2, "expert": 3}
+
+
 def load_tasks(task_source: str, num_tasks: int = 1000) -> list[dict]:
     """Load GRPO training tasks.
 
@@ -62,32 +65,73 @@ def load_tasks(task_source: str, num_tasks: int = 1000) -> list[dict]:
                 break
             tasks.append(dict(example))
 
+    # Infer complexity for tasks missing a "complexity" field
+    for task in tasks:
+        if "complexity" not in task:
+            task["complexity"] = _infer_task_complexity(task)
+
     return tasks
 
 
-def get_curriculum_seq_length(step: int, curriculum: dict) -> int:
-    """Get the sequence length for the current training step.
+def _infer_task_complexity(task: dict) -> str:
+    """Infer task complexity from heuristics (file count, code size, error chain)."""
+    desc = task.get("description", "")
+    files = task.get("files", [])
+    code = task.get("code", "") or task.get("buggy_code", "")
 
-    Args:
-        step: Current training step.
-        curriculum: Curriculum config with schedule entries.
+    file_count = len(files) if files else desc.count(".rs") + desc.count(".py")
+    code_lines = code.count("\n") if code else 0
 
-    Returns:
-        Maximum sequence length for this step.
+    if file_count >= 4 or code_lines > 200:
+        return "expert"
+    if file_count >= 2 or code_lines > 100:
+        return "complex"
+    if code_lines > 50 or "module" in desc.lower():
+        return "moderate"
+    return "simple"
+
+
+def get_curriculum_stage(step: int, curriculum: dict) -> dict:
+    """Get curriculum parameters for the current step.
+
+    Returns dict with keys: seq_length, max_turns, complexity.
     """
     if not curriculum.get("enabled", False):
-        return 32768
+        return {"seq_length": 32768, "max_turns": 12, "complexity": "expert"}
 
     schedule = curriculum.get("schedule", [])
-    seq_length = 4096  # default
+    stage = {"seq_length": 4096, "max_turns": 3, "complexity": "simple"}
 
     for entry in schedule:
         if step <= entry["steps"]:
-            seq_length = entry["seq_length"]
+            stage = {
+                "seq_length": entry["seq_length"],
+                "max_turns": entry.get("max_turns", 12),
+                "complexity": entry.get("complexity", "expert"),
+            }
             break
-        seq_length = entry["seq_length"]
+        stage = {
+            "seq_length": entry["seq_length"],
+            "max_turns": entry.get("max_turns", 12),
+            "complexity": entry.get("complexity", "expert"),
+        }
 
-    return seq_length
+    return stage
+
+
+def detect_recovery_pattern(completion: str) -> bool:
+    """Check if completion shows a fail->diagnose->succeed pattern."""
+    markers = [
+        ("FAILED", "test result: ok"),           # test failure -> success
+        ("error[E", "Patch applied successfully"),  # compile error -> fix
+        ("wrong", "correct"),                     # self-correction language
+    ]
+    for fail_marker, success_marker in markers:
+        fail_pos = completion.find(fail_marker)
+        success_pos = completion.rfind(success_marker)
+        if fail_pos >= 0 and success_pos > fail_pos:
+            return True
+    return False
 
 
 def compute_rewards_batch(
@@ -105,9 +149,12 @@ def compute_rewards_batch(
     Returns:
         List of float rewards.
     """
+    recovery_bonus = reward_config.get("recovery_bonus", 0.0)
     rewards = []
     for code in completions:
         reward = compute_execution_reward(code, language=language, reward_config=reward_config)
+        if recovery_bonus > 0 and detect_recovery_pattern(code):
+            reward += recovery_bonus
         rewards.append(reward)
     return rewards
 
@@ -134,17 +181,28 @@ def train_grpo(config_path: str = "configs/grpo.yaml", cli_overrides: dict | Non
     print(f"GRPO RL Training: {config['run_name']}")
     print(f"{'='*60}")
 
-    # Load model
+    # Load model with B200 auto-detection
     checkpoint = cli_overrides.get("checkpoint", config["model"]["checkpoint"])
     max_seq_length = config["model"].get("max_seq_length", 32768)
 
+    from pipeline_lib.gpu_detection import detect_gpu_type
+    gpu_info = detect_gpu_type()
+    is_b200 = gpu_info.get("is_b200", False)
+
+    # B200 (191GB): disable VRAM-saving features for 4.3x faster steps
+    # H100 (80GB): keep them enabled for VRAM savings
+    use_tiled_mlp = config["model"].get("tiled_mlp", not is_b200)
+    use_offload = config["model"].get("offload_embedding", not is_b200)
+
     print(f"\nLoading model from: {checkpoint}")
+    if is_b200:
+        print(f"  B200 detected: tiled_mlp={use_tiled_mlp}, offload_embedding={use_offload}")
     model, tokenizer = load_unsloth_model(
         model_name=checkpoint,
         max_seq_length=max_seq_length,
         load_in_4bit=config["model"].get("load_in_4bit", True),
-        tiled_mlp=True,           # GRPO runs at 32K+ context; needs VRAM savings
-        offload_embedding=True,   # GRPO runs at 32K+ context; needs VRAM savings
+        tiled_mlp=use_tiled_mlp,
+        offload_embedding=use_offload,
     )
     print_trainable_params(model)
 
@@ -305,11 +363,22 @@ def _train_manual_grpo(
     print(f"\nStarting manual GRPO loop (max_steps={max_steps})...")
 
     while step < max_steps:
-        task = tasks[task_idx % len(tasks)]
-        task_idx += 1
+        # Get curriculum stage (seq_length + complexity tier)
+        stage = get_curriculum_stage(step, curriculum)
+        seq_length = stage["seq_length"]
+        complexity = stage["complexity"]
 
-        # Get curriculum sequence length
-        seq_length = get_curriculum_seq_length(step, curriculum)
+        # Filter tasks by complexity tier
+        complexity_rank = _COMPLEXITY_ORDER.get(complexity, 3)
+        eligible = [
+            t for t in tasks
+            if _COMPLEXITY_ORDER.get(t.get("complexity", "simple"), 0) <= complexity_rank
+        ]
+        if not eligible:
+            eligible = tasks  # fallback
+
+        task = eligible[task_idx % len(eligible)]
+        task_idx += 1
 
         # Format prompt
         desc = task.get("description", "")
@@ -379,8 +448,9 @@ def _train_manual_grpo(
                 "max_reward": max(rewards) if rewards else 0,
                 "min_reward": min(rewards) if rewards else 0,
                 "seq_length": seq_length,
+                "complexity": complexity,
             }
-            print(f"  Step {step}/{max_steps} | reward: {mean_reward:.3f} (max: {max(rewards):.3f}) | seq_len: {seq_length}")
+            print(f"  Step {step}/{max_steps} | reward: {mean_reward:.3f} (max: {max(rewards):.3f}) | seq_len: {seq_length} | complexity: {complexity}")
 
             with open(log_path, "a") as f:
                 f.write(json.dumps(log_entry) + "\n")
