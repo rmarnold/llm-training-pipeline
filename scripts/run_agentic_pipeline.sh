@@ -113,8 +113,17 @@ elif [ "$SKIP_DATA" = true ]; then
   log "=== Skipping data generation (--skip-data) ==="
 else
   log "=== Stage 1: Generating mutations ==="
+  # --check-only: uses `cargo check` instead of `cargo test` — avoids
+  #   "cargo build failed in unmutated tree" errors from missing test deps
+  #   in headless RunPod environments.  Produces compiler-error mutations.
+  # --in-place: skip copying repo to temp dir (saves disk I/O)
+  # --repo-workers 8: cap parallelism to avoid overwhelming the system
   python scripts/16_generate_mutations.py \
     --output_dir data/rust/mutations \
+    --check-only \
+    --in-place \
+    --repo-workers 8 \
+    --jobs 32 \
     2>&1 | tee "$LOG_DIR/01_mutations.log" || {
       log "WARNING: Mutation gen failed (Rust projects may not be available). Using Strandset fallback."
     }

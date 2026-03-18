@@ -97,6 +97,8 @@ def run_cargo_mutants(
     max_mutations: int = 100,
     jobs: int = 4,
     package: str | None = None,
+    check_only: bool = False,
+    in_place: bool = False,
 ) -> list[MutationResult]:
     """Run cargo-mutants on a Rust repository.
 
@@ -110,6 +112,12 @@ def run_cargo_mutants(
         max_mutations: Maximum number of mutations to generate.
         jobs: Number of parallel mutation tests.
         package: Specific package to mutate (for workspace repos).
+        check_only: If True, use ``--check`` mode (``cargo check`` instead
+            of ``cargo test``).  Much faster and avoids test-infrastructure
+            failures — ideal for headless / RunPod environments.  Produces
+            "unviable" (compiler-caught) mutations only.
+        in_place: If True, mutate source tree directly instead of copying
+            to a temp dir.  Saves disk I/O but leaves the repo dirty.
 
     Returns:
         List of MutationResult objects.
@@ -128,6 +136,20 @@ def run_cargo_mutants(
         "--output", output_dir,
         "--json",
     ]
+
+    # --check: only run `cargo check` (not `cargo test`) on each mutation.
+    # This catches compiler errors (borrow checker, type errors) without
+    # needing the full test infrastructure to build/run.  Avoids the
+    # "cargo build failed in an unmutated tree" error that occurs when
+    # test targets have complex/missing deps in headless environments.
+    if check_only:
+        cmd.append("--check")
+
+    # --in-place: mutate the source tree directly instead of copying to
+    # a temp dir.  Avoids copying the full /target dir and .git, saving
+    # significant disk I/O on large repos.
+    if in_place:
+        cmd.append("--in-place")
 
     # For workspace repos, target a specific package to avoid compiling
     # the entire workspace (which often has heavy/unrelated deps).

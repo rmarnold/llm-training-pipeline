@@ -119,6 +119,8 @@ def _process_one_repo(
     timeout: int,
     jobs_per_repo: int,
     backup_dir: str | None = None,
+    check_only: bool = False,
+    in_place: bool = False,
 ) -> tuple[str, list[dict[str, str]]]:
     """Process a single repo — clones, runs mutations, returns training data.
 
@@ -127,6 +129,8 @@ def _process_one_repo(
     Args:
         backup_dir: If set, copy the per-repo JSONL here after saving
             (e.g. a mounted Drive path for incremental backup).
+        check_only: Use ``--check`` mode (compilation only, no tests).
+        in_place: Mutate source tree directly instead of copying.
 
     Returns:
         Tuple of (repo_name, training_data_list).
@@ -145,6 +149,8 @@ def _process_one_repo(
         max_mutations=max_mutations,
         jobs=jobs_per_repo,
         package=entry.package,
+        check_only=check_only,
+        in_place=in_place,
     )
     print(f"  {repo_name}: {len(mutations)} mutations")
 
@@ -190,6 +196,8 @@ def generate_mutations(
     repo_workers: int = 0,
     no_cache: bool = False,
     backup_dir: str | None = None,
+    check_only: bool = False,
+    in_place: bool = False,
 ) -> str:
     """Run cargo-mutants on Rust repos and save training data.
 
@@ -290,6 +298,8 @@ def generate_mutations(
                     entry, clone_dir, output_dir,
                     max_mutations_per_repo, timeout_per_mutation, jobs_per_repo,
                     backup_dir=backup_dir,
+                    check_only=check_only,
+                    in_place=in_place,
                 )
                 all_training_data.extend(training_data)
             except Exception as e:
@@ -303,7 +313,7 @@ def generate_mutations(
                 pool.submit(
                     _process_one_repo, entry, clone_dir, output_dir,
                     max_mutations_per_repo, timeout_per_mutation, jobs_per_repo,
-                    backup_dir,
+                    backup_dir, check_only, in_place,
                 ): entry
                 for entry in pending_entries
             }
@@ -393,6 +403,11 @@ if __name__ == "__main__":
                         help="Force re-generation even if cached results exist.")
     parser.add_argument("--backup-dir", type=str, default=None,
                         help="Copy per-repo JSONLs and final outputs here (e.g. mounted Drive path).")
+    parser.add_argument("--check-only", dest="check_only", action="store_true",
+                        help="Use cargo-mutants --check mode (compilation only, no tests). "
+                             "Much faster and avoids test infrastructure failures on RunPod.")
+    parser.add_argument("--in-place", dest="in_place", action="store_true",
+                        help="Mutate source trees in-place instead of copying to temp dirs.")
     args = parser.parse_args()
 
     # Normalize repo names to URLs if needed
@@ -416,4 +431,6 @@ if __name__ == "__main__":
         repo_workers=args.repo_workers,
         no_cache=args.no_cache,
         backup_dir=args.backup_dir,
+        check_only=args.check_only,
+        in_place=args.in_place,
     )
