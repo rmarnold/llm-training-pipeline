@@ -147,11 +147,16 @@ def run_cargo_mutants(
 
     # --check: only run `cargo check` (not `cargo test`) on each mutation.
     # This catches compiler errors (borrow checker, type errors) without
-    # needing the full test infrastructure to build/run.  Avoids the
-    # "cargo build failed in an unmutated tree" error that occurs when
-    # test targets have complex/missing deps in headless environments.
+    # needing the full test infrastructure to build/run.
+    # --baseline skip: skip baseline check on the unmutated tree.
+    # The baseline check runs `cargo check --tests` which compiles test
+    # targets — these pull in dev-dependencies (mockall, proptest,
+    # tokio-macros, etc.) that fail in headless RunPod environments,
+    # causing "cargo check failed in an unmutated tree" for workspace
+    # repos like tokio and serde.  We know the repos compile (we just
+    # cloned them from stable branches), so skipping is safe.
     if check_only:
-        cmd.append("--check")
+        cmd.extend(["--check", "--baseline", "skip"])
 
     # For workspace repos, target a specific package to avoid compiling
     # the entire workspace (which often has heavy/unrelated deps).
