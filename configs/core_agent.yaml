@@ -37,8 +37,8 @@ training:
   lr_scheduler_type: "cosine"
   warmup_ratio: 0.05
 
-  per_device_train_batch_size: 1
-  gradient_accumulation_steps: 4  # Smaller effective batch (trajectories are long)
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 2  # Effective batch = 4
 
   bf16: true
   max_grad_norm: 0.5  # Tighter for long-context stability

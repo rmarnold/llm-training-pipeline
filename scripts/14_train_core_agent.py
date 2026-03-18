@@ -274,13 +274,21 @@ if __name__ == "__main__":
     for key in ["base_model", "max_steps", "num_train_epochs", "learning_rate",
                  "warmup_ratio", "per_device_train_batch_size",
                  "gradient_accumulation_steps", "save_steps", "eval_steps",
-                 "eval_strategy", "logging_steps", "max_seq_length", "packing",
-                 "pre_packed", "output_dir", "train_data_path", "val_data_path",
-                 "resume_from_checkpoint", "drive_checkpoint_backup"]:
+                 "eval_strategy", "logging_steps", "max_seq_length",
+                 "output_dir", "train_data_path", "val_data_path",
+                 "resume_from_checkpoint"]:
         val = getattr(args, key)
         if val is not None:
             cli_overrides[key] = val
 
+    # Handle store_true args separately — their default is False (not None),
+    # so the "is not None" check above would always override config values.
+    if args.packing:
+        cli_overrides["packing"] = True
+    if args.pre_packed:
+        cli_overrides["pre_packed"] = True
+    if args.drive_checkpoint_backup:
+        cli_overrides["drive_checkpoint_backup"] = True
     if args.no_merge_lang_adapter:
         cli_overrides["no_merge_lang_adapter"] = True
 
