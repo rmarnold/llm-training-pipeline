@@ -19,12 +19,13 @@ import math
 
 
 def profile_seq_lengths(
-    dataset_path: str,
+    dataset_path: str | None = None,
     tokenizer_name: str | None = None,
     tokenizer: object | None = None,
     text_column: str = "text",
     sample_size: int = 5000,
     target_percentile: float = 99.0,
+    dataset: object | None = None,
 ) -> dict:
     """Profile token length distribution and recommend optimal seq_len.
 
@@ -35,14 +36,36 @@ def profile_seq_lengths(
         text_column: Column name containing text data.
         sample_size: Number of examples to sample (0 = all).
         target_percentile: Percentile to cover (default 99).
+        dataset: Pre-loaded dataset (avoids reloading from disk).
 
     Returns:
         Dict with distribution stats and recommended seq_len.
     """
+    import glob
+    import os
+
     import numpy as np
     from datasets import load_from_disk
 
-    dataset = load_from_disk(dataset_path)
+    if dataset is None:
+        try:
+            dataset = load_from_disk(dataset_path)
+        except (FileNotFoundError, ValueError):
+            # Handle subdirectory datasets (e.g. from_strandset/, from_mutations/)
+            from datasets import concatenate_datasets
+
+            sub_dirs = sorted(glob.glob(os.path.join(dataset_path, "*/")))
+            parts = []
+            for d in sub_dirs:
+                try:
+                    parts.append(load_from_disk(d.rstrip("/")))
+                except Exception:
+                    pass
+            if not parts:
+                raise FileNotFoundError(
+                    f"No dataset found at {dataset_path} or its subdirectories"
+                )
+            dataset = concatenate_datasets(parts)
     total = len(dataset)
 
     if sample_size > 0 and total > sample_size:

@@ -154,6 +154,31 @@ print(total)
     log "ERROR: Too few trajectories ($TRAJ_COUNT). Check data pipeline."
     exit 1
   fi
+
+  # Upload training dataset to HuggingFace Hub
+  log "=== Uploading training dataset to HuggingFace Hub ==="
+  python -c "
+import os, glob
+from datasets import load_from_disk, concatenate_datasets
+from huggingface_hub import HfApi
+
+parts = []
+for d in sorted(glob.glob('data/rust/core_agent/train/*/')):
+    try:
+        parts.append(load_from_disk(d.rstrip('/')))
+    except: pass
+
+if not parts:
+    print('No datasets to upload')
+    exit(0)
+
+ds = concatenate_datasets(parts)
+print(f'Uploading {len(ds)} examples to HuggingFace Hub...')
+ds.push_to_hub('rmarnold/gpt-oss-20b-rust-agent-trajectories', private=True)
+print('Upload complete!')
+" 2>&1 | tee "$LOG_DIR/02b_upload_dataset.log" || {
+    log "WARNING: HF upload failed (non-fatal, continuing pipeline)"
+  }
 fi
 
 # ==========================================================================

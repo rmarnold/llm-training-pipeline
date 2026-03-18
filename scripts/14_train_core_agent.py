@@ -148,6 +148,7 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
             dataset_path=train_data_path,
             tokenizer=tokenizer,
             sample_size=5000,
+            dataset=train_dataset,
         )
         configured_seq_len = cli_overrides.get(
             "max_seq_length", config["data"].get("max_seq_length", 16384),
