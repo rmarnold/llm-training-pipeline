@@ -132,10 +132,18 @@ def run_cargo_mutants(
     cmd = [
         "cargo", "mutants",
         "--timeout", str(timeout_per_mutation),
-        "--jobs", str(jobs),
         "--output", output_dir,
         "--json",
     ]
+
+    # --in-place: mutate the source tree directly instead of copying to
+    # a temp dir.  Avoids copying the full /target dir and .git, saving
+    # significant disk I/O on large repos.  Incompatible with --jobs
+    # (cargo-mutants v27 forbids parallel jobs in in-place mode).
+    if in_place:
+        cmd.append("--in-place")
+    else:
+        cmd.extend(["--jobs", str(jobs)])
 
     # --check: only run `cargo check` (not `cargo test`) on each mutation.
     # This catches compiler errors (borrow checker, type errors) without
@@ -144,12 +152,6 @@ def run_cargo_mutants(
     # test targets have complex/missing deps in headless environments.
     if check_only:
         cmd.append("--check")
-
-    # --in-place: mutate the source tree directly instead of copying to
-    # a temp dir.  Avoids copying the full /target dir and .git, saving
-    # significant disk I/O on large repos.
-    if in_place:
-        cmd.append("--in-place")
 
     # For workspace repos, target a specific package to avoid compiling
     # the entire workspace (which often has heavy/unrelated deps).
