@@ -115,7 +115,6 @@ else
   log "=== Stage 1: Generating mutations ==="
   python scripts/16_generate_mutations.py \
     --output_dir data/rust/mutations \
-    --max_projects 10 \
     2>&1 | tee "$LOG_DIR/01_mutations.log" || {
       log "WARNING: Mutation gen failed (Rust projects may not be available). Using Strandset fallback."
     }

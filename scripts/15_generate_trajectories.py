@@ -671,8 +671,34 @@ def generate_trajectories_from_strandset(
         if i >= max_samples:
             break
 
-        prompt = example.get("prompt", "") or example.get("instruction", "")
-        solution = example.get("completion", "") or example.get("solution", "") or example.get("output", "")
+        # Strandset uses input_data (Python dict literal) + output_data (JSON)
+        prompt = ""
+        solution = ""
+        input_data = example.get("input_data", "")
+        output_data = example.get("output_data", "")
+
+        if input_data and output_data:
+            import ast
+            try:
+                parsed_input = ast.literal_eval(input_data) if isinstance(input_data, str) else input_data
+                code = parsed_input.get("code", "") if isinstance(parsed_input, dict) else ""
+            except (ValueError, SyntaxError):
+                code = ""
+            try:
+                parsed_output = json.loads(output_data) if isinstance(output_data, str) else output_data
+                solution = parsed_output.get("commented_code", "") or parsed_output.get("code", "")
+                if isinstance(parsed_output, dict):
+                    solution = solution or next(iter(parsed_output.values()), "")
+            except (json.JSONDecodeError, TypeError):
+                solution = ""
+
+            crate = example.get("crate_name", "unknown")
+            task_cat = example.get("task_category", "code_task")
+            prompt = f"[{task_cat}] In crate `{crate}`:\n\n```rust\n{code[:2000]}\n```"
+        else:
+            # Fallback for other dataset formats
+            prompt = example.get("prompt", "") or example.get("instruction", "")
+            solution = example.get("completion", "") or example.get("solution", "") or example.get("output", "")
 
         if not prompt or not solution:
             continue
