@@ -200,6 +200,7 @@ def train_core_agent(config_path="configs/core_agent.yaml", cli_overrides=None):
         save_total_limit=config["logging"].get("save_total_limit", 3),
         report_to=config["logging"].get("report_to", ["tensorboard"]),
         seed=config["training"].get("seed", 42),
+        group_by_length=config["training"].get("group_by_length", True),
         dataloader_num_workers=4,
         dataloader_pin_memory=True,
     )
